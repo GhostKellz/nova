@@ -1,0 +1,42 @@
+project = "nova-dev-environment"
+
+# Virtual Machines
+[vm.dev-vm]
+image = "/var/lib/nova/images/ubuntu-22.04.qcow2"
+cpu = 4
+memory = "4Gi"
+gpu_passthrough = false
+network = "bridge0"
+
+[vm.test-windows]
+image = "/var/lib/nova/images/windows11.qcow2"
+cpu = 8
+memory = "8Gi"
+gpu_passthrough = true
+network = "bridge0"
+
+# Containers (Capsules)
+[container.web-api]
+capsule = "ubuntu:22.04"
+volumes = ["./api:/srv/api", "./data:/data"]
+network = "nova-net"
+env.API_PORT = "8080"
+env.NODE_ENV = "development"
+
+[container.database]
+capsule = "postgres:15"
+volumes = ["./db-data:/var/lib/postgresql/data"]
+network = "nova-net"
+env.POSTGRES_DB = "nova"
+env.POSTGRES_USER = "nova"
+env.POSTGRES_PASSWORD = "secure123"
+
+# Networks
+[network.bridge0]
+type = "bridge"
+interfaces = ["enp6s0"]
+
+[network.nova-net]
+type = "overlay"
+driver = "quic"
+dns = true
