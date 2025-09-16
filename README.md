@@ -12,7 +12,7 @@
 
 ## Badges
 
-![Zig](https://img.shields.io/badge/Zig-v0.16-yellow?logo=zig)  
+![Rust](https://img.shields.io/badge/Rust-1.82+-orange?logo=rust)  
 ![VM](https://img.shields.io/badge/Virtualization-KVM%2FQEMU-blue?logo=linux)  
 ![Containers](https://img.shields.io/badge/Containers-Capsules-green?logo=docker)  
 ![Networking](https://img.shields.io/badge/Networking-Bridges%20%7C%20Overlay-orange?logo=networkx)  
@@ -22,7 +22,7 @@
 
 ## Overview
 
-**Nova** is a high-performance virtualization and container orchestration platform built entirely in Zig. It unifies **KVM/QEMU virtual machines**, **lightweight Capsule containers**, and **software-defined networking** under a single declarative interface.
+**Nova** is a high-performance virtualization and container orchestration platform built entirely in Rust. It unifies **KVM/QEMU virtual machines**, **lightweight Capsule containers**, and **software-defined networking** under a single declarative interface.
 
 Designed for modern Linux environments, Nova delivers bare-metal performance with enterprise-grade features through both an intuitive CLI and a native Wayland GUI. Perfect for developers, homelabs, and production deployments seeking alternatives to traditional virtualization stacks.
 
@@ -30,7 +30,7 @@ Designed for modern Linux environments, Nova delivers bare-metal performance wit
 
 ## Key Features
 
-- ⚡ **Zero-Overhead Runtime** – Zig's compile-time optimizations deliver consistent, predictable performance
+- ⚡ **Zero-Overhead Runtime** – Rust's compile-time optimizations deliver consistent, predictable performance
 - 🖥 **Enterprise Virtualization** – Full KVM/QEMU integration with advanced GPU passthrough capabilities  
 - 📦 **Lightweight Capsules** – Container technology with built-in snapshots, persistence, and isolation
 - 🧩 **Infrastructure as Code** – Declarative TOML configuration for reproducible, version-controlled deployments
@@ -92,15 +92,15 @@ nova logs container api
 ## Roadmap
 
 ### Phase 1 – Core
-- [ ] VM lifecycle management (KVM + QEMU via Zig bindings)  
+- [ ] VM lifecycle management (KVM + QEMU via Rust bindings)  
 - [ ] Capsule containers (namespaces + cgroups)  
 - [ ] TOML NovaFile parser  
 - [ ] Basic CLI (`nova run`, `nova ls`)  
 
 ### Phase 2 – Networking
 - [ ] Bridge + tap device support  
-- [ ] Overlay networks (QUIC via `zquic`)  
-- [ ] Built-in service discovery (`zdns`)  
+- [ ] Overlay networks (QUIC via `quinn`)  
+- [ ] Built-in service discovery (`trust-dns`)  
 - [ ] Firewall rules + NAT  
 
 ### Phase 3 – GUI
@@ -135,7 +135,7 @@ nova logs container api
 
 Nova embodies the principles of modern systems design:
 
-- **Performance First**: Zig's zero-cost abstractions and manual memory management eliminate runtime overhead
+- **Performance First**: Rust's zero-cost abstractions and memory safety eliminate runtime overhead
 - **Declarative Infrastructure**: TOML-based configuration ensures reproducible and version-controlled deployments  
 - **Unified Management**: Single interface for VMs, containers, and networking reduces operational complexity
 - **Native Integration**: Built for Wayland compositors and modern Linux distributions
