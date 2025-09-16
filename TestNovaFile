@@ -1,0 +1,61 @@
+# Generated NovaFile for lamp-stack template
+project = "test-lamp"
+
+[container.mysql]
+capsule = "mysql:8.0"
+volumes = [
+  "./mysql-data:/var/lib/mysql",
+]
+ports = [
+  "3306:3306",
+]
+runtime = "docker"
+autostart = true
+
+[container.mysql.env]
+MYSQL_USER = "webuser"
+MYSQL_ROOT_PASSWORD = "rootpass123"
+MYSQL_DATABASE = "webapp"
+MYSQL_PASSWORD = "webpass123"
+
+[container.mysql.bolt]
+memory_limit = "512Mi"
+cpu_limit = "1"
+
+[container.apache-php]
+capsule = "php:8.2-apache"
+volumes = [
+  "./web:/var/www/html",
+]
+ports = [
+  "80:80",
+  "443:443",
+]
+runtime = "docker"
+autostart = true
+
+[container.apache-php.bolt]
+memory_limit = "256Mi"
+cpu_limit = "0.5"
+
+[container.phpmyadmin]
+capsule = "phpmyadmin/phpmyadmin:latest"
+ports = [
+  "8080:80",
+]
+runtime = "docker"
+autostart = true
+
+[container.phpmyadmin.env]
+PMA_HOST = "mysql"
+PMA_USER = "root"
+PMA_PASSWORD = "rootpass123"
+
+[container.phpmyadmin.bolt]
+memory_limit = "128Mi"
+cpu_limit = "0.25"
+
+[network.lamp-network]
+type = "bridge"
+subnet = "172.20.0.0/16"
+
