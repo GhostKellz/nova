@@ -4,6 +4,7 @@ use std::fmt;
 pub enum NovaError {
     SystemCommandFailed,
     InvalidConfig,
+    ConfigError(String),
     VmNotFound(String),
     ContainerNotFound(String),
     LibvirtError(String),
@@ -18,6 +19,7 @@ impl fmt::Display for NovaError {
         match self {
             NovaError::SystemCommandFailed => write!(f, "System command failed"),
             NovaError::InvalidConfig => write!(f, "Invalid configuration"),
+            NovaError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
             NovaError::VmNotFound(name) => write!(f, "VM '{}' not found", name),
             NovaError::ContainerNotFound(name) => write!(f, "Container '{}' not found", name),
             NovaError::LibvirtError(msg) => write!(f, "Libvirt error: {}", msg),

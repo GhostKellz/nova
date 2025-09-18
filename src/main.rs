@@ -221,13 +221,15 @@ async fn main() -> Result<()> {
             println!("Built with Rust (version not available in this build)");
 
             // Check system capabilities
-            println!("\nSystem Capabilities:");
+            println!("
+System Capabilities:");
             println!("  KVM Available: {}", check_kvm_available());
             println!("  QEMU Available: {}", check_qemu_available());
             println!("  Libvirt Available: {}", vm_manager.check_libvirt());
 
             // Check container runtimes
-            println!("\nContainer Runtimes:");
+            println!("
+Container Runtimes:");
             let runtime = container_manager.check_container_runtime();
             println!("  Primary Runtime: {:?}", runtime);
             println!("  Bolt Available: {}", container_manager.check_bolt_available());
@@ -235,13 +237,15 @@ async fn main() -> Result<()> {
             println!("  Podman Available: {}", container_manager.check_podman_available());
 
             // Show template availability
-            println!("\nContainer Templates:");
+            println!("
+Container Templates:");
             println!("  Available Templates: {}", template_manager.get_templates().len());
         }
         Commands::Template { template_command } => {
             match template_command {
                 TemplateCommands::List { category: _ } => {
-                    println!("Available Container Templates:\n");
+                    println!("Available Container Templates:
+");
 
                     println!("{:<20} {:<15} {:<15} {:<10} {}", "NAME", "CATEGORY", "DIFFICULTY", "GPU", "DESCRIPTION");
                     println!("{}", "=".repeat(100));
@@ -268,7 +272,8 @@ async fn main() -> Result<()> {
                             println!("Recommended Runtime: {}", runtime);
                         }
 
-                        println!("\nContainers:");
+                        println!("
+Containers:");
                         for container in &template.containers {
                             println!("  - {}: {}", container.name, container.image);
                             if !container.ports.is_empty() {
@@ -279,12 +284,14 @@ async fn main() -> Result<()> {
                             }
                         }
 
-                        println!("\nNetworks:");
+                        println!("
+Networks:");
                         for network in &template.networks {
                             println!("  - {}: {} network", network.name, network.driver);
                         }
 
-                        println!("\nVolumes:");
+                        println!("
+Volumes:");
                         for volume in &template.volumes {
                             println!("  - {}: {}", volume.name, volume.description);
                         }

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Nova
+Comment=Wayland-Native Virtualization & Container Manager
+Exec=nova
+Icon=/data/projects/nova/assets/icons/nova-128.png
+Type=Application
+Categories=System;Virtualization;
+Terminal=false
+StartupNotify=true
+Keywords=virtualization;containers;vm;kvm;qemu;

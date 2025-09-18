@@ -370,85 +370,139 @@ impl EnhancedVmManager {
         let memory_kb = self.parse_memory_mb(&config.memory)? * 1024;
 
         let mut xml = String::new();
-        xml.push_str("<?xml version='1.0' encoding='UTF-8'?>\n");
-        xml.push_str("<domain type='kvm'>\n");
-        xml.push_str(&format!("  <name>{}</name>\n", name));
-        xml.push_str(&format!("  <memory unit='KiB'>{}</memory>\n", memory_kb));
-        xml.push_str(&format!("  <currentMemory unit='KiB'>{}</currentMemory>\n", memory_kb));
-        xml.push_str(&format!("  <vcpu placement='static'>{}</vcpu>\n", config.cpu));
+        xml.push_str("<?xml version='1.0' encoding='UTF-8'?>
+");
+        xml.push_str("<domain type='kvm'>
+");
+        xml.push_str(&format!("  <name>{}</name>
+", name));
+        xml.push_str(&format!("  <memory unit='KiB'>{}</memory>
+", memory_kb));
+        xml.push_str(&format!("  <currentMemory unit='KiB'>{}</currentMemory>
+", memory_kb));
+        xml.push_str(&format!("  <vcpu placement='static'>{}</vcpu>
+", config.cpu));
 
-        xml.push_str("  <os>\n");
-        xml.push_str("    <type arch='x86_64' machine='pc-q35-4.2'>hvm</type>\n");
-        xml.push_str("    <boot dev='hd'/>\n");
-        xml.push_str("  </os>\n");
+        xml.push_str("  <os>
+");
+        xml.push_str("    <type arch='x86_64' machine='pc-q35-4.2'>hvm</type>
+");
+        xml.push_str("    <boot dev='hd'/>
+");
+        xml.push_str("  </os>
+");
 
-        xml.push_str("  <features>\n");
-        xml.push_str("    <acpi/>\n");
-        xml.push_str("    <apic/>\n");
-        xml.push_str("  </features>\n");
+        xml.push_str("  <features>
+");
+        xml.push_str("    <acpi/>
+");
+        xml.push_str("    <apic/>
+");
+        xml.push_str("  </features>
+");
 
-        xml.push_str("  <cpu mode='host-passthrough' check='none'/>\n");
+        xml.push_str("  <cpu mode='host-passthrough' check='none'/>
+");
 
-        xml.push_str("  <clock offset='utc'>\n");
-        xml.push_str("    <timer name='rtc' tickpolicy='catchup'/>\n");
-        xml.push_str("    <timer name='pit' tickpolicy='delay'/>\n");
-        xml.push_str("    <timer name='hpet' present='no'/>\n");
-        xml.push_str("  </clock>\n");
+        xml.push_str("  <clock offset='utc'>
+");
+        xml.push_str("    <timer name='rtc' tickpolicy='catchup'/>
+");
+        xml.push_str("    <timer name='pit' tickpolicy='delay'/>
+");
+        xml.push_str("    <timer name='hpet' present='no'/>
+");
+        xml.push_str("  </clock>
+");
 
-        xml.push_str("  <on_poweroff>destroy</on_poweroff>\n");
-        xml.push_str("  <on_reboot>restart</on_reboot>\n");
-        xml.push_str("  <on_crash>destroy</on_crash>\n");
+        xml.push_str("  <on_poweroff>destroy</on_poweroff>
+");
+        xml.push_str("  <on_reboot>restart</on_reboot>
+");
+        xml.push_str("  <on_crash>destroy</on_crash>
+");
 
-        xml.push_str("  <devices>\n");
-        xml.push_str("    <emulator>/usr/bin/qemu-system-x86_64</emulator>\n");
+        xml.push_str("  <devices>
+");
+        xml.push_str("    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+");
 
         // Disk configuration
         if let Some(image_path) = &config.image {
-            xml.push_str("    <disk type='file' device='disk'>\n");
-            xml.push_str("      <driver name='qemu' type='qcow2'/>\n");
-            xml.push_str(&format!("      <source file='{}'/>\n", image_path));
-            xml.push_str("      <target dev='vda' bus='virtio'/>\n");
-            xml.push_str("    </disk>\n");
+            xml.push_str("    <disk type='file' device='disk'>
+");
+            xml.push_str("      <driver name='qemu' type='qcow2'/>
+");
+            xml.push_str(&format!("      <source file='{}'/>
+", image_path));
+            xml.push_str("      <target dev='vda' bus='virtio'/>
+");
+            xml.push_str("    </disk>
+");
         } else {
             // Create temporary disk if no image specified
             let temp_disk = format!("/tmp/nova_{}.qcow2", name);
-            xml.push_str("    <disk type='file' device='disk'>\n");
-            xml.push_str("      <driver name='qemu' type='qcow2'/>\n");
-            xml.push_str(&format!("      <source file='{}'/>\n", temp_disk));
-            xml.push_str("      <target dev='vda' bus='virtio'/>\n");
-            xml.push_str("    </disk>\n");
+            xml.push_str("    <disk type='file' device='disk'>
+");
+            xml.push_str("      <driver name='qemu' type='qcow2'/>
+");
+            xml.push_str(&format!("      <source file='{}'/>
+", temp_disk));
+            xml.push_str("      <target dev='vda' bus='virtio'/>
+");
+            xml.push_str("    </disk>
+");
         }
 
         // Network configuration
         if let Some(network) = &config.network {
-            xml.push_str("    <interface type='network'>\n");
-            xml.push_str(&format!("      <source network='{}'/>\n", network));
-            xml.push_str("      <model type='virtio'/>\n");
-            xml.push_str("    </interface>\n");
+            xml.push_str("    <interface type='network'>
+");
+            xml.push_str(&format!("      <source network='{}'/>
+", network));
+            xml.push_str("      <model type='virtio'/>
+");
+            xml.push_str("    </interface>
+");
         } else {
-            xml.push_str("    <interface type='network'>\n");
-            xml.push_str("      <source network='default'/>\n");
-            xml.push_str("      <model type='virtio'/>\n");
-            xml.push_str("    </interface>\n");
+            xml.push_str("    <interface type='network'>
+");
+            xml.push_str("      <source network='default'/>
+");
+            xml.push_str("      <model type='virtio'/>
+");
+            xml.push_str("    </interface>
+");
         }
 
         // Graphics and input
-        xml.push_str("    <graphics type='vnc' port='-1' autoport='yes'/>\n");
-        xml.push_str("    <input type='tablet' bus='usb'/>\n");
-        xml.push_str("    <input type='mouse' bus='ps2'/>\n");
-        xml.push_str("    <input type='keyboard' bus='ps2'/>\n");
+        xml.push_str("    <graphics type='vnc' port='-1' autoport='yes'/>
+");
+        xml.push_str("    <input type='tablet' bus='usb'/>
+");
+        xml.push_str("    <input type='mouse' bus='ps2'/>
+");
+        xml.push_str("    <input type='keyboard' bus='ps2'/>
+");
 
         // GPU passthrough if enabled
         if config.gpu_passthrough {
-            xml.push_str("    <hostdev mode='subsystem' type='pci' managed='yes'>\n");
-            xml.push_str("      <source>\n");
-            xml.push_str("        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>\n");
-            xml.push_str("      </source>\n");
-            xml.push_str("    </hostdev>\n");
+            xml.push_str("    <hostdev mode='subsystem' type='pci' managed='yes'>
+");
+            xml.push_str("      <source>
+");
+            xml.push_str("        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+");
+            xml.push_str("      </source>
+");
+            xml.push_str("    </hostdev>
+");
         }
 
-        xml.push_str("  </devices>\n");
-        xml.push_str("</domain>\n");
+        xml.push_str("  </devices>
+");
+        xml.push_str("</domain>
+");
 
         Ok(xml)
     }

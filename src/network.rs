@@ -16,7 +16,7 @@ pub struct VirtualSwitch {
     pub status: SwitchStatus,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SwitchType {
     LinuxBridge,
     OpenVSwitch,
@@ -229,18 +229,23 @@ impl NetworkManager {
     pub async fn add_interface_to_switch(&mut self, switch_name: &str, interface: &str) -> Result<()> {
         log_info!("Adding interface {} to switch {}", interface, switch_name);
 
-        if let Some(switch) = self.switches.get_mut(switch_name) {
-            match switch.switch_type {
-                SwitchType::LinuxBridge => {
-                    self.add_interface_to_linux_bridge(switch_name, interface).await?;
-                }
-                SwitchType::OpenVSwitch => {
-                    self.add_interface_to_ovs_bridge(switch_name, interface).await?;
-                }
-            }
-            switch.interfaces.push(interface.to_string());
+        let switch_type = if let Some(switch) = self.switches.get(switch_name) {
+            switch.switch_type.clone()
         } else {
             return Err(NovaError::NetworkNotFound(switch_name.to_string()));
+        };
+
+        match switch_type {
+            SwitchType::LinuxBridge => {
+                self.add_interface_to_linux_bridge(switch_name, interface).await?;
+            }
+            SwitchType::OpenVSwitch => {
+                self.add_interface_to_ovs_bridge(switch_name, interface).await?;
+            }
+        }
+
+        if let Some(switch) = self.switches.get_mut(switch_name) {
+            switch.interfaces.push(interface.to_string());
         }
 
         Ok(())
@@ -452,6 +457,7 @@ impl NetworkManager {
     }
 }
 
+impl NetworkManager {
     // Advanced Bridge Features
     pub async fn enable_port_mirroring(&self, bridge: &str, source_port: &str, target_port: &str) -> Result<()> {
         log_info!("Enabling port mirroring on bridge {}: {} -> {}", bridge, source_port, target_port);
@@ -532,21 +538,28 @@ impl NetworkManager {
         let mut dhcp_conf = String::new();
 
         // Basic configuration
-        dhcp_conf.push_str(&format!("interface={}\n", interface));
-        dhcp_conf.push_str(&format!("dhcp-range={},{},{},{}s\n",
+        dhcp_conf.push_str(&format!("interface={}
+", interface));
+        dhcp_conf.push_str(&format!("dhcp-range={},{},{},{}s
+",
                                    config.range_start, config.range_end,
                                    config.subnet_mask, config.lease_time));
-        dhcp_conf.push_str(&format!("dhcp-option=3,{}\n", config.gateway)); // Gateway
+        dhcp_conf.push_str(&format!("dhcp-option=3,{}
+", config.gateway)); // Gateway
 
         // DNS servers
         for (i, dns) in config.dns_servers.iter().enumerate() {
-            dhcp_conf.push_str(&format!("dhcp-option=6,{}\n", dns));
+            dhcp_conf.push_str(&format!("dhcp-option=6,{}
+", dns));
         }
 
         // No daemon mode, bind to interface
-        dhcp_conf.push_str("bind-interfaces\n");
-        dhcp_conf.push_str("no-daemon\n");
-        dhcp_conf.push_str("log-dhcp\n");
+        dhcp_conf.push_str("bind-interfaces
+");
+        dhcp_conf.push_str("no-daemon
+");
+        dhcp_conf.push_str("log-dhcp
+");
 
         // Write configuration
         std::fs::write(&conf_file, dhcp_conf).map_err(|e| {

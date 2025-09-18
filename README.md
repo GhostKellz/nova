@@ -1,7 +1,7 @@
 ## Nova
 
 <div align="center">
-  <img src="assets/icons/nova.png" alt="nova icon" width="128" height="128">
+  <img src="assets/nova-logo.png" alt="Nova Logo" width="128" height="128">
 
 **Wayland-Native Virtualization & Container Manager**  
 *Bare metal speed. Declarative control. GPU-first.*

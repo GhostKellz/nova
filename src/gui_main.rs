@@ -1,4 +1,6 @@
 use eframe::egui;
+extern crate nova;
+
 use nova::{
     config::NovaConfig,
     container::ContainerManager,
