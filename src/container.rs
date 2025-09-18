@@ -167,11 +167,17 @@ impl ContainerManager {
     fn generate_container_script(&self, name: &str, config: &ContainerConfig) -> Result<String> {
         let mut script = String::new();
 
-        script.push_str("#!/bin/bash\n");
-        script.push_str("set -e\n\n");
+        script.push_str("#!/bin/bash
+");
+        script.push_str("set -e
 
-        script.push_str(&format!("# Nova container script for '{}'\n", name));
-        script.push_str(&format!("echo \"Starting Nova container: {}\"\n\n", name));
+");
+
+        script.push_str(&format!("# Nova container script for '{}'
+", name));
+        script.push_str(&format!("echo \"Starting Nova container: {}\"
+
+", name));
 
         // Set process name for easy identification
         script.push_str(&format!("exec -a nova-container-{} ", name));

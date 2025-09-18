@@ -71,4 +71,526 @@ impl ArchNetworkManager {
     }
 
     // Detect current network management system
-    pub async fn detect_network_manager(&mut self) -> Result<()> {\n        log_info!(\"Detecting Arch Linux network management system\");\n\n        // Check if systemd-networkd is active\n        self.config.use_systemd_networkd = self.is_systemd_networkd_active().await;\n\n        // Check if NetworkManager is active\n        self.config.use_network_manager = self.is_network_manager_active().await;\n\n        if self.config.use_systemd_networkd {\n            log_info!(\"Detected systemd-networkd as active network manager\");\n            self.discover_systemd_configs().await?;\n        }\n\n        if self.config.use_network_manager {\n            log_info!(\"Detected NetworkManager as active network manager\");\n            self.discover_nm_profiles().await?;\n        }\n\n        if !self.config.use_systemd_networkd && !self.config.use_network_manager {\n            log_warn!(\"No managed network system detected, using manual configuration\");\n        }\n\n        self.discover_interfaces().await?;\n        Ok(())\n    }\n\n    async fn is_systemd_networkd_active(&self) -> bool {\n        Command::new(\"systemctl\")\n            .args(&[\"is-active\", \"systemd-networkd\"])\n            .output()\n            .map(|output| output.status.success())\n            .unwrap_or(false)\n    }\n\n    async fn is_network_manager_active(&self) -> bool {\n        Command::new(\"systemctl\")\n            .args(&[\"is-active\", \"NetworkManager\"])\n            .output()\n            .map(|output| output.status.success())\n            .unwrap_or(false)\n    }\n\n    // SystemD-networkd integration\n    async fn discover_systemd_configs(&mut self) -> Result<()> {\n        log_debug!(\"Discovering systemd-networkd configurations\");\n\n        let config_dirs = [\n            \"/etc/systemd/network\",\n            \"/run/systemd/network\",\n            \"/usr/lib/systemd/network\",\n        ];\n\n        for config_dir in &config_dirs {\n            if let Ok(entries) = fs::read_dir(config_dir) {\n                for entry in entries {\n                    if let Ok(entry) = entry {\n                        let path = entry.path();\n                        if let Some(extension) = path.extension() {\n                            if extension == \"network\" || extension == \"netdev\" {\n                                if let Ok(config) = self.parse_systemd_config(&path).await {\n                                    self.systemd_configs.insert(config.name.clone(), config);\n                                }\n                            }\n                        }\n                    }\n                }\n            }\n        }\n\n        log_info!(\"Found {} systemd-networkd configurations\", self.systemd_configs.len());\n        Ok(())\n    }\n\n    async fn parse_systemd_config(&self, config_path: &Path) -> Result<SystemdNetworkdConfig> {\n        let content = fs::read_to_string(config_path)\n            .map_err(|_| NovaError::InvalidConfig)?;\n\n        let name = config_path\n            .file_stem()\n            .unwrap_or_default()\n            .to_string_lossy()\n            .to_string();\n\n        let mut config = SystemdNetworkdConfig {\n            name: name.clone(),\n            network_file: config_path.to_string_lossy().to_string(),\n            netdev_file: String::new(),\n            dhcp: false,\n            static_ip: None,\n            gateway: None,\n            dns: Vec::new(),\n        };\n\n        // Parse systemd network configuration\n        let mut in_network_section = false;\n        let mut in_address_section = false;\n\n        for line in content.lines() {\n            let line = line.trim();\n\n            if line == \"[Network]\" {\n                in_network_section = true;\n                in_address_section = false;\n                continue;\n            } else if line == \"[Address]\" {\n                in_address_section = true;\n                in_network_section = false;\n                continue;\n            } else if line.starts_with('[') {\n                in_network_section = false;\n                in_address_section = false;\n                continue;\n            }\n\n            if in_network_section {\n                if line.starts_with(\"DHCP=\") {\n                    config.dhcp = line.split('=').nth(1)\n                        .map(|v| v.trim().to_lowercase() == \"yes\" || v.trim() == \"true\")\n                        .unwrap_or(false);\n                } else if line.starts_with(\"Gateway=\") {\n                    config.gateway = line.split('=').nth(1).map(|v| v.trim().to_string());\n                } else if line.starts_with(\"DNS=\") {\n                    if let Some(dns_list) = line.split('=').nth(1) {\n                        config.dns.extend(\n                            dns_list.split_whitespace()\n                                .map(|s| s.to_string())\n                        );\n                    }\n                }\n            }\n\n            if in_address_section {\n                if line.starts_with(\"Address=\") {\n                    config.static_ip = line.split('=').nth(1).map(|v| v.trim().to_string());\n                }\n            }\n        }\n\n        Ok(config)\n    }\n\n    pub async fn create_systemd_bridge(&self, bridge_name: &str, interfaces: &[String]) -> Result<()> {\n        log_info!(\"Creating systemd-networkd bridge: {}\", bridge_name);\n\n        // Create .netdev file for bridge\n        let netdev_content = format!(\n            \"[NetDev]\\nName={}\\nKind=bridge\\n\\n[Bridge]\\nSTP=yes\\n\",\n            bridge_name\n        );\n\n        let netdev_path = format!(\"/etc/systemd/network/25-{}.netdev\", bridge_name);\n        fs::write(&netdev_path, netdev_content).map_err(|e| {\n            log_error!(\"Failed to write netdev file: {}\", e);\n            NovaError::SystemCommandFailed\n        })?;\n\n        // Create .network file for bridge\n        let network_content = format!(\n            \"[Match]\\nName={}\\n\\n[Network]\\nDHCP=yes\\nIPForward=yes\\n\",\n            bridge_name\n        );\n\n        let network_path = format!(\"/etc/systemd/network/25-{}.network\", bridge_name);\n        fs::write(&network_path, network_content).map_err(|e| {\n            log_error!(\"Failed to write network file: {}\", e);\n            NovaError::SystemCommandFailed\n        })?;\n\n        // Create bind files for each interface\n        for interface in interfaces {\n            let bind_content = format!(\n                \"[Match]\\nName={}\\n\\n[Network]\\nBridge={}\\n\",\n                interface, bridge_name\n            );\n\n            let bind_path = format!(\"/etc/systemd/network/25-{}-bind.network\", interface);\n            fs::write(&bind_path, bind_content).map_err(|e| {\n                log_error!(\"Failed to write bind file for {}: {}\", interface, e);\n                NovaError::SystemCommandFailed\n            })?;\n        }\n\n        // Restart systemd-networkd\n        self.restart_systemd_networkd().await?;\n\n        log_info!(\"systemd-networkd bridge {} created successfully\", bridge_name);\n        Ok(())\n    }\n\n    async fn restart_systemd_networkd(&self) -> Result<()> {\n        let output = Command::new(\"systemctl\")\n            .args(&[\"restart\", \"systemd-networkd\"])\n            .output()\n            .map_err(|_| NovaError::SystemCommandFailed)?;\n\n        if !output.status.success() {\n            log_error!(\"Failed to restart systemd-networkd\");\n            return Err(NovaError::SystemCommandFailed);\n        }\n\n        // Wait a moment for networkd to settle\n        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;\n        Ok(())\n    }\n\n    // NetworkManager integration\n    async fn discover_nm_profiles(&mut self) -> Result<()> {\n        log_debug!(\"Discovering NetworkManager profiles\");\n\n        let output = Command::new(\"nmcli\")\n            .args(&[\"-t\", \"-f\", \"NAME,UUID,TYPE,DEVICE,AUTOCONNECT\", \"connection\", \"show\"])\n            .output()\n            .map_err(|_| NovaError::SystemCommandFailed)?;\n\n        if !output.status.success() {\n            return Ok(());\n        }\n\n        let connections = String::from_utf8_lossy(&output.stdout);\n        for line in connections.lines() {\n            let parts: Vec<&str> = line.split(':').collect();\n            if parts.len() >= 5 {\n                let profile = NetworkManagerProfile {\n                    name: parts[0].to_string(),\n                    uuid: parts[1].to_string(),\n                    connection_type: parts[2].to_string(),\n                    interface: if parts[3].is_empty() { None } else { Some(parts[3].to_string()) },\n                    autoconnect: parts[4] == \"yes\",\n                };\n                self.nm_profiles.push(profile);\n            }\n        }\n\n        log_info!(\"Found {} NetworkManager profiles\", self.nm_profiles.len());\n        Ok(())\n    }\n\n    pub async fn create_nm_bridge(&self, bridge_name: &str, interfaces: &[String]) -> Result<()> {\n        log_info!(\"Creating NetworkManager bridge: {}\", bridge_name);\n\n        // Create bridge connection\n        let output = Command::new(\"nmcli\")\n            .args(&[\"connection\", \"add\", \"type\", \"bridge\", \"con-name\", bridge_name, \"ifname\", bridge_name])\n            .output()\n            .map_err(|_| NovaError::SystemCommandFailed)?;\n\n        if !output.status.success() {\n            let error = String::from_utf8_lossy(&output.stderr);\n            log_error!(\"Failed to create NetworkManager bridge: {}\", error);\n            return Err(NovaError::SystemCommandFailed);\n        }\n\n        // Add interfaces to bridge\n        for interface in interfaces {\n            let slave_name = format!(\"{}-slave-{}\", bridge_name, interface);\n            let output = Command::new(\"nmcli\")\n                .args(&[\"connection\", \"add\", \"type\", \"bridge-slave\", \"con-name\", &slave_name, \"ifname\", interface, \"master\", bridge_name])\n                .output()\n                .map_err(|_| NovaError::SystemCommandFailed)?;\n\n            if !output.status.success() {\n                log_warn!(\"Failed to add interface {} to bridge {}\", interface, bridge_name);\n            }\n        }\n\n        // Bring up the bridge\n        let output = Command::new(\"nmcli\")\n            .args(&[\"connection\", \"up\", bridge_name])\n            .output()\n            .map_err(|_| NovaError::SystemCommandFailed)?;\n\n        if !output.status.success() {\n            log_error!(\"Failed to bring up NetworkManager bridge {}\", bridge_name);\n            return Err(NovaError::SystemCommandFailed);\n        }\n\n        log_info!(\"NetworkManager bridge {} created successfully\", bridge_name);\n        Ok(())\n    }\n\n    // Interface discovery\n    async fn discover_interfaces(&mut self) -> Result<()> {\n        log_debug!(\"Discovering network interfaces\");\n\n        // Get interface list\n        let output = Command::new(\"ip\")\n            .args(&[\"-j\", \"link\", \"show\"])\n            .output()\n            .map_err(|_| NovaError::SystemCommandFailed)?;\n\n        if !output.status.success() {\n            return Err(NovaError::SystemCommandFailed);\n        }\n\n        let json_str = String::from_utf8_lossy(&output.stdout);\n        let interfaces: serde_json::Value = serde_json::from_str(&json_str)\n            .map_err(|_| NovaError::InvalidConfig)?;\n\n        if let Some(interfaces_array) = interfaces.as_array() {\n            for interface_data in interfaces_array {\n                if let Some(name) = interface_data[\"ifname\"].as_str() {\n                    // Skip loopback and some virtual interfaces\n                    if name == \"lo\" || name.starts_with(\"veth\") {\n                        continue;\n                    }\n\n                    let driver = self.get_interface_driver(name).await.ok();\n                    let speed = self.get_interface_speed(name).await.ok();\n                    let managed_by = self.detect_interface_manager(name).await;\n                    let systemd_config = self.find_systemd_config_for_interface(name);\n\n                    let arch_interface = ArchInterface {\n                        name: name.to_string(),\n                        driver,\n                        speed,\n                        managed_by,\n                        systemd_config,\n                    };\n\n                    self.config.detected_interfaces.push(arch_interface);\n                }\n            }\n        }\n\n        log_info!(\"Discovered {} network interfaces\", self.config.detected_interfaces.len());\n        Ok(())\n    }\n\n    async fn get_interface_driver(&self, interface: &str) -> Result<String> {\n        let driver_path = format!(\"/sys/class/net/{}/device/driver\", interface);\n        if let Ok(link) = fs::read_link(&driver_path) {\n            if let Some(driver_name) = link.file_name() {\n                return Ok(driver_name.to_string_lossy().to_string());\n            }\n        }\n        Err(NovaError::NetworkNotFound(interface.to_string()))\n    }\n\n    async fn get_interface_speed(&self, interface: &str) -> Result<String> {\n        let speed_path = format!(\"/sys/class/net/{}/speed\", interface);\n        if let Ok(speed_content) = fs::read_to_string(&speed_path) {\n            let speed = speed_content.trim();\n            if speed != \"-1\" {\n                return Ok(format!(\"{}Mbps\", speed));\n            }\n        }\n        Err(NovaError::NetworkNotFound(interface.to_string()))\n    }\n\n    async fn detect_interface_manager(&self, interface: &str) -> InterfaceManager {\n        // Check if managed by NetworkManager\n        if self.config.use_network_manager {\n            let output = Command::new(\"nmcli\")\n                .args(&[\"-t\", \"-f\", \"DEVICE\", \"device\", \"status\"])\n                .output();\n\n            if let Ok(output) = output {\n                if output.status.success() {\n                    let devices = String::from_utf8_lossy(&output.stdout);\n                    if devices.lines().any(|line| line.trim() == interface) {\n                        return InterfaceManager::NetworkManager;\n                    }\n                }\n            }\n        }\n\n        // Check if has systemd-networkd config\n        if self.find_systemd_config_for_interface(interface).is_some() {\n            return InterfaceManager::SystemdNetworkd;\n        }\n\n        // Check if manually configured\n        let output = Command::new(\"ip\")\n            .args(&[\"addr\", \"show\", interface])\n            .output();\n\n        if let Ok(output) = output {\n            if output.status.success() {\n                let addr_info = String::from_utf8_lossy(&output.stdout);\n                if addr_info.contains(\"inet \") {\n                    return InterfaceManager::Manual;\n                }\n            }\n        }\n\n        InterfaceManager::Unknown\n    }\n\n    fn find_systemd_config_for_interface(&self, interface: &str) -> Option<String> {\n        for config in self.systemd_configs.values() {\n            if config.name.contains(interface) || config.network_file.contains(interface) {\n                return Some(config.network_file.clone());\n            }\n        }\n        None\n    }\n\n    // Arch-specific optimizations\n    pub async fn optimize_for_virtualization(&self) -> Result<()> {\n        log_info!(\"Applying Arch Linux virtualization optimizations\");\n\n        // Check and enable required kernel modules\n        self.ensure_kvm_modules().await?;\n\n        // Optimize systemd settings for virtualization\n        self.optimize_systemd_settings().await?;\n\n        // Configure user groups for KVM access\n        self.configure_kvm_groups().await?;\n\n        log_info!(\"Arch Linux optimizations applied successfully\");\n        Ok(())\n    }\n\n    async fn ensure_kvm_modules(&self) -> Result<()> {\n        let modules = [\"kvm\", \"kvm_intel\", \"kvm_amd\", \"vhost_net\", \"bridge\", \"br_netfilter\"];\n\n        for module in &modules {\n            let output = Command::new(\"modprobe\")\n                .arg(module)\n                .output()\n                .map_err(|_| NovaError::SystemCommandFailed)?;\n\n            if output.status.success() {\n                log_debug!(\"Loaded kernel module: {}\", module);\n            } else {\n                log_warn!(\"Failed to load kernel module: {}\", module);\n            }\n        }\n\n        // Persist module loading\n        let modules_conf = modules.join(\"\\n\");\n        fs::write(\"/etc/modules-load.d/nova-kvm.conf\", modules_conf).map_err(|e| {\n            log_error!(\"Failed to write modules config: {}\", e);\n            NovaError::SystemCommandFailed\n        })?;\n\n        Ok(())\n    }\n\n    async fn optimize_systemd_settings(&self) -> Result<()> {\n        // Create systemd drop-in for improved virtualization performance\n        let systemd_conf = r#\"[Manager]\nDefaultLimitNOFILE=65536\nDefaultLimitMEMLOCK=infinity\n\"#;\n\n        fs::create_dir_all(\"/etc/systemd/system.conf.d\").map_err(|_| NovaError::SystemCommandFailed)?;\n        fs::write(\"/etc/systemd/system.conf.d/nova-virtualization.conf\", systemd_conf).map_err(|e| {\n            log_error!(\"Failed to write systemd config: {}\", e);\n            NovaError::SystemCommandFailed\n        })?;\n\n        Ok(())\n    }\n\n    async fn configure_kvm_groups(&self) -> Result<()> {\n        // Ensure kvm and libvirt groups exist\n        let groups = [\"kvm\", \"libvirt\"];\n\n        for group in &groups {\n            let output = Command::new(\"getent\")\n                .args(&[\"group\", group])\n                .output()\n                .map_err(|_| NovaError::SystemCommandFailed)?;\n\n            if !output.status.success() {\n                // Create group if it doesn't exist\n                let _ = Command::new(\"groupadd\")\n                    .arg(group)\n                    .output();\n            }\n        }\n\n        Ok(())\n    }\n\n    // Getters\n    pub fn get_config(&self) -> &ArchNetworkConfig {\n        &self.config\n    }\n\n    pub fn get_systemd_configs(&self) -> &HashMap<String, SystemdNetworkdConfig> {\n        &self.systemd_configs\n    }\n\n    pub fn get_nm_profiles(&self) -> &Vec<NetworkManagerProfile> {\n        &self.nm_profiles\n    }\n\n    pub fn is_using_systemd_networkd(&self) -> bool {\n        self.config.use_systemd_networkd\n    }\n\n    pub fn is_using_network_manager(&self) -> bool {\n        self.config.use_network_manager\n    }\n}\n\nimpl Default for ArchNetworkManager {\n    fn default() -> Self {\n        Self::new()\n    }\n}"
+    pub async fn detect_network_manager(&mut self) -> Result<()> {
+        log_info!("Detecting Arch Linux network management system");
+
+        // Check if systemd-networkd is active
+        self.config.use_systemd_networkd = self.is_systemd_networkd_active().await;
+
+        // Check if NetworkManager is active
+        self.config.use_network_manager = self.is_network_manager_active().await;
+
+        if self.config.use_systemd_networkd {
+            log_info!("Detected systemd-networkd as active network manager");
+            self.discover_systemd_configs().await?;
+        }
+
+        if self.config.use_network_manager {
+            log_info!("Detected NetworkManager as active network manager");
+            self.discover_nm_profiles().await?;
+        }
+
+        if !self.config.use_systemd_networkd && !self.config.use_network_manager {
+            log_warn!("No managed network system detected, using manual configuration");
+        }
+
+        self.discover_interfaces().await?;
+        Ok(())
+    }
+
+    async fn is_systemd_networkd_active(&self) -> bool {
+        Command::new("systemctl")
+            .args(&["is-active", "systemd-networkd"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    async fn is_network_manager_active(&self) -> bool {
+        Command::new("systemctl")
+            .args(&["is-active", "NetworkManager"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    // SystemD-networkd integration
+    async fn discover_systemd_configs(&mut self) -> Result<()> {
+        log_debug!("Discovering systemd-networkd configurations");
+
+        let config_dirs = [
+            "/etc/systemd/network",
+            "/run/systemd/network",
+            "/usr/lib/systemd/network",
+        ];
+
+        for config_dir in &config_dirs {
+            if let Ok(entries) = fs::read_dir(config_dir) {
+                for entry in entries {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if let Some(extension) = path.extension() {
+                            if extension == "network" || extension == "netdev" {
+                                if let Ok(config) = self.parse_systemd_config(&path).await {
+                                    self.systemd_configs.insert(config.name.clone(), config);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        log_info!("Found {} systemd-networkd configurations", self.systemd_configs.len());
+        Ok(())
+    }
+
+    async fn parse_systemd_config(&self, config_path: &Path) -> Result<SystemdNetworkdConfig> {
+        let content = fs::read_to_string(config_path)
+            .map_err(|_| NovaError::InvalidConfig)?;
+
+        let name = config_path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        let mut config = SystemdNetworkdConfig {
+            name: name.clone(),
+            network_file: config_path.to_string_lossy().to_string(),
+            netdev_file: String::new(),
+            dhcp: false,
+            static_ip: None,
+            gateway: None,
+            dns: Vec::new(),
+        };
+
+        // Parse systemd network configuration
+        let mut in_network_section = false;
+        let mut in_address_section = false;
+
+        for line in content.lines() {
+            let line = line.trim();
+
+            if line == "[Network]" {
+                in_network_section = true;
+                in_address_section = false;
+                continue;
+            } else if line == "[Address]" {
+                in_address_section = true;
+                in_network_section = false;
+                continue;
+            } else if line.starts_with('[') {
+                in_network_section = false;
+                in_address_section = false;
+                continue;
+            }
+
+            if in_network_section {
+                if line.starts_with("DHCP=") {
+                    config.dhcp = line.split('=').nth(1)
+                        .map(|v| v.trim().to_lowercase() == "yes" || v.trim() == "true")
+                        .unwrap_or(false);
+                } else if line.starts_with("Gateway=") {
+                    config.gateway = line.split('=').nth(1).map(|v| v.trim().to_string());
+                } else if line.starts_with("DNS=") {
+                    if let Some(dns_list) = line.split('=').nth(1) {
+                        config.dns.extend(
+                            dns_list.split_whitespace()
+                                .map(|s| s.to_string())
+                        );
+                    }
+                }
+            }
+
+            if in_address_section {
+                if line.starts_with("Address=") {
+                    config.static_ip = line.split('=').nth(1).map(|v| v.trim().to_string());
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    pub async fn create_systemd_bridge(&self, bridge_name: &str, interfaces: &[String]) -> Result<()> {
+        log_info!("Creating systemd-networkd bridge: {}", bridge_name);
+
+        // Create .netdev file for bridge
+        let netdev_content = format!(
+            "[NetDev]
+Name={}
+Kind=bridge
+
+[Bridge]
+STP=yes
+",
+            bridge_name
+        );
+
+        let netdev_path = format!("/etc/systemd/network/25-{}.netdev", bridge_name);
+        fs::write(&netdev_path, netdev_content).map_err(|e| {
+            log_error!("Failed to write netdev file: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
+
+        // Create .network file for bridge
+        let network_content = format!(
+            "[Match]
+Name={}
+
+[Network]
+DHCP=yes
+IPForward=yes
+",
+            bridge_name
+        );
+
+        let network_path = format!("/etc/systemd/network/25-{}.network", bridge_name);
+        fs::write(&network_path, network_content).map_err(|e| {
+            log_error!("Failed to write network file: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
+
+        // Create bind files for each interface
+        for interface in interfaces {
+            let bind_content = format!(
+                "[Match]
+Name={}
+
+[Network]
+Bridge={}
+",
+                interface, bridge_name
+            );
+
+            let bind_path = format!("/etc/systemd/network/25-{}-bind.network", interface);
+            fs::write(&bind_path, bind_content).map_err(|e| {
+                log_error!("Failed to write bind file for {}: {}", interface, e);
+                NovaError::SystemCommandFailed
+            })?;
+        }
+
+        // Restart systemd-networkd
+        self.restart_systemd_networkd().await?;
+
+        log_info!("systemd-networkd bridge {} created successfully", bridge_name);
+        Ok(())
+    }
+
+    async fn restart_systemd_networkd(&self) -> Result<()> {
+        let output = Command::new("systemctl")
+            .args(&["restart", "systemd-networkd"])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            log_error!("Failed to restart systemd-networkd");
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Wait a moment for networkd to settle
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        Ok(())
+    }
+
+    // NetworkManager integration
+    async fn discover_nm_profiles(&mut self) -> Result<()> {
+        log_debug!("Discovering NetworkManager profiles");
+
+        let output = Command::new("nmcli")
+            .args(&["-t", "-f", "NAME,UUID,TYPE,DEVICE,AUTOCONNECT", "connection", "show"])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            return Ok(());
+        }
+
+        let connections = String::from_utf8_lossy(&output.stdout);
+        for line in connections.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 5 {
+                let profile = NetworkManagerProfile {
+                    name: parts[0].to_string(),
+                    uuid: parts[1].to_string(),
+                    connection_type: parts[2].to_string(),
+                    interface: if parts[3].is_empty() { None } else { Some(parts[3].to_string()) },
+                    autoconnect: parts[4] == "yes",
+                };
+                self.nm_profiles.push(profile);
+            }
+        }
+
+        log_info!("Found {} NetworkManager profiles", self.nm_profiles.len());
+        Ok(())
+    }
+
+    pub async fn create_nm_bridge(&self, bridge_name: &str, interfaces: &[String]) -> Result<()> {
+        log_info!("Creating NetworkManager bridge: {}", bridge_name);
+
+        // Create bridge connection
+        let output = Command::new("nmcli")
+            .args(&["connection", "add", "type", "bridge", "con-name", bridge_name, "ifname", bridge_name])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to create NetworkManager bridge: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Add interfaces to bridge
+        for interface in interfaces {
+            let slave_name = format!("{}-slave-{}", bridge_name, interface);
+            let output = Command::new("nmcli")
+                .args(&["connection", "add", "type", "bridge-slave", "con-name", &slave_name, "ifname", interface, "master", bridge_name])
+                .output()
+                .map_err(|_| NovaError::SystemCommandFailed)?;
+
+            if !output.status.success() {
+                log_warn!("Failed to add interface {} to bridge {}", interface, bridge_name);
+            }
+        }
+
+        // Bring up the bridge
+        let output = Command::new("nmcli")
+            .args(&["connection", "up", bridge_name])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            log_error!("Failed to bring up NetworkManager bridge {}", bridge_name);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        log_info!("NetworkManager bridge {} created successfully", bridge_name);
+        Ok(())
+    }
+
+    // Interface discovery
+    async fn discover_interfaces(&mut self) -> Result<()> {
+        log_debug!("Discovering network interfaces");
+
+        // Get interface list
+        let output = Command::new("ip")
+            .args(&["-j", "link", "show"])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        let json_str = String::from_utf8_lossy(&output.stdout);
+        let interfaces: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|_| NovaError::InvalidConfig)?;
+
+        if let Some(interfaces_array) = interfaces.as_array() {
+            for interface_data in interfaces_array {
+                if let Some(name) = interface_data["ifname"].as_str() {
+                    // Skip loopback and some virtual interfaces
+                    if name == "lo" || name.starts_with("veth") {
+                        continue;
+                    }
+
+                    let driver = self.get_interface_driver(name).await.ok();
+                    let speed = self.get_interface_speed(name).await.ok();
+                    let managed_by = self.detect_interface_manager(name).await;
+                    let systemd_config = self.find_systemd_config_for_interface(name);
+
+                    let arch_interface = ArchInterface {
+                        name: name.to_string(),
+                        driver,
+                        speed,
+                        managed_by,
+                        systemd_config,
+                    };
+
+                    self.config.detected_interfaces.push(arch_interface);
+                }
+            }
+        }
+
+        log_info!("Discovered {} network interfaces", self.config.detected_interfaces.len());
+        Ok(())
+    }
+
+    async fn get_interface_driver(&self, interface: &str) -> Result<String> {
+        let driver_path = format!("/sys/class/net/{}/device/driver", interface);
+        if let Ok(link) = fs::read_link(&driver_path) {
+            if let Some(driver_name) = link.file_name() {
+                return Ok(driver_name.to_string_lossy().to_string());
+            }
+        }
+        Err(NovaError::NetworkNotFound(interface.to_string()))
+    }
+
+    async fn get_interface_speed(&self, interface: &str) -> Result<String> {
+        let speed_path = format!("/sys/class/net/{}/speed", interface);
+        if let Ok(speed_content) = fs::read_to_string(&speed_path) {
+            let speed = speed_content.trim();
+            if speed != "-1" {
+                return Ok(format!("{}Mbps", speed));
+            }
+        }
+        Err(NovaError::NetworkNotFound(interface.to_string()))
+    }
+
+    async fn detect_interface_manager(&self, interface: &str) -> InterfaceManager {
+        // Check if managed by NetworkManager
+        if self.config.use_network_manager {
+            let output = Command::new("nmcli")
+                .args(&["-t", "-f", "DEVICE", "device", "status"])
+                .output();
+
+            if let Ok(output) = output {
+                if output.status.success() {
+                    let devices = String::from_utf8_lossy(&output.stdout);
+                    if devices.lines().any(|line| line.trim() == interface) {
+                        return InterfaceManager::NetworkManager;
+                    }
+                }
+            }
+        }
+
+        // Check if has systemd-networkd config
+        if self.find_systemd_config_for_interface(interface).is_some() {
+            return InterfaceManager::SystemdNetworkd;
+        }
+
+        // Check if manually configured
+        let output = Command::new("ip")
+            .args(&["addr", "show", interface])
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                let addr_info = String::from_utf8_lossy(&output.stdout);
+                if addr_info.contains("inet ") {
+                    return InterfaceManager::Manual;
+                }
+            }
+        }
+
+        InterfaceManager::Unknown
+    }
+
+    fn find_systemd_config_for_interface(&self, interface: &str) -> Option<String> {
+        for config in self.systemd_configs.values() {
+            if config.name.contains(interface) || config.network_file.contains(interface) {
+                return Some(config.network_file.clone());
+            }
+        }
+        None
+    }
+
+    // Arch-specific optimizations
+    pub async fn optimize_for_virtualization(&self) -> Result<()> {
+        log_info!("Applying Arch Linux virtualization optimizations");
+
+        // Check and enable required kernel modules
+        self.ensure_kvm_modules().await?;
+
+        // Optimize systemd settings for virtualization
+        self.optimize_systemd_settings().await?;
+
+        // Configure user groups for KVM access
+        self.configure_kvm_groups().await?;
+
+        log_info!("Arch Linux optimizations applied successfully");
+        Ok(())
+    }
+
+    async fn ensure_kvm_modules(&self) -> Result<()> {
+        let modules = ["kvm", "kvm_intel", "kvm_amd", "vhost_net", "bridge", "br_netfilter"];
+
+        for module in &modules {
+            let output = Command::new("modprobe")
+                .arg(module)
+                .output()
+                .map_err(|_| NovaError::SystemCommandFailed)?;
+
+            if output.status.success() {
+                log_debug!("Loaded kernel module: {}", module);
+            } else {
+                log_warn!("Failed to load kernel module: {}", module);
+            }
+        }
+
+        // Persist module loading
+        let modules_conf = modules.join("
+");
+        fs::write("/etc/modules-load.d/nova-kvm.conf", modules_conf).map_err(|e| {
+            log_error!("Failed to write modules config: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
+
+        Ok(())
+    }
+
+    async fn optimize_systemd_settings(&self) -> Result<()> {
+        // Create systemd drop-in for improved virtualization performance
+        let systemd_conf = r#"[Manager]
+DefaultLimitNOFILE=65536
+DefaultLimitMEMLOCK=infinity
+"#;
+
+        fs::create_dir_all("/etc/systemd/system.conf.d").map_err(|_| NovaError::SystemCommandFailed)?;
+        fs::write("/etc/systemd/system.conf.d/nova-virtualization.conf", systemd_conf).map_err(|e| {
+            log_error!("Failed to write systemd config: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
+
+        Ok(())
+    }
+
+    async fn configure_kvm_groups(&self) -> Result<()> {
+        // Ensure kvm and libvirt groups exist
+        let groups = ["kvm", "libvirt"];
+
+        for group in &groups {
+            let output = Command::new("getent")
+                .args(&["group", group])
+                .output()
+                .map_err(|_| NovaError::SystemCommandFailed)?;
+
+            if !output.status.success() {
+                // Create group if it doesn't exist
+                let _ = Command::new("groupadd")
+                    .arg(group)
+                    .output();
+            }
+        }
+
+        Ok(())
+    }
+
+    // Getters
+    pub fn get_config(&self) -> &ArchNetworkConfig {
+        &self.config
+    }
+
+    pub fn get_systemd_configs(&self) -> &HashMap<String, SystemdNetworkdConfig> {
+        &self.systemd_configs
+    }
+
+    pub fn get_nm_profiles(&self) -> &Vec<NetworkManagerProfile> {
+        &self.nm_profiles
+    }
+
+    pub fn is_using_systemd_networkd(&self) -> bool {
+        self.config.use_systemd_networkd
+    }
+
+    pub fn is_using_network_manager(&self) -> bool {
+        self.config.use_network_manager
+    }
+}
+
+impl Default for ArchNetworkManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

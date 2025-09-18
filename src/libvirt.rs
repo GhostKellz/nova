@@ -347,25 +347,35 @@ impl LibvirtManager {
     fn generate_network_xml(&self, network: &LibvirtNetwork) -> Result<String> {
         let mut xml = String::new();
 
-        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        xml.push_str(&format!("<network>\n  <name>{}</name>\n", network.name));
+        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+");
+        xml.push_str(&format!("<network>
+  <name>{}</name>
+", network.name));
 
         if let Some(uuid) = &network.uuid {
-            xml.push_str(&format!("  <uuid>{}</uuid>\n", uuid));
+            xml.push_str(&format!("  <uuid>{}</uuid>
+", uuid));
         }
 
         // Forward mode
         if let Some(forward) = &network.forward {
             if forward.mode == "nat" {
-                xml.push_str("  <forward mode='nat'/>\n");
+                xml.push_str("  <forward mode='nat'/>
+");
             } else if forward.mode == "bridge" {
                 if let Some(dev) = &forward.dev {
-                    xml.push_str(&format!("  <forward mode='bridge'>\n    <interface dev='{}'/>\n  </forward>\n", dev));
+                    xml.push_str(&format!("  <forward mode='bridge'>
+    <interface dev='{}'/>
+  </forward>
+", dev));
                 } else {
-                    xml.push_str("  <forward mode='bridge'/>\n");
+                    xml.push_str("  <forward mode='bridge'/>
+");
                 }
             } else {
-                xml.push_str(&format!("  <forward mode='{}'/>\n", forward.mode));
+                xml.push_str(&format!("  <forward mode='{}'/>
+", forward.mode));
             }
         }
 
@@ -378,29 +388,37 @@ impl LibvirtManager {
             if let Some(delay) = bridge.delay {
                 bridge_attrs.push_str(&format!(" delay='{}'", delay));
             }
-            xml.push_str(&format!("  <bridge {}/>\n", bridge_attrs));
+            xml.push_str(&format!("  <bridge {}/>
+", bridge_attrs));
         }
 
         // IP configuration
         if let Some(ip) = &network.ip {
-            xml.push_str(&format!("  <ip address='{}' netmask='{}'>\n", ip.address, ip.netmask));
+            xml.push_str(&format!("  <ip address='{}' netmask='{}'>
+", ip.address, ip.netmask));
 
             if let Some(dhcp) = &ip.dhcp {
-                xml.push_str("    <dhcp>\n");
-                xml.push_str(&format!("      <range start='{}' end='{}'/>\n", dhcp.start, dhcp.end));
+                xml.push_str("    <dhcp>
+");
+                xml.push_str(&format!("      <range start='{}' end='{}'/>
+", dhcp.start, dhcp.end));
 
                 for host in &dhcp.hosts {
-                    xml.push_str(&format!("      <host mac='{}' name='{}' ip='{}'/>\n",
+                    xml.push_str(&format!("      <host mac='{}' name='{}' ip='{}'/>
+",
                                          host.mac, host.name, host.ip));
                 }
 
-                xml.push_str("    </dhcp>\n");
+                xml.push_str("    </dhcp>
+");
             }
 
-            xml.push_str("  </ip>\n");
+            xml.push_str("  </ip>
+");
         }
 
-        xml.push_str("</network>\n");
+        xml.push_str("</network>
+");
 
         Ok(xml)
     }
