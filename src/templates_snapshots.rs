@@ -1,9 +1,9 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmTemplate {
@@ -76,10 +76,10 @@ pub struct VmSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SnapshotType {
-    Internal,    // QCOW2 internal snapshot
-    External,    // External snapshot with overlay
-    Memory,      // Memory + disk state
-    DiskOnly,    // Disk state only
+    Internal, // QCOW2 internal snapshot
+    External, // External snapshot with overlay
+    Memory,   // Memory + disk state
+    DiskOnly, // Disk state only
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,9 +124,13 @@ impl TemplateManager {
         vm_name: &str,
         template_name: &str,
         description: &str,
-        tags: Vec<String>
+        tags: Vec<String>,
     ) -> Result<String> {
-        log_info!("Creating template '{}' from VM '{}'", template_name, vm_name);
+        log_info!(
+            "Creating template '{}' from VM '{}'",
+            template_name,
+            vm_name
+        );
 
         // Ensure VM is shut down
         self.ensure_vm_shutdown(vm_name).await?;
@@ -147,7 +151,8 @@ impl TemplateManager {
 
         // Save VM configuration as template
         let config_path = template_dir.join("config.xml");
-        self.save_vm_config_as_template(vm_name, &config_path).await?;
+        self.save_vm_config_as_template(vm_name, &config_path)
+            .await?;
 
         // Detect OS type from VM
         let os_type = self.detect_vm_os_type(vm_name).await;
@@ -178,7 +183,11 @@ impl TemplateManager {
 
         self.templates.insert(template_id.clone(), template);
 
-        log_info!("Template '{}' created successfully with ID: {}", template_name, template_id);
+        log_info!(
+            "Template '{}' created successfully with ID: {}",
+            template_name,
+            template_id
+        );
         Ok(template_id)
     }
 
@@ -188,7 +197,7 @@ impl TemplateManager {
         vm_name: &str,
         snapshot_name: &str,
         description: &str,
-        include_memory: bool
+        include_memory: bool,
     ) -> Result<String> {
         log_info!("Creating snapshot '{}' for VM '{}'", snapshot_name, vm_name);
 
@@ -210,12 +219,21 @@ impl TemplateManager {
 
         match snapshot_type {
             SnapshotType::Memory => {
-                cmd.arg("--memspec").arg(format!("/var/lib/nova/snapshots/{}/{}.mem", vm_name, snapshot_id));
-                cmd.arg("--diskspec").arg(format!("vda,file=/var/lib/nova/snapshots/{}/{}.qcow2", vm_name, snapshot_id));
+                cmd.arg("--memspec").arg(format!(
+                    "/var/lib/nova/snapshots/{}/{}.mem",
+                    vm_name, snapshot_id
+                ));
+                cmd.arg("--diskspec").arg(format!(
+                    "vda,file=/var/lib/nova/snapshots/{}/{}.qcow2",
+                    vm_name, snapshot_id
+                ));
             }
             SnapshotType::DiskOnly => {
                 cmd.arg("--disk-only");
-                cmd.arg("--diskspec").arg(format!("vda,file=/var/lib/nova/snapshots/{}/{}.qcow2", vm_name, snapshot_id));
+                cmd.arg("--diskspec").arg(format!(
+                    "vda,file=/var/lib/nova/snapshots/{}/{}.qcow2",
+                    vm_name, snapshot_id
+                ));
             }
             _ => {}
         }
@@ -253,11 +271,16 @@ impl TemplateManager {
         };
 
         // Store snapshot
-        self.snapshots.entry(vm_name.to_string())
+        self.snapshots
+            .entry(vm_name.to_string())
             .or_insert_with(HashMap::new)
             .insert(snapshot_id.clone(), snapshot);
 
-        log_info!("Snapshot '{}' created with ID: {}", snapshot_name, snapshot_id);
+        log_info!(
+            "Snapshot '{}' created with ID: {}",
+            snapshot_name,
+            snapshot_id
+        );
         Ok(snapshot_id)
     }
 
@@ -271,29 +294,33 @@ impl TemplateManager {
     }
 
     pub fn search_templates(&self, query: &str) -> Vec<&VmTemplate> {
-        self.templates.values()
+        self.templates
+            .values()
             .filter(|t| {
-                t.name.to_lowercase().contains(&query.to_lowercase()) ||
-                t.description.to_lowercase().contains(&query.to_lowercase()) ||
-                t.tags.iter().any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
+                t.name.to_lowercase().contains(&query.to_lowercase())
+                    || t.description.to_lowercase().contains(&query.to_lowercase())
+                    || t.tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&query.to_lowercase()))
             })
             .collect()
     }
 
     // Snapshot management
     pub fn list_snapshots(&self, vm_name: &str) -> Vec<&VmSnapshot> {
-        self.snapshots.get(vm_name)
+        self.snapshots
+            .get(vm_name)
             .map(|snapshots| snapshots.values().collect())
             .unwrap_or_default()
     }
 
     pub fn get_snapshot(&self, vm_name: &str, snapshot_id: &str) -> Option<&VmSnapshot> {
-        self.snapshots.get(vm_name)?
-            .get(snapshot_id)
+        self.snapshots.get(vm_name)?.get(snapshot_id)
     }
 
     pub async fn get_current_snapshot(&self, vm_name: &str) -> Option<String> {
-        self.snapshots.get(vm_name)?
+        self.snapshots
+            .get(vm_name)?
             .values()
             .find(|s| s.is_current)
             .map(|s| s.id.clone())
@@ -330,7 +357,9 @@ impl TemplateManager {
             .output()?;
 
         if output.status.success() {
-            let state = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+            let state = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .to_lowercase();
             match state.as_str() {
                 "running" => Ok(VmState::Running),
                 "paused" => Ok(VmState::Paused),
@@ -405,7 +434,11 @@ impl TemplateManager {
     }
 
     async fn detect_vm_os_type(&self, _vm_name: &str) -> OperatingSystem {
-        OperatingSystem::Linux { distro: LinuxDistro::Ubuntu { version: "22.04".to_string() } }
+        OperatingSystem::Linux {
+            distro: LinuxDistro::Ubuntu {
+                version: "22.04".to_string(),
+            },
+        }
     }
 
     async fn check_guest_tools_installed(&self, _vm_name: &str) -> bool {

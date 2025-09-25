@@ -3,47 +3,47 @@ use egui::Color32;
 // Deep Dark Material Blue Ocean Theme - User's Custom Palette
 
 // Background hierarchy
-pub const BG_MAIN: Color32 = Color32::from_rgb(0, 7, 45);           // #00072D - User's deep blue
-pub const BG_PANEL: Color32 = Color32::from_rgb(10, 27, 61);        // #0A1B3D - Slightly lighter
-pub const BG_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82);    // #1A2F52 - For contrast
-pub const BG_ELEVATED: Color32 = Color32::from_rgb(36, 55, 95);     // #24375F - Cards/modals
-pub const BG_HOVER: Color32 = Color32::from_rgb(26, 67, 191);       // #1A43BF - User's blue for hover
-pub const BG_CONSOLE: Color32 = Color32::from_rgb(0, 5, 16);        // #000510 - Deep black-blue
+pub const BG_MAIN: Color32 = Color32::from_rgb(0, 7, 45); // #00072D - User's deep blue
+pub const BG_PANEL: Color32 = Color32::from_rgb(10, 27, 61); // #0A1B3D - Slightly lighter
+pub const BG_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82); // #1A2F52 - For contrast
+pub const BG_ELEVATED: Color32 = Color32::from_rgb(36, 55, 95); // #24375F - Cards/modals
+pub const BG_HOVER: Color32 = Color32::from_rgb(26, 67, 191); // #1A43BF - User's blue for hover
+pub const BG_CONSOLE: Color32 = Color32::from_rgb(0, 5, 16); // #000510 - Deep black-blue
 
 // Text colors - User's specified palette
-pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(137, 207, 240);   // #89CFF0 - Baby mint blue
-pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(48, 213, 200);  // #30D5C8 - Turquoise mint
-pub const TEXT_ACCENT: Color32 = Color32::from_rgb(26, 67, 191);      // #1A43BF - Deep blue for labels
-pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(48, 213, 200);     // #30D5C8 - Turquoise for highlights
+pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(137, 207, 240); // #89CFF0 - Baby mint blue
+pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(48, 213, 200); // #30D5C8 - Turquoise mint
+pub const TEXT_ACCENT: Color32 = Color32::from_rgb(26, 67, 191); // #1A43BF - Deep blue for labels
+pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(48, 213, 200); // #30D5C8 - Turquoise for highlights
 
 // Status colors
-pub const STATUS_RUNNING: Color32 = Color32::from_rgb(80, 250, 123);   // #50FA7B - Green
-pub const STATUS_STOPPED: Color32 = Color32::from_rgb(255, 85, 85);    // #FF5555 - Red
-pub const STATUS_WARNING: Color32 = Color32::from_rgb(241, 250, 140);  // #F1FA8C - Yellow
+pub const STATUS_RUNNING: Color32 = Color32::from_rgb(80, 250, 123); // #50FA7B - Green
+pub const STATUS_STOPPED: Color32 = Color32::from_rgb(255, 85, 85); // #FF5555 - Red
+pub const STATUS_WARNING: Color32 = Color32::from_rgb(241, 250, 140); // #F1FA8C - Yellow
 pub const STATUS_SUSPENDED: Color32 = Color32::from_rgb(139, 233, 253); // #8BE9FD - Cyan
-pub const STATUS_UNKNOWN: Color32 = Color32::from_rgb(98, 114, 164);   // #6272A4 - Grey-blue
+pub const STATUS_UNKNOWN: Color32 = Color32::from_rgb(98, 114, 164); // #6272A4 - Grey-blue
 
 // Action colors - Updated with user's palette
-pub const ACTION_PRIMARY: Color32 = Color32::from_rgb(48, 213, 200);      // #30D5C8 - Turquoise mint
+pub const ACTION_PRIMARY: Color32 = Color32::from_rgb(48, 213, 200); // #30D5C8 - Turquoise mint
 pub const ACTION_PRIMARY_HOVER: Color32 = Color32::from_rgb(26, 67, 191); // #1A43BF - Deep blue hover
-pub const ACTION_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82);      // #1A2F52 - Muted ocean blue
-pub const ACTION_DANGER: Color32 = Color32::from_rgb(255, 85, 85);        // #FF5555 - Red
-pub const ACTION_SUCCESS: Color32 = Color32::from_rgb(80, 250, 123);      // #50FA7B - Green
+pub const ACTION_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82); // #1A2F52 - Muted ocean blue
+pub const ACTION_DANGER: Color32 = Color32::from_rgb(255, 85, 85); // #FF5555 - Red
+pub const ACTION_SUCCESS: Color32 = Color32::from_rgb(80, 250, 123); // #50FA7B - Green
 
 // Border & Divider colors
-pub const BORDER_DEFAULT: Color32 = Color32::from_rgb(36, 55, 95);        // #24375F - Subtle blue
-pub const BORDER_FOCUS: Color32 = Color32::from_rgb(48, 213, 200);        // #30D5C8 - Turquoise focus
-pub const DIVIDER: Color32 = Color32::from_rgb(26, 47, 82);              // #1A2F52 - Subtle divider
+pub const BORDER_DEFAULT: Color32 = Color32::from_rgb(36, 55, 95); // #24375F - Subtle blue
+pub const BORDER_FOCUS: Color32 = Color32::from_rgb(48, 213, 200); // #30D5C8 - Turquoise focus
+pub const DIVIDER: Color32 = Color32::from_rgb(26, 47, 82); // #1A2F52 - Subtle divider
 
 // Selection colors
-pub const SELECTION_BG: Color32 = Color32::from_rgb(26, 67, 191);         // #1A43BF - User's blue
-pub const SELECTION_HOVER: Color32 = Color32::from_rgb(10, 27, 61);       // #0A1B3D - Hover state
+pub const SELECTION_BG: Color32 = Color32::from_rgb(26, 67, 191); // #1A43BF - User's blue
+pub const SELECTION_HOVER: Color32 = Color32::from_rgb(10, 27, 61); // #0A1B3D - Hover state
 
 // Graph colors - Using user's palette
-pub const GRAPH_CPU: Color32 = Color32::from_rgb(48, 213, 200);           // #30D5C8 - Turquoise
-pub const GRAPH_MEMORY: Color32 = Color32::from_rgb(137, 207, 240);       // #89CFF0 - Baby mint blue
-pub const GRAPH_DISK: Color32 = Color32::from_rgb(26, 67, 191);           // #1A43BF - Deep blue
-pub const GRAPH_NETWORK: Color32 = Color32::from_rgb(80, 250, 123);       // #50FA7B - Green
+pub const GRAPH_CPU: Color32 = Color32::from_rgb(48, 213, 200); // #30D5C8 - Turquoise
+pub const GRAPH_MEMORY: Color32 = Color32::from_rgb(137, 207, 240); // #89CFF0 - Baby mint blue
+pub const GRAPH_DISK: Color32 = Color32::from_rgb(26, 67, 191); // #1A43BF - Deep blue
+pub const GRAPH_NETWORK: Color32 = Color32::from_rgb(80, 250, 123); // #50FA7B - Green
 
 pub fn configure_ocean_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
@@ -132,11 +132,11 @@ pub fn get_status_color(status: &crate::instance::InstanceStatus) -> Color32 {
 pub fn get_status_icon(status: &crate::instance::InstanceStatus) -> &'static str {
     use crate::instance::InstanceStatus;
     match status {
-        InstanceStatus::Running => "●",    // Filled circle
-        InstanceStatus::Stopped => "○",    // Empty circle
-        InstanceStatus::Starting => "◐",   // Half circle
-        InstanceStatus::Stopping => "◑",   // Half circle
-        InstanceStatus::Error => "✕",      // X mark
-        InstanceStatus::Suspended => "⏸",  // Pause symbol
+        InstanceStatus::Running => "●",   // Filled circle
+        InstanceStatus::Stopped => "○",   // Empty circle
+        InstanceStatus::Starting => "◐",  // Half circle
+        InstanceStatus::Stopping => "◑",  // Half circle
+        InstanceStatus::Error => "✕",     // X mark
+        InstanceStatus::Suspended => "⏸", // Pause symbol
     }
 }

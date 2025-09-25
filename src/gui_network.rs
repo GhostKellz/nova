@@ -1,11 +1,14 @@
-use crate::network::{NetworkManager, VirtualSwitch, SwitchType, NetworkInterface, BridgeConfig, DhcpConfig, NatConfig};
+use crate::arch_integration::{ArchNetworkConfig, ArchNetworkManager};
 use crate::libvirt::{LibvirtManager, LibvirtNetwork};
-use crate::monitoring::{NetworkMonitor, NetworkTopology, PacketCaptureConfig, BandwidthUsage};
-use crate::arch_integration::{ArchNetworkManager, ArchNetworkConfig};
-use crate::{log_info, log_error, Result};
+use crate::monitoring::{BandwidthUsage, NetworkMonitor, NetworkTopology, PacketCaptureConfig};
+use crate::network::{
+    BridgeConfig, DhcpConfig, NatConfig, NetworkInterface, NetworkManager, SwitchType,
+    VirtualSwitch,
+};
+use crate::{Result, log_error, log_info};
 
 use eframe::egui;
-use egui::{Color32, Stroke, Vec2, Pos2, Rect};
+use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -144,12 +147,28 @@ impl NetworkingGui {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.selected_tab, NetworkTab::Overview, "Overview");
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::VirtualSwitches, "Virtual Switches");
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::LibvirtNetworks, "Libvirt Networks");
+                ui.selectable_value(
+                    &mut self.selected_tab,
+                    NetworkTab::VirtualSwitches,
+                    "Virtual Switches",
+                );
+                ui.selectable_value(
+                    &mut self.selected_tab,
+                    NetworkTab::LibvirtNetworks,
+                    "Libvirt Networks",
+                );
                 ui.selectable_value(&mut self.selected_tab, NetworkTab::Monitoring, "Monitoring");
                 ui.selectable_value(&mut self.selected_tab, NetworkTab::Topology, "Topology");
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::PacketCapture, "Packet Capture");
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::ArchConfig, "Arch Config");
+                ui.selectable_value(
+                    &mut self.selected_tab,
+                    NetworkTab::PacketCapture,
+                    "Packet Capture",
+                );
+                ui.selectable_value(
+                    &mut self.selected_tab,
+                    NetworkTab::ArchConfig,
+                    "Arch Config",
+                );
             });
 
             ui.separator();
@@ -286,7 +305,14 @@ impl NetworkingGui {
                                 if let Some(vlan) = switch.vlan_id {
                                     ui.label(format!("VLAN: {}", vlan));
                                 }
-                                ui.label(format!("STP: {}", if switch.stp_enabled { "Enabled" } else { "Disabled" }));
+                                ui.label(format!(
+                                    "STP: {}",
+                                    if switch.stp_enabled {
+                                        "Enabled"
+                                    } else {
+                                        "Disabled"
+                                    }
+                                ));
                             });
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -360,15 +386,24 @@ impl NetworkingGui {
                                 if let Some(ip) = &network.ip {
                                     ui.label(format!("Network: {}/{}", ip.address, ip.netmask));
                                     if let Some(dhcp) = &ip.dhcp {
-                                        ui.label(format!("DHCP Range: {} - {}", dhcp.start, dhcp.end));
+                                        ui.label(format!(
+                                            "DHCP Range: {} - {}",
+                                            dhcp.start, dhcp.end
+                                        ));
                                     }
                                 }
                             });
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                let action_text = if is_active { "⏹️ Stop" } else { "▶️ Start" };
+                                let action_text = if is_active {
+                                    "⏹️ Stop"
+                                } else {
+                                    "▶️ Start"
+                                };
                                 if ui.button(action_text).clicked() {
-                                    networks_to_toggle.borrow_mut().push((network_name.clone(), is_active));
+                                    networks_to_toggle
+                                        .borrow_mut()
+                                        .push((network_name.clone(), is_active));
                                 }
                                 if ui.button("⚙️ Edit").clicked() {
                                     // Open edit dialog
@@ -396,7 +431,11 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Network Monitoring");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button_text = if self.monitoring_enabled { "⏹️ Stop Monitoring" } else { "▶️ Start Monitoring" };
+                let button_text = if self.monitoring_enabled {
+                    "⏹️ Stop Monitoring"
+                } else {
+                    "▶️ Start Monitoring"
+                };
                 if ui.button(button_text).clicked() {
                     self.toggle_monitoring();
                 }
@@ -435,41 +474,62 @@ impl NetworkingGui {
 
                     // Simple bandwidth chart (would be more sophisticated in real implementation)
                     let available_rect = ui.available_rect_before_wrap();
-                    let chart_rect = Rect::from_min_size(available_rect.min, Vec2::new(available_rect.width(), 100.0));
+                    let chart_rect = Rect::from_min_size(
+                        available_rect.min,
+                        Vec2::new(available_rect.width(), 100.0),
+                    );
 
-                    ui.painter().rect_filled(chart_rect, 2.0, Color32::from_gray(20));
+                    ui.painter()
+                        .rect_filled(chart_rect, 2.0, Color32::from_gray(20));
 
                     // Draw bandwidth lines
                     if bandwidth_history.len() > 1 {
-                        let max_bps = bandwidth_history.iter()
+                        let max_bps = bandwidth_history
+                            .iter()
                             .map(|b| b.rx_bps.max(b.tx_bps))
                             .fold(0.0, f64::max);
 
                         if max_bps > 0.0 {
-                            let points_rx: Vec<Pos2> = bandwidth_history.iter().enumerate()
+                            let points_rx: Vec<Pos2> = bandwidth_history
+                                .iter()
+                                .enumerate()
                                 .map(|(i, b)| {
-                                    let x = chart_rect.min.x + (i as f32 / bandwidth_history.len() as f32) * chart_rect.width();
-                                    let y = chart_rect.max.y - (b.rx_bps / max_bps) as f32 * chart_rect.height();
+                                    let x = chart_rect.min.x
+                                        + (i as f32 / bandwidth_history.len() as f32)
+                                            * chart_rect.width();
+                                    let y = chart_rect.max.y
+                                        - (b.rx_bps / max_bps) as f32 * chart_rect.height();
                                     Pos2::new(x, y)
                                 })
                                 .collect();
 
-                            let points_tx: Vec<Pos2> = bandwidth_history.iter().enumerate()
+                            let points_tx: Vec<Pos2> = bandwidth_history
+                                .iter()
+                                .enumerate()
                                 .map(|(i, b)| {
-                                    let x = chart_rect.min.x + (i as f32 / bandwidth_history.len() as f32) * chart_rect.width();
-                                    let y = chart_rect.max.y - (b.tx_bps / max_bps) as f32 * chart_rect.height();
+                                    let x = chart_rect.min.x
+                                        + (i as f32 / bandwidth_history.len() as f32)
+                                            * chart_rect.width();
+                                    let y = chart_rect.max.y
+                                        - (b.tx_bps / max_bps) as f32 * chart_rect.height();
                                     Pos2::new(x, y)
                                 })
                                 .collect();
 
                             // Draw RX line in green
                             for window in points_rx.windows(2) {
-                                ui.painter().line_segment([window[0], window[1]], Stroke::new(2.0, Color32::GREEN));
+                                ui.painter().line_segment(
+                                    [window[0], window[1]],
+                                    Stroke::new(2.0, Color32::GREEN),
+                                );
                             }
 
                             // Draw TX line in blue
                             for window in points_tx.windows(2) {
-                                ui.painter().line_segment([window[0], window[1]], Stroke::new(2.0, Color32::BLUE));
+                                ui.painter().line_segment(
+                                    [window[0], window[1]],
+                                    Stroke::new(2.0, Color32::BLUE),
+                                );
                             }
                         }
                     }
@@ -495,7 +555,8 @@ impl NetworkingGui {
         if let Some(topology) = &self.topology {
             let available_rect = ui.available_rect_before_wrap();
 
-            ui.painter().rect_filled(available_rect, 2.0, Color32::from_gray(20));
+            ui.painter()
+                .rect_filled(available_rect, 2.0, Color32::from_gray(20));
 
             // Draw bridges
             let mut bridge_positions = HashMap::new();
@@ -537,7 +598,8 @@ impl NetworkingGui {
                     );
 
                     // Draw connection line
-                    ui.painter().line_segment([pos, iface_pos], Stroke::new(2.0, Color32::WHITE));
+                    ui.painter()
+                        .line_segment([pos, iface_pos], Stroke::new(2.0, Color32::WHITE));
                 }
             }
         } else {
@@ -640,8 +702,16 @@ impl NetworkingGui {
                     egui::ComboBox::from_label("")
                         .selected_text(format!("{:?}", self.switch_creation_dialog.switch_type))
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.switch_creation_dialog.switch_type, SwitchType::LinuxBridge, "Linux Bridge");
-                            ui.selectable_value(&mut self.switch_creation_dialog.switch_type, SwitchType::OpenVSwitch, "Open vSwitch");
+                            ui.selectable_value(
+                                &mut self.switch_creation_dialog.switch_type,
+                                SwitchType::LinuxBridge,
+                                "Linux Bridge",
+                            );
+                            ui.selectable_value(
+                                &mut self.switch_creation_dialog.switch_type,
+                                SwitchType::OpenVSwitch,
+                                "Open vSwitch",
+                            );
                         });
                 });
 
@@ -653,14 +723,21 @@ impl NetworkingGui {
                 });
 
                 ui.label("Select interfaces to add:");
-                egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                    for (i, interface) in self.switch_creation_dialog.interfaces.iter().enumerate() {
-                        if i >= self.switch_creation_dialog.selected_interfaces.len() {
-                            self.switch_creation_dialog.selected_interfaces.push(false);
+                egui::ScrollArea::vertical()
+                    .max_height(100.0)
+                    .show(ui, |ui| {
+                        for (i, interface) in
+                            self.switch_creation_dialog.interfaces.iter().enumerate()
+                        {
+                            if i >= self.switch_creation_dialog.selected_interfaces.len() {
+                                self.switch_creation_dialog.selected_interfaces.push(false);
+                            }
+                            ui.checkbox(
+                                &mut self.switch_creation_dialog.selected_interfaces[i],
+                                interface,
+                            );
                         }
-                        ui.checkbox(&mut self.switch_creation_dialog.selected_interfaces[i], interface);
-                    }
-                });
+                    });
 
                 ui.separator();
 
@@ -695,9 +772,21 @@ impl NetworkingGui {
                     egui::ComboBox::from_label("")
                         .selected_text(&self.network_creation_dialog.network_type)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.network_creation_dialog.network_type, "NAT".to_string(), "NAT");
-                            ui.selectable_value(&mut self.network_creation_dialog.network_type, "Bridge".to_string(), "Bridge");
-                            ui.selectable_value(&mut self.network_creation_dialog.network_type, "Isolated".to_string(), "Isolated");
+                            ui.selectable_value(
+                                &mut self.network_creation_dialog.network_type,
+                                "NAT".to_string(),
+                                "NAT",
+                            );
+                            ui.selectable_value(
+                                &mut self.network_creation_dialog.network_type,
+                                "Bridge".to_string(),
+                                "Bridge",
+                            );
+                            ui.selectable_value(
+                                &mut self.network_creation_dialog.network_type,
+                                "Isolated".to_string(),
+                                "Isolated",
+                            );
                         });
                 });
 
@@ -711,7 +800,10 @@ impl NetworkingGui {
                     ui.text_edit_singleline(&mut self.network_creation_dialog.gateway);
                 });
 
-                ui.checkbox(&mut self.network_creation_dialog.dhcp_enabled, "Enable DHCP");
+                ui.checkbox(
+                    &mut self.network_creation_dialog.dhcp_enabled,
+                    "Enable DHCP",
+                );
 
                 if self.network_creation_dialog.dhcp_enabled {
                     ui.horizontal(|ui| {
@@ -796,11 +888,8 @@ impl NetworkingGui {
 
     fn refresh_interfaces(&mut self) {
         // Populate interfaces for switch creation dialog
-        self.switch_creation_dialog.interfaces = vec![
-            "eth0".to_string(),
-            "eth1".to_string(),
-            "wlan0".to_string(),
-        ];
+        self.switch_creation_dialog.interfaces =
+            vec!["eth0".to_string(), "eth1".to_string(), "wlan0".to_string()];
         self.switch_creation_dialog.selected_interfaces.clear();
     }
 
@@ -820,7 +909,10 @@ impl NetworkingGui {
     }
 
     fn create_switch(&mut self) {
-        log_info!("Creating virtual switch: {}", self.switch_creation_dialog.name);
+        log_info!(
+            "Creating virtual switch: {}",
+            self.switch_creation_dialog.name
+        );
         // Would call network_manager.create_virtual_switch()
     }
 
@@ -830,7 +922,10 @@ impl NetworkingGui {
     }
 
     fn create_libvirt_network(&mut self) {
-        log_info!("Creating libvirt network: {}", self.network_creation_dialog.name);
+        log_info!(
+            "Creating libvirt network: {}",
+            self.network_creation_dialog.name
+        );
         // Would call libvirt_manager.create_network()
     }
 
@@ -861,16 +956,23 @@ impl NetworkingGui {
     }
 
     fn start_capture(&mut self) {
-        log_info!("Starting packet capture on {}", self.capture_dialog.interface);
+        log_info!(
+            "Starting packet capture on {}",
+            self.capture_dialog.interface
+        );
         // Would call network_monitor.start_packet_capture()
         // Add to active captures list
-        self.capture_dialog.active_captures.push(format!("capture-{}", self.capture_dialog.interface));
+        self.capture_dialog
+            .active_captures
+            .push(format!("capture-{}", self.capture_dialog.interface));
     }
 
     fn stop_capture(&mut self, capture_id: &str) {
         log_info!("Stopping packet capture: {}", capture_id);
         // Would call network_monitor.stop_packet_capture()
-        self.capture_dialog.active_captures.retain(|id| id != capture_id);
+        self.capture_dialog
+            .active_captures
+            .retain(|id| id != capture_id);
     }
 
     fn open_in_wireshark(&mut self, file_path: &str) {

@@ -1,0 +1,53 @@
+# Alertmanager rules tailored for Nova RC5 observability.
+# Import into your existing alerting stack (Prometheus, Cortex, Thanos, etc.).
+
+groups:
+  - name: nova-core
+    rules:
+      - alert: NovaExporterDown
+        expr: absent(nova_vm_status)
+        for: 2m
+        labels:
+          severity: critical
+          team: observability
+        annotations:
+          summary: "Nova metrics exporter is unreachable"
+          description: |
+            Prometheus has not scraped the Nova exporter for the last two minutes.
+            Check the nova-metrics service, networking policies, or recent deploys.
+
+      - alert: NovaVmDriftDetected
+        expr: rate(nova_vm_status{state="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: high
+          team: virtualization
+        annotations:
+          summary: "Nova VM entered error state"
+          description: |
+            One or more Nova-managed virtual machines transitioned into an error state.
+            Inspect the VM in the Nova GUI and gather a support bundle with --scrub.
+
+      - alert: NovaDocsSearchFailures
+        expr: avg_over_time(nova_docs_search_failure_ratio[30m]) > 0.3
+        for: 30m
+        labels:
+          severity: medium
+          team: docs
+        annotations:
+          summary: "Docs search experiencing elevated failure rate"
+          description: |
+            The documentation search widget is returning empty results more than 30% of the time.
+            Review Algolia analytics and triage the docs backlog for missing topics.
+
+      - alert: NovaSupportBundleSpike
+        expr: increase(nova_support_bundle_generated_total[10m]) > 5
+        for: 10m
+        labels:
+          severity: low
+          team: support
+        annotations:
+          summary: "Support bundle volume spike"
+          description: |
+            Multiple support bundles were generated in the last 10 minutes.
+            Investigate possible widespread issues and consider raising an incident.

@@ -1,0 +1,18 @@
+{
+  "matchers": [
+    {
+      "name": "team",
+      "value": "observability",
+      "isRegex": false
+    },
+    {
+      "name": "severity",
+      "value": "critical|high",
+      "isRegex": true
+    }
+  ],
+  "createdBy": "release-captain",
+  "comment": "Nova maintenance window",
+  "startsAt": "2025-09-25T18:00:00Z",
+  "endsAt": "2025-09-25T20:00:00Z"
+}

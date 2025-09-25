@@ -1,9 +1,9 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::process::Command;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchNetworkConfig {
@@ -141,13 +141,15 @@ impl ArchNetworkManager {
             }
         }
 
-        log_info!("Found {} systemd-networkd configurations", self.systemd_configs.len());
+        log_info!(
+            "Found {} systemd-networkd configurations",
+            self.systemd_configs.len()
+        );
         Ok(())
     }
 
     async fn parse_systemd_config(&self, config_path: &Path) -> Result<SystemdNetworkdConfig> {
-        let content = fs::read_to_string(config_path)
-            .map_err(|_| NovaError::InvalidConfig)?;
+        let content = fs::read_to_string(config_path).map_err(|_| NovaError::InvalidConfig)?;
 
         let name = config_path
             .file_stem()
@@ -188,17 +190,18 @@ impl ArchNetworkManager {
 
             if in_network_section {
                 if line.starts_with("DHCP=") {
-                    config.dhcp = line.split('=').nth(1)
+                    config.dhcp = line
+                        .split('=')
+                        .nth(1)
                         .map(|v| v.trim().to_lowercase() == "yes" || v.trim() == "true")
                         .unwrap_or(false);
                 } else if line.starts_with("Gateway=") {
                     config.gateway = line.split('=').nth(1).map(|v| v.trim().to_string());
                 } else if line.starts_with("DNS=") {
                     if let Some(dns_list) = line.split('=').nth(1) {
-                        config.dns.extend(
-                            dns_list.split_whitespace()
-                                .map(|s| s.to_string())
-                        );
+                        config
+                            .dns
+                            .extend(dns_list.split_whitespace().map(|s| s.to_string()));
                     }
                 }
             }
@@ -213,7 +216,11 @@ impl ArchNetworkManager {
         Ok(config)
     }
 
-    pub async fn create_systemd_bridge(&self, bridge_name: &str, interfaces: &[String]) -> Result<()> {
+    pub async fn create_systemd_bridge(
+        &self,
+        bridge_name: &str,
+        interfaces: &[String],
+    ) -> Result<()> {
         log_info!("Creating systemd-networkd bridge: {}", bridge_name);
 
         // Create .netdev file for bridge
@@ -274,7 +281,10 @@ Bridge={}
         // Restart systemd-networkd
         self.restart_systemd_networkd().await?;
 
-        log_info!("systemd-networkd bridge {} created successfully", bridge_name);
+        log_info!(
+            "systemd-networkd bridge {} created successfully",
+            bridge_name
+        );
         Ok(())
     }
 
@@ -299,7 +309,13 @@ Bridge={}
         log_debug!("Discovering NetworkManager profiles");
 
         let output = Command::new("nmcli")
-            .args(&["-t", "-f", "NAME,UUID,TYPE,DEVICE,AUTOCONNECT", "connection", "show"])
+            .args(&[
+                "-t",
+                "-f",
+                "NAME,UUID,TYPE,DEVICE,AUTOCONNECT",
+                "connection",
+                "show",
+            ])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -315,7 +331,11 @@ Bridge={}
                     name: parts[0].to_string(),
                     uuid: parts[1].to_string(),
                     connection_type: parts[2].to_string(),
-                    interface: if parts[3].is_empty() { None } else { Some(parts[3].to_string()) },
+                    interface: if parts[3].is_empty() {
+                        None
+                    } else {
+                        Some(parts[3].to_string())
+                    },
                     autoconnect: parts[4] == "yes",
                 };
                 self.nm_profiles.push(profile);
@@ -331,7 +351,16 @@ Bridge={}
 
         // Create bridge connection
         let output = Command::new("nmcli")
-            .args(&["connection", "add", "type", "bridge", "con-name", bridge_name, "ifname", bridge_name])
+            .args(&[
+                "connection",
+                "add",
+                "type",
+                "bridge",
+                "con-name",
+                bridge_name,
+                "ifname",
+                bridge_name,
+            ])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -345,12 +374,27 @@ Bridge={}
         for interface in interfaces {
             let slave_name = format!("{}-slave-{}", bridge_name, interface);
             let output = Command::new("nmcli")
-                .args(&["connection", "add", "type", "bridge-slave", "con-name", &slave_name, "ifname", interface, "master", bridge_name])
+                .args(&[
+                    "connection",
+                    "add",
+                    "type",
+                    "bridge-slave",
+                    "con-name",
+                    &slave_name,
+                    "ifname",
+                    interface,
+                    "master",
+                    bridge_name,
+                ])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
             if !output.status.success() {
-                log_warn!("Failed to add interface {} to bridge {}", interface, bridge_name);
+                log_warn!(
+                    "Failed to add interface {} to bridge {}",
+                    interface,
+                    bridge_name
+                );
             }
         }
 
@@ -384,8 +428,8 @@ Bridge={}
         }
 
         let json_str = String::from_utf8_lossy(&output.stdout);
-        let interfaces: serde_json::Value = serde_json::from_str(&json_str)
-            .map_err(|_| NovaError::InvalidConfig)?;
+        let interfaces: serde_json::Value =
+            serde_json::from_str(&json_str).map_err(|_| NovaError::InvalidConfig)?;
 
         if let Some(interfaces_array) = interfaces.as_array() {
             for interface_data in interfaces_array {
@@ -413,7 +457,10 @@ Bridge={}
             }
         }
 
-        log_info!("Discovered {} network interfaces", self.config.detected_interfaces.len());
+        log_info!(
+            "Discovered {} network interfaces",
+            self.config.detected_interfaces.len()
+        );
         Ok(())
     }
 
@@ -504,7 +551,14 @@ Bridge={}
     }
 
     async fn ensure_kvm_modules(&self) -> Result<()> {
-        let modules = ["kvm", "kvm_intel", "kvm_amd", "vhost_net", "bridge", "br_netfilter"];
+        let modules = [
+            "kvm",
+            "kvm_intel",
+            "kvm_amd",
+            "vhost_net",
+            "bridge",
+            "br_netfilter",
+        ];
 
         for module in &modules {
             let output = Command::new("modprobe")
@@ -520,8 +574,10 @@ Bridge={}
         }
 
         // Persist module loading
-        let modules_conf = modules.join("
-");
+        let modules_conf = modules.join(
+            "
+",
+        );
         fs::write("/etc/modules-load.d/nova-kvm.conf", modules_conf).map_err(|e| {
             log_error!("Failed to write modules config: {}", e);
             NovaError::SystemCommandFailed
@@ -537,8 +593,13 @@ DefaultLimitNOFILE=65536
 DefaultLimitMEMLOCK=infinity
 "#;
 
-        fs::create_dir_all("/etc/systemd/system.conf.d").map_err(|_| NovaError::SystemCommandFailed)?;
-        fs::write("/etc/systemd/system.conf.d/nova-virtualization.conf", systemd_conf).map_err(|e| {
+        fs::create_dir_all("/etc/systemd/system.conf.d")
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+        fs::write(
+            "/etc/systemd/system.conf.d/nova-virtualization.conf",
+            systemd_conf,
+        )
+        .map_err(|e| {
             log_error!("Failed to write systemd config: {}", e);
             NovaError::SystemCommandFailed
         })?;
@@ -558,9 +619,7 @@ DefaultLimitMEMLOCK=infinity
 
             if !output.status.success() {
                 // Create group if it doesn't exist
-                let _ = Command::new("groupadd")
-                    .arg(group)
-                    .output();
+                let _ = Command::new("groupadd").arg(group).output();
             }
         }
 

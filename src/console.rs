@@ -1,10 +1,10 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleSession {
@@ -102,8 +102,16 @@ impl ConsoleManager {
     }
 
     // Enhanced VNC Console
-    pub async fn create_vnc_console(&mut self, vm_name: &str, enhanced: bool) -> Result<ConsoleSession> {
-        log_info!("Creating {} VNC console for VM: {}", if enhanced { "enhanced" } else { "standard" }, vm_name);
+    pub async fn create_vnc_console(
+        &mut self,
+        vm_name: &str,
+        enhanced: bool,
+    ) -> Result<ConsoleSession> {
+        log_info!(
+            "Creating {} VNC console for VM: {}",
+            if enhanced { "enhanced" } else { "standard" },
+            vm_name
+        );
 
         let port = self.allocate_port(ConsoleType::VNC)?;
         let session_id = format!("vnc-{}-{}", vm_name, port);
@@ -153,10 +161,17 @@ impl ConsoleManager {
             port,
             protocol: "vnc".to_string(),
             auth_required: self.config.auth_required,
-            password: if self.config.auth_required { Some(self.generate_password()) } else { None },
+            password: if self.config.auth_required {
+                Some(self.generate_password())
+            } else {
+                None
+            },
             certificate_path: self.config.certificate_path.clone(),
             websocket_url: if self.config.web_console_enabled {
-                Some(format!("ws://localhost:{}/vnc/{}", self.config.web_console_port, session_id))
+                Some(format!(
+                    "ws://localhost:{}/vnc/{}",
+                    self.config.web_console_port, session_id
+                ))
             } else {
                 None
             },
@@ -210,10 +225,17 @@ impl ConsoleManager {
             port,
             protocol: "spice".to_string(),
             auth_required: self.config.auth_required,
-            password: if self.config.auth_required { Some(self.generate_password()) } else { None },
+            password: if self.config.auth_required {
+                Some(self.generate_password())
+            } else {
+                None
+            },
             certificate_path: self.config.certificate_path.clone(),
             websocket_url: if self.config.web_console_enabled {
-                Some(format!("ws://localhost:{}/spice/{}", self.config.web_console_port, session_id))
+                Some(format!(
+                    "ws://localhost:{}/spice/{}",
+                    self.config.web_console_port, session_id
+                ))
             } else {
                 None
             },
@@ -234,12 +256,20 @@ impl ConsoleManager {
             sessions.insert(session_id.clone(), session.clone());
         }
 
-        log_info!("SPICE console created successfully: {}:{}", "localhost", port);
+        log_info!(
+            "SPICE console created successfully: {}:{}",
+            "localhost",
+            port
+        );
         Ok(session)
     }
 
     // RDP Console (For Windows VMs)
-    pub async fn create_rdp_console(&mut self, vm_name: &str, vm_ip: &str) -> Result<ConsoleSession> {
+    pub async fn create_rdp_console(
+        &mut self,
+        vm_name: &str,
+        vm_ip: &str,
+    ) -> Result<ConsoleSession> {
         log_info!("Creating RDP console for VM: {} ({})", vm_name, vm_ip);
 
         let port = 3389; // Standard RDP port
@@ -250,10 +280,13 @@ impl ConsoleManager {
             port,
             protocol: "rdp".to_string(),
             auth_required: true, // RDP always requires auth
-            password: None, // User provides credentials
+            password: None,      // User provides credentials
             certificate_path: None,
             websocket_url: if self.config.web_console_enabled {
-                Some(format!("ws://localhost:{}/rdp/{}", self.config.web_console_port, session_id))
+                Some(format!(
+                    "ws://localhost:{}/rdp/{}",
+                    self.config.web_console_port, session_id
+                ))
             } else {
                 None
             },
@@ -293,7 +326,10 @@ impl ConsoleManager {
             password: None,
             certificate_path: None,
             websocket_url: if self.config.web_console_enabled {
-                Some(format!("ws://localhost:{}/serial/{}", self.config.web_console_port, session_id))
+                Some(format!(
+                    "ws://localhost:{}/serial/{}",
+                    self.config.web_console_port, session_id
+                ))
             } else {
                 None
             },
@@ -360,8 +396,11 @@ impl ConsoleManager {
             sessions.insert(session_id.clone(), session.clone());
         }
 
-        log_info!("Web console created: https://localhost:{}/vnc.html?token={}",
-                 self.config.web_console_port, session_id);
+        log_info!(
+            "Web console created: https://localhost:{}/vnc.html?token={}",
+            self.config.web_console_port,
+            session_id
+        );
         Ok(session)
     }
 
@@ -369,8 +408,14 @@ impl ConsoleManager {
         // Start websockify proxy for noVNC
         let _websockify_cmd = Command::new("websockify")
             .args(&[
-                &format!("{}:{}", self.config.web_console_port, vnc_session.connection_info.port),
-                &format!("{}:{}", vnc_session.connection_info.host, vnc_session.connection_info.port)
+                &format!(
+                    "{}:{}",
+                    self.config.web_console_port, vnc_session.connection_info.port
+                ),
+                &format!(
+                    "{}:{}",
+                    vnc_session.connection_info.host, vnc_session.connection_info.port
+                ),
             ])
             .spawn()
             .map_err(|e| {
@@ -433,21 +478,38 @@ impl ConsoleManager {
     }
 
     pub async fn enable_usb_redirection(&self, session_id: &str, device_id: &str) -> Result<()> {
-        log_info!("Enabling USB redirection for session: {} device: {}", session_id, device_id);
+        log_info!(
+            "Enabling USB redirection for session: {} device: {}",
+            session_id,
+            device_id
+        );
         // Requires SPICE and proper USB passthrough configuration
         Ok(())
     }
 
-    pub async fn set_display_resolution(&self, session_id: &str, width: u32, height: u32) -> Result<()> {
-        log_info!("Setting display resolution for session: {} to {}x{}", session_id, width, height);
+    pub async fn set_display_resolution(
+        &self,
+        session_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        log_info!(
+            "Setting display resolution for session: {} to {}x{}",
+            session_id,
+            width,
+            height
+        );
 
         if let Some(session) = self.get_console_session(session_id) {
             match session.console_type {
                 ConsoleType::SPICE => {
                     // SPICE supports dynamic resolution changes
                     // Send resolution change command to guest agent
-                    self.send_guest_agent_command(&session.vm_name,
-                        &format!("display-set-resolution width={} height={}", width, height)).await?;
+                    self.send_guest_agent_command(
+                        &session.vm_name,
+                        &format!("display-set-resolution width={} height={}", width, height),
+                    )
+                    .await?;
                 }
                 ConsoleType::VNC => {
                     // VNC resolution is more limited
@@ -464,12 +526,19 @@ impl ConsoleManager {
 
     async fn send_guest_agent_command(&self, vm_name: &str, command: &str) -> Result<()> {
         let output = Command::new("virsh")
-            .args(&["qemu-agent-command", vm_name, &format!("{{\"execute\":\"{}\"}}", command)])
+            .args(&[
+                "qemu-agent-command",
+                vm_name,
+                &format!("{{\"execute\":\"{}\"}}", command),
+            ])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
         if !output.status.success() {
-            log_error!("Failed to send guest agent command: {}", String::from_utf8_lossy(&output.stderr));
+            log_error!(
+                "Failed to send guest agent command: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Err(NovaError::SystemCommandFailed);
         }
 
@@ -477,14 +546,25 @@ impl ConsoleManager {
     }
 
     // Multi-monitor support
-    pub async fn configure_multi_monitor(&self, session_id: &str, monitor_count: u32) -> Result<()> {
-        log_info!("Configuring {} monitors for session: {}", monitor_count, session_id);
+    pub async fn configure_multi_monitor(
+        &self,
+        session_id: &str,
+        monitor_count: u32,
+    ) -> Result<()> {
+        log_info!(
+            "Configuring {} monitors for session: {}",
+            monitor_count,
+            session_id
+        );
 
         if let Some(session) = self.get_console_session(session_id) {
             if matches!(session.console_type, ConsoleType::SPICE) {
                 // SPICE supports multi-monitor natively
-                self.send_guest_agent_command(&session.vm_name,
-                    &format!("display-set-monitors count={}", monitor_count)).await?;
+                self.send_guest_agent_command(
+                    &session.vm_name,
+                    &format!("display-set-monitors count={}", monitor_count),
+                )
+                .await?;
             } else {
                 log_warn!("Multi-monitor support requires SPICE console");
             }

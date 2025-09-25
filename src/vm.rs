@@ -1,8 +1,14 @@
-use crate::{config::VmConfig, instance::Instance, log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{
+    NovaError, Result,
+    config::{DiskFormat, VmConfig},
+    instance::Instance,
+    log_debug, log_error, log_info, log_warn,
+};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 pub struct VmManager {
     instances: Arc<Mutex<HashMap<String, Instance>>>,
@@ -37,39 +43,48 @@ impl VmManager {
         let mut cmd = Command::new("qemu-system-x86_64");
 
         // Basic configuration
-        cmd.arg("-name").arg(name)
-           .arg("-m").arg(format!("{}M", self.parse_memory_mb(&vm_config.memory)?))
-           .arg("-cpu").arg("host")
-           .arg("-enable-kvm")
-           .arg("-smp").arg(vm_config.cpu.to_string())
-           .arg("-daemonize")
-           .arg("-monitor").arg("none")
-           .arg("-display").arg("none");
+        cmd.arg("-name")
+            .arg(name)
+            .arg("-m")
+            .arg(format!("{}M", self.parse_memory_mb(&vm_config.memory)?))
+            .arg("-cpu")
+            .arg("host")
+            .arg("-enable-kvm")
+            .arg("-smp")
+            .arg(vm_config.cpu.to_string())
+            .arg("-daemonize")
+            .arg("-monitor")
+            .arg("none")
+            .arg("-display")
+            .arg("none");
 
-        // Add disk image if specified
-        if let Some(image_path) = &vm_config.image {
-            cmd.arg("-drive").arg(format!("file={},format=qcow2,if=virtio", image_path));
-        } else {
-            // Create a temporary disk for testing
-            self.create_test_disk(name).await?;
-            let temp_disk = format!("/tmp/nova_{}.qcow2", name);
-            cmd.arg("-drive").arg(format!("file={},format=qcow2,if=virtio", temp_disk));
-        }
+        let (disk_path, disk_format) = prepare_vm_disk(name, &vm_config).await?;
+        cmd.arg("-drive").arg(format!(
+            "file={},format={},if=virtio",
+            disk_path.to_string_lossy(),
+            disk_format.as_str()
+        ));
 
         // GPU passthrough
         if vm_config.gpu_passthrough {
             log_info!("Enabling GPU passthrough for VM '{}'", name);
-            cmd.arg("-vga").arg("none")
-               .arg("-device").arg("vfio-pci,host=01:00.0"); // Example GPU device
+            cmd.arg("-vga")
+                .arg("none")
+                .arg("-device")
+                .arg("vfio-pci,host=01:00.0"); // Example GPU device
         }
 
         // Network configuration
         if let Some(network) = &vm_config.network {
-            cmd.arg("-netdev").arg(format!("bridge,id=net0,br={}", network))
-               .arg("-device").arg("virtio-net-pci,netdev=net0");
+            cmd.arg("-netdev")
+                .arg(format!("bridge,id=net0,br={}", network))
+                .arg("-device")
+                .arg("virtio-net-pci,netdev=net0");
         } else {
-            cmd.arg("-netdev").arg("user,id=net0")
-               .arg("-device").arg("virtio-net-pci,netdev=net0");
+            cmd.arg("-netdev")
+                .arg("user,id=net0")
+                .arg("-device")
+                .arg("virtio-net-pci,netdev=net0");
         }
 
         log_debug!("QEMU command: {:?}", cmd);
@@ -197,30 +212,6 @@ impl VmManager {
         Ok(bytes / (1024 * 1024)) // Convert to MB
     }
 
-    async fn create_test_disk(&self, vm_name: &str) -> Result<()> {
-        let disk_path = format!("/tmp/nova_{}.qcow2", vm_name);
-
-        // Check if disk already exists
-        if tokio::fs::metadata(&disk_path).await.is_ok() {
-            return Ok(());
-        }
-
-        log_info!("Creating test disk for VM '{}' at {}", vm_name, disk_path);
-
-        let output = Command::new("qemu-img")
-            .args(&["create", "-f", "qcow2", &disk_path, "1G"])
-            .output()
-            .map_err(|_| NovaError::SystemCommandFailed)?;
-
-        if !output.status.success() {
-            log_error!("Failed to create test disk: {}", String::from_utf8_lossy(&output.stderr));
-            return Err(NovaError::SystemCommandFailed);
-        }
-
-        log_debug!("Test disk created successfully at {}", disk_path);
-        Ok(())
-    }
-
     // Check if libvirt is available and try to use it
     pub fn check_libvirt(&self) -> bool {
         Command::new("virsh")
@@ -235,4 +226,62 @@ impl Default for VmManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub(crate) async fn prepare_vm_disk(
+    vm_name: &str,
+    config: &VmConfig,
+) -> Result<(PathBuf, DiskFormat)> {
+    if let Some(image_path) = &config.image {
+        return Ok((PathBuf::from(image_path), config.storage.format));
+    }
+
+    let storage_cfg = config.storage.clone();
+    let disk_path = storage_cfg.resolve_disk_path(vm_name);
+
+    if tokio::fs::metadata(&disk_path).await.is_ok() {
+        return Ok((disk_path, storage_cfg.format));
+    }
+
+    if !storage_cfg.create_if_missing {
+        return Err(NovaError::ConfigError(format!(
+            "Disk image '{}' not found and auto-creation disabled",
+            disk_path.display()
+        )));
+    }
+
+    if let Some(parent) = disk_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    log_info!(
+        "Provisioning disk for VM '{}' at {} (format={}, size={})",
+        vm_name,
+        disk_path.display(),
+        storage_cfg.format.as_str(),
+        storage_cfg.size
+    );
+
+    let output = Command::new("qemu-img")
+        .args(&[
+            "create",
+            "-f",
+            storage_cfg.format.as_str(),
+            &disk_path.to_string_lossy(),
+            &storage_cfg.size,
+        ])
+        .output()
+        .map_err(|_| NovaError::SystemCommandFailed)?;
+
+    if !output.status.success() {
+        log_error!(
+            "Failed to create disk {}: {}",
+            disk_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(NovaError::SystemCommandFailed);
+    }
+
+    log_debug!("Disk created at {}", disk_path.display());
+    Ok((disk_path, storage_cfg.format))
 }

@@ -85,8 +85,12 @@ impl TemplateManager {
         self.templates.iter().find(|t| t.name == name)
     }
 
-    pub fn get_templates_by_category(&self, category: &TemplateCategory) -> Vec<&ContainerTemplate> {
-        self.templates.iter()
+    pub fn get_templates_by_category(
+        &self,
+        category: &TemplateCategory,
+    ) -> Vec<&ContainerTemplate> {
+        self.templates
+            .iter()
             .filter(|t| std::mem::discriminant(&t.category) == std::mem::discriminant(category))
             .collect()
     }
@@ -124,18 +128,17 @@ impl TemplateManager {
     fn create_lamp_stack(&self) -> ContainerTemplate {
         ContainerTemplate {
             name: "lamp-stack".to_string(),
-            description: "Complete LAMP (Linux, Apache, MySQL, PHP) development environment".to_string(),
+            description: "Complete LAMP (Linux, Apache, MySQL, PHP) development environment"
+                .to_string(),
             category: TemplateCategory::Development,
             recommended_runtime: Some("docker".to_string()),
             requires_gpu: false,
             difficulty: TemplateDifficulty::Beginner,
-            networks: vec![
-                TemplateNetwork {
-                    name: "lamp-network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.20.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "lamp-network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.20.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "lamp_web".to_string(),
@@ -146,7 +149,7 @@ impl TemplateManager {
                     name: "lamp_db".to_string(),
                     path: "./mysql-data".to_string(),
                     description: "MySQL database files".to_string(),
-                }
+                },
             ],
             containers: vec![
                 TemplateContainer {
@@ -158,7 +161,10 @@ impl TemplateManager {
                         ("MYSQL_DATABASE".to_string(), "webapp".to_string()),
                         ("MYSQL_USER".to_string(), "webuser".to_string()),
                         ("MYSQL_PASSWORD".to_string(), "webpass123".to_string()),
-                    ].iter().cloned().collect(),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec!["./mysql-data:/var/lib/mysql".to_string()],
                     depends_on: vec![],
                     runtime: None,
@@ -186,14 +192,17 @@ impl TemplateManager {
                         ("PMA_HOST".to_string(), "mysql".to_string()),
                         ("PMA_USER".to_string(), "root".to_string()),
                         ("PMA_PASSWORD".to_string(), "rootpass123".to_string()),
-                    ].iter().cloned().collect(),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec![],
                     depends_on: vec!["mysql".to_string()],
                     runtime: None,
                     gpu_access: false,
                     memory_limit: Some("128Mi".to_string()),
                     cpu_limit: Some("0.25".to_string()),
-                }
+                },
             ],
         }
     }
@@ -201,18 +210,18 @@ impl TemplateManager {
     fn create_ml_workspace(&self) -> ContainerTemplate {
         ContainerTemplate {
             name: "ml-workspace".to_string(),
-            description: "GPU-accelerated ML development environment with Jupyter, PyTorch, and TensorFlow".to_string(),
+            description:
+                "GPU-accelerated ML development environment with Jupyter, PyTorch, and TensorFlow"
+                    .to_string(),
             category: TemplateCategory::AiMl,
             recommended_runtime: Some("bolt".to_string()),
             requires_gpu: true,
             difficulty: TemplateDifficulty::Intermediate,
-            networks: vec![
-                TemplateNetwork {
-                    name: "ml-network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.21.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "ml-network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.21.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "ml_notebooks".to_string(),
@@ -228,7 +237,7 @@ impl TemplateManager {
                     name: "ml_models".to_string(),
                     path: "./models".to_string(),
                     description: "Trained model files".to_string(),
-                }
+                },
             ],
             containers: vec![
                 TemplateContainer {
@@ -238,7 +247,10 @@ impl TemplateManager {
                     environment: [
                         ("JUPYTER_ENABLE_LAB".to_string(), "yes".to_string()),
                         ("JUPYTER_TOKEN".to_string(), "nova-ml-workspace".to_string()),
-                    ].iter().cloned().collect(),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec![
                         "./notebooks:/workspace/notebooks".to_string(),
                         "./datasets:/workspace/datasets".to_string(),
@@ -273,7 +285,7 @@ impl TemplateManager {
                     gpu_access: false,
                     memory_limit: Some("512Mi".to_string()),
                     cpu_limit: Some("0.5".to_string()),
-                }
+                },
             ],
         }
     }
@@ -281,18 +293,17 @@ impl TemplateManager {
     fn create_monitoring_stack(&self) -> ContainerTemplate {
         ContainerTemplate {
             name: "monitoring-stack".to_string(),
-            description: "Complete monitoring solution with Prometheus, Grafana, and Alertmanager".to_string(),
+            description: "Complete monitoring solution with Prometheus, Grafana, and Alertmanager"
+                .to_string(),
             category: TemplateCategory::Monitoring,
             recommended_runtime: Some("docker".to_string()),
             requires_gpu: false,
             difficulty: TemplateDifficulty::Intermediate,
-            networks: vec![
-                TemplateNetwork {
-                    name: "monitoring".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.22.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "monitoring".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.22.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "prometheus_data".to_string(),
@@ -303,7 +314,7 @@ impl TemplateManager {
                     name: "grafana_data".to_string(),
                     path: "./grafana".to_string(),
                     description: "Grafana dashboards and configuration".to_string(),
-                }
+                },
             ],
             containers: vec![
                 TemplateContainer {
@@ -322,9 +333,13 @@ impl TemplateManager {
                     name: "grafana".to_string(),
                     image: "grafana/grafana:latest".to_string(),
                     ports: vec!["3000:3000".to_string()],
-                    environment: [
-                        ("GF_SECURITY_ADMIN_PASSWORD".to_string(), "admin".to_string()),
-                    ].iter().cloned().collect(),
+                    environment: [(
+                        "GF_SECURITY_ADMIN_PASSWORD".to_string(),
+                        "admin".to_string(),
+                    )]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec!["./grafana:/var/lib/grafana".to_string()],
                     depends_on: vec!["prometheus".to_string()],
                     runtime: None,
@@ -337,13 +352,16 @@ impl TemplateManager {
                     image: "prom/node-exporter:latest".to_string(),
                     ports: vec!["9100:9100".to_string()],
                     environment: HashMap::new(),
-                    volumes: vec!["/proc:/host/proc:ro".to_string(), "/sys:/host/sys:ro".to_string()],
+                    volumes: vec![
+                        "/proc:/host/proc:ro".to_string(),
+                        "/sys:/host/sys:ro".to_string(),
+                    ],
                     depends_on: vec![],
                     runtime: None,
                     gpu_access: false,
                     memory_limit: Some("128Mi".to_string()),
                     cpu_limit: Some("0.25".to_string()),
-                }
+                },
             ],
         }
     }
@@ -356,13 +374,11 @@ impl TemplateManager {
             recommended_runtime: Some("docker".to_string()),
             requires_gpu: false,
             difficulty: TemplateDifficulty::Beginner,
-            networks: vec![
-                TemplateNetwork {
-                    name: "nextcloud".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.23.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "nextcloud".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.23.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "nextcloud_data".to_string(),
@@ -373,7 +389,7 @@ impl TemplateManager {
                     name: "postgres_data".to_string(),
                     path: "./postgres".to_string(),
                     description: "PostgreSQL database files".to_string(),
-                }
+                },
             ],
             containers: vec![
                 TemplateContainer {
@@ -384,7 +400,10 @@ impl TemplateManager {
                         ("POSTGRES_DB".to_string(), "nextcloud".to_string()),
                         ("POSTGRES_USER".to_string(), "nextcloud".to_string()),
                         ("POSTGRES_PASSWORD".to_string(), "nextcloud123".to_string()),
-                    ].iter().cloned().collect(),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec!["./postgres:/var/lib/postgresql/data".to_string()],
                     depends_on: vec![],
                     runtime: None,
@@ -401,14 +420,17 @@ impl TemplateManager {
                         ("POSTGRES_DB".to_string(), "nextcloud".to_string()),
                         ("POSTGRES_USER".to_string(), "nextcloud".to_string()),
                         ("POSTGRES_PASSWORD".to_string(), "nextcloud123".to_string()),
-                    ].iter().cloned().collect(),
+                    ]
+                    .iter()
+                    .cloned()
+                    .collect(),
                     volumes: vec!["./nextcloud:/var/www/html".to_string()],
                     depends_on: vec!["postgres".to_string()],
                     runtime: None,
                     gpu_access: false,
                     memory_limit: Some("1Gi".to_string()),
                     cpu_limit: Some("1".to_string()),
-                }
+                },
             ],
         }
     }
@@ -418,26 +440,43 @@ impl TemplateManager {
         let mut wordpress_env = HashMap::new();
         wordpress_env.insert("WORDPRESS_DB_HOST".to_string(), "mysql:3306".to_string());
         wordpress_env.insert("WORDPRESS_DB_USER".to_string(), "wordpress".to_string());
-        wordpress_env.insert("WORDPRESS_DB_PASSWORD".to_string(), "wordpress_password".to_string());
+        wordpress_env.insert(
+            "WORDPRESS_DB_PASSWORD".to_string(),
+            "wordpress_password".to_string(),
+        );
         wordpress_env.insert("WORDPRESS_DB_NAME".to_string(), "wordpress".to_string());
         wordpress_env.insert("WORDPRESS_DEBUG".to_string(), "1".to_string());
 
         let mut mysql_env = HashMap::new();
         mysql_env.insert("MYSQL_DATABASE".to_string(), "wordpress".to_string());
         mysql_env.insert("MYSQL_USER".to_string(), "wordpress".to_string());
-        mysql_env.insert("MYSQL_PASSWORD".to_string(), "wordpress_password".to_string());
-        mysql_env.insert("MYSQL_ROOT_PASSWORD".to_string(), "root_password".to_string());
+        mysql_env.insert(
+            "MYSQL_PASSWORD".to_string(),
+            "wordpress_password".to_string(),
+        );
+        mysql_env.insert(
+            "MYSQL_ROOT_PASSWORD".to_string(),
+            "root_password".to_string(),
+        );
 
         let mut redis_env = HashMap::new();
         redis_env.insert("REDIS_PASSWORD".to_string(), "redis_password".to_string());
 
         let mut nginx_env = HashMap::new();
-        nginx_env.insert("NGINX_ENVSUBST_TEMPLATE_DIR".to_string(), "/etc/nginx/templates".to_string());
-        nginx_env.insert("NGINX_ENVSUBST_OUTPUT_DIR".to_string(), "/etc/nginx/conf.d".to_string());
+        nginx_env.insert(
+            "NGINX_ENVSUBST_TEMPLATE_DIR".to_string(),
+            "/etc/nginx/templates".to_string(),
+        );
+        nginx_env.insert(
+            "NGINX_ENVSUBST_OUTPUT_DIR".to_string(),
+            "/etc/nginx/conf.d".to_string(),
+        );
 
         ContainerTemplate {
             name: "wordpress-pro".to_string(),
-            description: "Professional WordPress development stack with MySQL, Redis, nginx, and SSL".to_string(),
+            description:
+                "Professional WordPress development stack with MySQL, Redis, nginx, and SSL"
+                    .to_string(),
             category: TemplateCategory::WebServices,
             containers: vec![
                 TemplateContainer {
@@ -496,13 +535,11 @@ impl TemplateManager {
                     cpu_limit: Some("0.2".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "wordpress_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.20.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "wordpress_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.20.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "mysql_data".to_string(),
@@ -530,10 +567,22 @@ impl TemplateManager {
     fn create_ghost_cms(&self) -> ContainerTemplate {
         let mut ghost_env = HashMap::new();
         ghost_env.insert("database__client".to_string(), "mysql".to_string());
-        ghost_env.insert("database__connection__host".to_string(), "mysql".to_string());
-        ghost_env.insert("database__connection__user".to_string(), "ghost".to_string());
-        ghost_env.insert("database__connection__password".to_string(), "ghost_password".to_string());
-        ghost_env.insert("database__connection__database".to_string(), "ghost".to_string());
+        ghost_env.insert(
+            "database__connection__host".to_string(),
+            "mysql".to_string(),
+        );
+        ghost_env.insert(
+            "database__connection__user".to_string(),
+            "ghost".to_string(),
+        );
+        ghost_env.insert(
+            "database__connection__password".to_string(),
+            "ghost_password".to_string(),
+        );
+        ghost_env.insert(
+            "database__connection__database".to_string(),
+            "ghost".to_string(),
+        );
         ghost_env.insert("url".to_string(), "https://localhost".to_string());
         ghost_env.insert("NODE_ENV".to_string(), "development".to_string());
 
@@ -541,7 +590,10 @@ impl TemplateManager {
         mysql_env.insert("MYSQL_DATABASE".to_string(), "ghost".to_string());
         mysql_env.insert("MYSQL_USER".to_string(), "ghost".to_string());
         mysql_env.insert("MYSQL_PASSWORD".to_string(), "ghost_password".to_string());
-        mysql_env.insert("MYSQL_ROOT_PASSWORD".to_string(), "root_password".to_string());
+        mysql_env.insert(
+            "MYSQL_ROOT_PASSWORD".to_string(),
+            "root_password".to_string(),
+        );
 
         ContainerTemplate {
             name: "ghost-cms-pro".to_string(),
@@ -588,13 +640,11 @@ impl TemplateManager {
                     cpu_limit: Some("0.2".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "ghost_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.21.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "ghost_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.21.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "ghost_mysql_data".to_string(),
@@ -616,8 +666,14 @@ impl TemplateManager {
     // Complete MEAN Stack
     fn create_mean_stack(&self) -> ContainerTemplate {
         let mut mongo_env = HashMap::new();
-        mongo_env.insert("MONGO_INITDB_ROOT_USERNAME".to_string(), "admin".to_string());
-        mongo_env.insert("MONGO_INITDB_ROOT_PASSWORD".to_string(), "admin_password".to_string());
+        mongo_env.insert(
+            "MONGO_INITDB_ROOT_USERNAME".to_string(),
+            "admin".to_string(),
+        );
+        mongo_env.insert(
+            "MONGO_INITDB_ROOT_PASSWORD".to_string(),
+            "admin_password".to_string(),
+        );
         mongo_env.insert("MONGO_INITDB_DATABASE".to_string(), "meanapp".to_string());
 
         let mut node_env = HashMap::new();
@@ -628,7 +684,8 @@ impl TemplateManager {
 
         ContainerTemplate {
             name: "mean-stack".to_string(),
-            description: "Complete MEAN stack with MongoDB, Express, Angular, and Node.js".to_string(),
+            description: "Complete MEAN stack with MongoDB, Express, Angular, and Node.js"
+                .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -674,13 +731,11 @@ impl TemplateManager {
                     cpu_limit: Some("1.0".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "mean_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.22.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "mean_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.22.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "mongo_data".to_string(),
@@ -718,7 +773,8 @@ impl TemplateManager {
 
         ContainerTemplate {
             name: "rust-dev-env".to_string(),
-            description: "Complete Rust development environment with PostgreSQL and Redis".to_string(),
+            description: "Complete Rust development environment with PostgreSQL and Redis"
+                .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -762,13 +818,11 @@ impl TemplateManager {
                     cpu_limit: Some("0.2".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "rust_dev_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.23.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "rust_dev_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.23.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "cargo_registry".to_string(),
@@ -802,16 +856,24 @@ impl TemplateManager {
         let mut python_env = HashMap::new();
         python_env.insert("PYTHONPATH".to_string(), "/app".to_string());
         python_env.insert("FLASK_ENV".to_string(), "development".to_string());
-        python_env.insert("DATABASE_URL".to_string(), "postgresql://python:python_password@postgres:5432/pythonapp".to_string());
+        python_env.insert(
+            "DATABASE_URL".to_string(),
+            "postgresql://python:python_password@postgres:5432/pythonapp".to_string(),
+        );
 
         let mut postgres_env = HashMap::new();
         postgres_env.insert("POSTGRES_DB".to_string(), "pythonapp".to_string());
         postgres_env.insert("POSTGRES_USER".to_string(), "python".to_string());
-        postgres_env.insert("POSTGRES_PASSWORD".to_string(), "python_password".to_string());
+        postgres_env.insert(
+            "POSTGRES_PASSWORD".to_string(),
+            "python_password".to_string(),
+        );
 
         ContainerTemplate {
             name: "python-dev-stack".to_string(),
-            description: "Modern Python development with FastAPI/Flask, PostgreSQL, Redis, and Jupyter".to_string(),
+            description:
+                "Modern Python development with FastAPI/Flask, PostgreSQL, Redis, and Jupyter"
+                    .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -866,13 +928,11 @@ impl TemplateManager {
                     cpu_limit: Some("1.0".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "python_dev_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.24.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "python_dev_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.24.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "python_venv".to_string(),
@@ -897,27 +957,56 @@ impl TemplateManager {
     }
 
     // Additional professional templates
-    fn create_reverse_proxy(&self) -> ContainerTemplate { self.create_nginx_proxy_stack() }
-    fn create_static_website(&self) -> ContainerTemplate { self.create_jamstack_site() }
-    fn create_postgres_cluster(&self) -> ContainerTemplate { self.create_ha_postgres_cluster() }
-    fn create_redis_cache(&self) -> ContainerTemplate { self.create_redis_cluster() }
-    fn create_mongodb_replica(&self) -> ContainerTemplate { self.create_mongodb_replica_set() }
-    fn create_logging_stack(&self) -> ContainerTemplate { self.create_elk_stack() }
-    fn create_jupyter_lab(&self) -> ContainerTemplate { self.create_data_science_lab() }
-    fn create_network_security(&self) -> ContainerTemplate { self.create_security_stack() }
-    fn create_vault_cluster(&self) -> ContainerTemplate { self.create_hashicorp_vault() }
-    fn create_pihole_unbound(&self) -> ContainerTemplate { self.create_dns_security_stack() }
-    fn create_wireguard_vpn(&self) -> ContainerTemplate { self.create_vpn_server() }
-    fn create_minecraft_server(&self) -> ContainerTemplate { self.create_game_server() }
-    fn create_game_server_stack(&self) -> ContainerTemplate { self.create_multi_game_platform() }
-    fn create_collaboration_suite(&self) -> ContainerTemplate { self.create_nextcloud_suite() }
+    fn create_reverse_proxy(&self) -> ContainerTemplate {
+        self.create_nginx_proxy_stack()
+    }
+    fn create_static_website(&self) -> ContainerTemplate {
+        self.create_jamstack_site()
+    }
+    fn create_postgres_cluster(&self) -> ContainerTemplate {
+        self.create_ha_postgres_cluster()
+    }
+    fn create_redis_cache(&self) -> ContainerTemplate {
+        self.create_redis_cluster()
+    }
+    fn create_mongodb_replica(&self) -> ContainerTemplate {
+        self.create_mongodb_replica_set()
+    }
+    fn create_logging_stack(&self) -> ContainerTemplate {
+        self.create_elk_stack()
+    }
+    fn create_jupyter_lab(&self) -> ContainerTemplate {
+        self.create_data_science_lab()
+    }
+    fn create_network_security(&self) -> ContainerTemplate {
+        self.create_security_stack()
+    }
+    fn create_vault_cluster(&self) -> ContainerTemplate {
+        self.create_hashicorp_vault()
+    }
+    fn create_pihole_unbound(&self) -> ContainerTemplate {
+        self.create_dns_security_stack()
+    }
+    fn create_wireguard_vpn(&self) -> ContainerTemplate {
+        self.create_vpn_server()
+    }
+    fn create_minecraft_server(&self) -> ContainerTemplate {
+        self.create_game_server()
+    }
+    fn create_game_server_stack(&self) -> ContainerTemplate {
+        self.create_multi_game_platform()
+    }
+    fn create_collaboration_suite(&self) -> ContainerTemplate {
+        self.create_nextcloud_suite()
+    }
 
     // Implementation helpers for complex templates
     fn create_nginx_proxy_stack(&self) -> ContainerTemplate {
         // Implementation for reverse proxy with automatic SSL
         ContainerTemplate {
             name: "nginx-proxy-manager".to_string(),
-            description: "Advanced nginx reverse proxy with automatic SSL and load balancing".to_string(),
+            description: "Advanced nginx reverse proxy with automatic SSL and load balancing"
+                .to_string(),
             category: TemplateCategory::WebServices,
             containers: vec![], // Simplified for brevity
             networks: vec![],
@@ -947,7 +1036,8 @@ impl TemplateManager {
         // High-availability PostgreSQL with replication
         ContainerTemplate {
             name: "postgres-ha-cluster".to_string(),
-            description: "High-availability PostgreSQL cluster with streaming replication".to_string(),
+            description: "High-availability PostgreSQL cluster with streaming replication"
+                .to_string(),
             category: TemplateCategory::Databases,
             containers: vec![], // Simplified
             networks: vec![],
@@ -1244,12 +1334,16 @@ impl TemplateManager {
     fn create_zig_devenv(&self) -> ContainerTemplate {
         let mut zig_env = HashMap::new();
         zig_env.insert("ZIG_GLOBAL_CACHE_DIR".to_string(), "/zig-cache".to_string());
-        zig_env.insert("ZIG_LOCAL_CACHE_DIR".to_string(), "/workspace/.zig-cache".to_string());
+        zig_env.insert(
+            "ZIG_LOCAL_CACHE_DIR".to_string(),
+            "/workspace/.zig-cache".to_string(),
+        );
         zig_env.insert("PATH".to_string(), "/opt/zig:$PATH".to_string());
 
         ContainerTemplate {
             name: "zig-dev-v0-16-testbed".to_string(),
-            description: "Zig v0.16 development environment with LSP, testing, and build tools".to_string(),
+            description: "Zig v0.16 development environment with LSP, testing, and build tools"
+                .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -1284,13 +1378,11 @@ impl TemplateManager {
                     cpu_limit: Some("0.5".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "zig_dev_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.26.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "zig_dev_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.26.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "zig_cache".to_string(),
@@ -1312,19 +1404,30 @@ impl TemplateManager {
     fn create_cicd_testbed(&self) -> ContainerTemplate {
         let mut jenkins_env = HashMap::new();
         jenkins_env.insert("JENKINS_OPTS".to_string(), "--httpPort=8080".to_string());
-        jenkins_env.insert("JAVA_OPTS".to_string(), "-Djenkins.install.runSetupWizard=false".to_string());
+        jenkins_env.insert(
+            "JAVA_OPTS".to_string(),
+            "-Djenkins.install.runSetupWizard=false".to_string(),
+        );
 
         let mut drone_env = HashMap::new();
-        drone_env.insert("DRONE_GITEA_SERVER".to_string(), "http://gitea:3000".to_string());
+        drone_env.insert(
+            "DRONE_GITEA_SERVER".to_string(),
+            "http://gitea:3000".to_string(),
+        );
         drone_env.insert("DRONE_GITEA_CLIENT_ID".to_string(), "drone".to_string());
-        drone_env.insert("DRONE_GITEA_CLIENT_SECRET".to_string(), "drone_secret".to_string());
+        drone_env.insert(
+            "DRONE_GITEA_CLIENT_SECRET".to_string(),
+            "drone_secret".to_string(),
+        );
         drone_env.insert("DRONE_RPC_SECRET".to_string(), "rpc_secret_key".to_string());
         drone_env.insert("DRONE_SERVER_HOST".to_string(), "drone:80".to_string());
         drone_env.insert("DRONE_SERVER_PROTO".to_string(), "http".to_string());
 
         ContainerTemplate {
             name: "cicd-testing-platform".to_string(),
-            description: "Complete CI/CD testing platform with Jenkins, Drone, SonarQube, and Nexus".to_string(),
+            description:
+                "Complete CI/CD testing platform with Jenkins, Drone, SonarQube, and Nexus"
+                    .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -1383,13 +1486,11 @@ impl TemplateManager {
                     cpu_limit: Some("1.0".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "cicd_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.27.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "cicd_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.27.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "jenkins_home".to_string(),
@@ -1431,13 +1532,21 @@ impl TemplateManager {
     fn create_go_devenv(&self) -> ContainerTemplate {
         let mut go_env = HashMap::new();
         go_env.insert("GO111MODULE".to_string(), "on".to_string());
-        go_env.insert("GOPROXY".to_string(), "https://proxy.golang.org,direct".to_string());
+        go_env.insert(
+            "GOPROXY".to_string(),
+            "https://proxy.golang.org,direct".to_string(),
+        );
         go_env.insert("GOPATH".to_string(), "/go".to_string());
-        go_env.insert("PATH".to_string(), "/go/bin:/usr/local/go/bin:$PATH".to_string());
+        go_env.insert(
+            "PATH".to_string(),
+            "/go/bin:/usr/local/go/bin:$PATH".to_string(),
+        );
 
         ContainerTemplate {
             name: "go-microservices-testbed".to_string(),
-            description: "Go microservices development environment with Kubernetes, Istio, and observability".to_string(),
+            description:
+                "Go microservices development environment with Kubernetes, Istio, and observability"
+                    .to_string(),
             category: TemplateCategory::Development,
             containers: vec![
                 TemplateContainer {
@@ -1488,9 +1597,10 @@ impl TemplateManager {
                     name: "jaeger".to_string(),
                     image: "jaegertracing/all-in-one:latest".to_string(),
                     ports: vec!["16686:16686".to_string(), "14268:14268".to_string()],
-                    environment: HashMap::from([
-                        ("COLLECTOR_OTLP_ENABLED".to_string(), "true".to_string()),
-                    ]),
+                    environment: HashMap::from([(
+                        "COLLECTOR_OTLP_ENABLED".to_string(),
+                        "true".to_string(),
+                    )]),
                     volumes: vec![],
                     depends_on: vec![],
                     runtime: None,
@@ -1499,13 +1609,11 @@ impl TemplateManager {
                     cpu_limit: Some("0.5".to_string()),
                 },
             ],
-            networks: vec![
-                TemplateNetwork {
-                    name: "go_dev_network".to_string(),
-                    driver: "bridge".to_string(),
-                    subnet: Some("172.28.0.0/16".to_string()),
-                }
-            ],
+            networks: vec![TemplateNetwork {
+                name: "go_dev_network".to_string(),
+                driver: "bridge".to_string(),
+                subnet: Some("172.28.0.0/16".to_string()),
+            }],
             volumes: vec![
                 TemplateVolume {
                     name: "go_mod_cache".to_string(),
@@ -1635,7 +1743,8 @@ impl Default for TemplateManager {
 // Template deployment functionality
 impl TemplateManager {
     pub fn deploy_template(&self, template_name: &str, project_name: &str) -> Result<String> {
-        let template = self.get_template(template_name)
+        let template = self
+            .get_template(template_name)
             .ok_or_else(|| crate::NovaError::InvalidConfig)?;
 
         let mut nova_file = format!(
@@ -1643,96 +1752,159 @@ impl TemplateManager {
 ",
             template_name
         );
-        nova_file.push_str(&format!("project = \"{}\"
+        nova_file.push_str(&format!(
+            "project = \"{}\"
 
-", project_name));
+",
+            project_name
+        ));
 
         // Generate container configurations
         for container in &template.containers {
-            nova_file.push_str(&format!("[container.{}]
-", container.name));
-            nova_file.push_str(&format!("capsule = \"{}\"
-", container.image));
+            nova_file.push_str(&format!(
+                "[container.{}]
+",
+                container.name
+            ));
+            nova_file.push_str(&format!(
+                "capsule = \"{}\"
+",
+                container.image
+            ));
 
             if !container.volumes.is_empty() {
-                nova_file.push_str("volumes = [
-");
+                nova_file.push_str(
+                    "volumes = [
+",
+                );
                 for volume in &container.volumes {
-                    nova_file.push_str(&format!("  \"{}\",
-", volume));
+                    nova_file.push_str(&format!(
+                        "  \"{}\",
+",
+                        volume
+                    ));
                 }
-                nova_file.push_str("]
-");
+                nova_file.push_str(
+                    "]
+",
+                );
             }
 
             if !container.ports.is_empty() {
-                nova_file.push_str("ports = [
-");
+                nova_file.push_str(
+                    "ports = [
+",
+                );
                 for port in &container.ports {
-                    nova_file.push_str(&format!("  \"{}\",
-", port));
+                    nova_file.push_str(&format!(
+                        "  \"{}\",
+",
+                        port
+                    ));
                 }
-                nova_file.push_str("]
-");
+                nova_file.push_str(
+                    "]
+",
+                );
             }
 
             if let Some(runtime) = &container.runtime {
-                nova_file.push_str(&format!("runtime = \"{}\"
-", runtime));
+                nova_file.push_str(&format!(
+                    "runtime = \"{}\"
+",
+                    runtime
+                ));
             } else if let Some(runtime) = &template.recommended_runtime {
-                nova_file.push_str(&format!("runtime = \"{}\"
-", runtime));
+                nova_file.push_str(&format!(
+                    "runtime = \"{}\"
+",
+                    runtime
+                ));
             }
 
-            nova_file.push_str("autostart = true
-");
+            nova_file.push_str(
+                "autostart = true
+",
+            );
 
             // Environment variables
             if !container.environment.is_empty() {
-                nova_file.push_str(&format!("
+                nova_file.push_str(&format!(
+                    "
 [container.{}.env]
-", container.name));
+",
+                    container.name
+                ));
                 for (key, value) in &container.environment {
-                    nova_file.push_str(&format!("{} = \"{}\"
-", key, value));
+                    nova_file.push_str(&format!(
+                        "{} = \"{}\"
+",
+                        key, value
+                    ));
                 }
             }
 
             // Bolt configuration if needed
-            if container.gpu_access || container.memory_limit.is_some() || container.cpu_limit.is_some() {
-                nova_file.push_str(&format!("
+            if container.gpu_access
+                || container.memory_limit.is_some()
+                || container.cpu_limit.is_some()
+            {
+                nova_file.push_str(&format!(
+                    "
 [container.{}.bolt]
-", container.name));
+",
+                    container.name
+                ));
                 if container.gpu_access {
-                    nova_file.push_str("gpu_access = true
-");
+                    nova_file.push_str(
+                        "gpu_access = true
+",
+                    );
                 }
                 if let Some(memory) = &container.memory_limit {
-                    nova_file.push_str(&format!("memory_limit = \"{}\"
-", memory));
+                    nova_file.push_str(&format!(
+                        "memory_limit = \"{}\"
+",
+                        memory
+                    ));
                 }
                 if let Some(cpu) = &container.cpu_limit {
-                    nova_file.push_str(&format!("cpu_limit = \"{}\"
-", cpu));
+                    nova_file.push_str(&format!(
+                        "cpu_limit = \"{}\"
+",
+                        cpu
+                    ));
                 }
             }
 
-            nova_file.push_str("
-");
+            nova_file.push_str(
+                "
+",
+            );
         }
 
         // Generate network configurations
         for network in &template.networks {
-            nova_file.push_str(&format!("[network.{}]
-", network.name));
-            nova_file.push_str(&format!("type = \"bridge\"
-"));
+            nova_file.push_str(&format!(
+                "[network.{}]
+",
+                network.name
+            ));
+            nova_file.push_str(&format!(
+                "type = \"bridge\"
+"
+            ));
             if let Some(subnet) = &network.subnet {
-                nova_file.push_str(&format!("subnet = \"{}\"
-", subnet));
+                nova_file.push_str(&format!(
+                    "subnet = \"{}\"
+",
+                    subnet
+                ));
             }
-            nova_file.push_str("
-");
+            nova_file.push_str(
+                "
+",
+            );
         }
 
         Ok(nova_file)

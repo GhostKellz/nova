@@ -1,0 +1,26 @@
+# Sample NovaFile excerpt enabling the RC5 observability stack.
+
+[metrics]
+exporter = true
+listen = "0.0.0.0:9640"
+collect_libvirt_stats = true
+collect_container_stats = true
+
+[metrics.tls]
+enabled = false
+cert_path = "/etc/nova/certs/metrics.crt"
+key_path = "/etc/nova/certs/metrics.key"
+
+[metrics.alerts]
+config = "./examples/alert-rules.yml"
+
+[docs]
+portal = true
+# Path to the docs repo used by the publishing pipeline
+repository = "git@github.com:ghostkellz/nova-docs.git"
+branch = "main"
+
+[support]
+# Enable the support bundle helpers introduced in RC5
+bundle = true
+redaction_profile = "strict"

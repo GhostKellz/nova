@@ -2,7 +2,7 @@ use crate::{NovaError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NovaConfig {
@@ -27,6 +27,29 @@ pub struct VmConfig {
     pub network: Option<String>,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default)]
+    pub storage: VmStorageConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmStorageConfig {
+    /// Directory containing the VM disk image. Defaults to `/var/lib/nova/disks`.
+    pub directory: Option<String>,
+    /// Disk filename; defaults to `<vm_name>.<format>`.
+    pub filename: Option<String>,
+    #[serde(default = "default_disk_format")]
+    pub format: DiskFormat,
+    #[serde(default = "default_disk_size")]
+    pub size: String,
+    #[serde(default = "default_create_if_missing")]
+    pub create_if_missing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskFormat {
+    Qcow2,
+    Raw,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +76,7 @@ pub struct BoltConfig {
     #[serde(default)]
     pub gpu_devices: Vec<String>, // ["nvidia0", "nvidia1"]
     pub memory_limit: Option<String>, // "8Gi", "512Mi"
-    pub cpu_limit: Option<String>, // "4", "2.5"
+    pub cpu_limit: Option<String>,    // "4", "2.5"
     #[serde(default)]
     pub security_profile: String, // "default", "strict", "production"
     #[serde(default)]
@@ -107,7 +130,26 @@ impl Default for VmConfig {
             gpu_passthrough: false,
             network: None,
             autostart: false,
+            storage: VmStorageConfig::default(),
         }
+    }
+}
+
+impl Default for VmStorageConfig {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            filename: None,
+            format: default_disk_format(),
+            size: default_disk_size(),
+            create_if_missing: default_create_if_missing(),
+        }
+    }
+}
+
+impl Default for DiskFormat {
+    fn default() -> Self {
+        DiskFormat::Qcow2
     }
 }
 
@@ -163,6 +205,53 @@ fn default_memory() -> String {
     "1Gi".to_string()
 }
 
+fn default_disk_format() -> DiskFormat {
+    DiskFormat::Qcow2
+}
+
+fn default_disk_size() -> String {
+    "20Gi".to_string()
+}
+
+fn default_create_if_missing() -> bool {
+    true
+}
+
+impl VmStorageConfig {
+    const DEFAULT_DIRECTORY: &str = "/var/lib/nova/disks";
+
+    pub fn resolve_disk_path(&self, vm_name: &str) -> PathBuf {
+        let directory = self
+            .directory
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(Self::DEFAULT_DIRECTORY));
+
+        let filename = self
+            .filename
+            .clone()
+            .unwrap_or_else(|| format!("{}.{}", vm_name, self.format.extension()));
+
+        directory.join(filename)
+    }
+}
+
+impl DiskFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "raw",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            DiskFormat::Qcow2 => "qcow2",
+            DiskFormat::Raw => "img",
+        }
+    }
+}
+
 impl NovaConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = fs::read_to_string(path)?;
@@ -176,9 +265,7 @@ impl NovaConfig {
     }
 
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let contents = toml::to_string_pretty(self).map_err(|_e| {
-            NovaError::InvalidConfig
-        })?;
+        let contents = toml::to_string_pretty(self).map_err(|_e| NovaError::InvalidConfig)?;
         fs::write(path, contents)?;
         Ok(())
     }
@@ -246,6 +333,7 @@ pub fn parse_memory_to_bytes(memory_str: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_parse_memory() {
@@ -297,5 +385,13 @@ dns = true
         let container = config.get_container("api").unwrap();
         assert_eq!(container.capsule, Some("ubuntu:22.04".to_string()));
         assert_eq!(container.volumes, vec!["./api:/srv/api"]);
+    }
+
+    #[test]
+    fn vm_storage_defaults() {
+        let storage = VmStorageConfig::default();
+        let path = storage.resolve_disk_path("demo-vm");
+        assert_eq!(path, PathBuf::from("/var/lib/nova/disks/demo-vm.qcow2"));
+        assert_eq!(storage.format.as_str(), "qcow2");
     }
 }

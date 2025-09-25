@@ -1,12 +1,12 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
 use crate::firewall::{FirewallManager, FirewallRule, TrafficFlow};
-use crate::port_monitor::{PortMonitor, ListeningPort, ActiveConnection, SecurityAlert};
+use crate::port_monitor::{ActiveConnection, ListeningPort, PortMonitor, SecurityAlert};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::net::TcpListener;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
 
 #[derive(Debug, Clone)]
 pub struct PrometheusExporter {
@@ -155,9 +155,8 @@ impl PrometheusExporter {
         let interval = self.collection_interval_secs;
 
         tokio::spawn(async move {
-            let mut collection_interval = tokio::time::interval(
-                tokio::time::Duration::from_secs(interval)
-            );
+            let mut collection_interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(interval));
 
             loop {
                 collection_interval.tick().await;
@@ -187,7 +186,9 @@ impl PrometheusExporter {
 
                         let registry = registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = Self::handle_metrics_request(&mut stream, registry).await {
+                            if let Err(e) =
+                                Self::handle_metrics_request(&mut stream, registry).await
+                            {
                                 log_error!("Failed to handle metrics request: {:?}", e);
                             }
                         });
@@ -199,17 +200,22 @@ impl PrometheusExporter {
             }
         });
 
-        log_info!("Prometheus metrics server started on http://0.0.0.0:{}/metrics", self.port);
+        log_info!(
+            "Prometheus metrics server started on http://0.0.0.0:{}/metrics",
+            self.port
+        );
         Ok(())
     }
 
     async fn handle_metrics_request(
         stream: &mut tokio::net::TcpStream,
-        registry: Arc<Mutex<MetricsRegistry>>
+        registry: Arc<Mutex<MetricsRegistry>>,
     ) -> Result<()> {
         let mut reader = BufReader::new(&mut *stream);
         let mut request_line = String::new();
-        reader.read_line(&mut request_line).await
+        reader
+            .read_line(&mut request_line)
+            .await
             .map_err(|_| NovaError::NetworkError("Failed to read request".to_string()))?;
 
         // Simple HTTP response with metrics
@@ -228,7 +234,9 @@ impl PrometheusExporter {
             metrics_output
         );
 
-        stream.write_all(response.as_bytes()).await
+        stream
+            .write_all(response.as_bytes())
+            .await
             .map_err(|_| NovaError::NetworkError("Failed to write response".to_string()))?;
 
         Ok(())
@@ -370,21 +378,33 @@ impl PrometheusExporter {
             "nova_kvm_available",
             "KVM availability (1=available, 0=unavailable)",
             HashMap::new(),
-            if Self::check_kvm_available() { 1.0 } else { 0.0 },
+            if Self::check_kvm_available() {
+                1.0
+            } else {
+                0.0
+            },
         );
 
         registry.set_gauge(
             "nova_docker_available",
             "Docker availability (1=available, 0=unavailable)",
             HashMap::new(),
-            if Self::check_docker_available() { 1.0 } else { 0.0 },
+            if Self::check_docker_available() {
+                1.0
+            } else {
+                0.0
+            },
         );
 
         registry.set_gauge(
             "nova_libvirt_connection_status",
             "Libvirt connection status (1=connected, 0=disconnected)",
             HashMap::new(),
-            if Self::check_libvirt_connection() { 1.0 } else { 0.0 },
+            if Self::check_libvirt_connection() {
+                1.0
+            } else {
+                0.0
+            },
         );
 
         Ok(())
@@ -495,7 +515,13 @@ impl PrometheusExporter {
         let total_rules = firewall_manager
             .get_tables()
             .values()
-            .map(|table| table.chains.values().map(|chain| chain.rules.len()).sum::<usize>())
+            .map(|table| {
+                table
+                    .chains
+                    .values()
+                    .map(|chain| chain.rules.len())
+                    .sum::<usize>()
+            })
             .sum::<usize>();
 
         registry.set_gauge(
@@ -693,35 +719,59 @@ impl MetricsRegistry {
         }
     }
 
-    pub fn increment_counter(&mut self, name: &str, help: &str, labels: HashMap<String, String>, value: f64) {
+    pub fn increment_counter(
+        &mut self,
+        name: &str,
+        help: &str,
+        labels: HashMap<String, String>,
+        value: f64,
+    ) {
         let key = Self::make_key(name, &labels);
 
         if let Some(counter) = self.counters.get_mut(&key) {
             counter.value += value;
         } else {
-            self.counters.insert(key, Counter {
+            self.counters.insert(
+                key,
+                Counter {
+                    name: name.to_string(),
+                    help: help.to_string(),
+                    labels,
+                    value,
+                    created_at: SystemTime::now(),
+                },
+            );
+        }
+    }
+
+    pub fn set_gauge(
+        &mut self,
+        name: &str,
+        help: &str,
+        labels: HashMap<String, String>,
+        value: f64,
+    ) {
+        let key = Self::make_key(name, &labels);
+
+        self.gauges.insert(
+            key,
+            Gauge {
                 name: name.to_string(),
                 help: help.to_string(),
                 labels,
                 value,
-                created_at: SystemTime::now(),
-            });
-        }
+                last_updated: SystemTime::now(),
+            },
+        );
     }
 
-    pub fn set_gauge(&mut self, name: &str, help: &str, labels: HashMap<String, String>, value: f64) {
-        let key = Self::make_key(name, &labels);
-
-        self.gauges.insert(key, Gauge {
-            name: name.to_string(),
-            help: help.to_string(),
-            labels,
-            value,
-            last_updated: SystemTime::now(),
-        });
-    }
-
-    pub fn add_to_gauge(&mut self, name: &str, help: &str, labels: HashMap<String, String>, value: f64) {
+    pub fn add_to_gauge(
+        &mut self,
+        name: &str,
+        help: &str,
+        labels: HashMap<String, String>,
+        value: f64,
+    ) {
         let key = Self::make_key(name, &labels);
 
         if let Some(gauge) = self.gauges.get_mut(&key) {
@@ -732,7 +782,13 @@ impl MetricsRegistry {
         }
     }
 
-    pub fn observe_histogram(&mut self, name: &str, help: &str, labels: HashMap<String, String>, value: f64) {
+    pub fn observe_histogram(
+        &mut self,
+        name: &str,
+        help: &str,
+        labels: HashMap<String, String>,
+        value: f64,
+    ) {
         let key = Self::make_key(name, &labels);
 
         if let Some(histogram) = self.histograms.get_mut(&key) {
@@ -748,28 +804,67 @@ impl MetricsRegistry {
         } else {
             // Create new histogram with default buckets
             let buckets = vec![
-                HistogramBucket { le: 0.005, count: if value <= 0.005 { 1 } else { 0 } },
-                HistogramBucket { le: 0.01, count: if value <= 0.01 { 1 } else { 0 } },
-                HistogramBucket { le: 0.025, count: if value <= 0.025 { 1 } else { 0 } },
-                HistogramBucket { le: 0.05, count: if value <= 0.05 { 1 } else { 0 } },
-                HistogramBucket { le: 0.1, count: if value <= 0.1 { 1 } else { 0 } },
-                HistogramBucket { le: 0.25, count: if value <= 0.25 { 1 } else { 0 } },
-                HistogramBucket { le: 0.5, count: if value <= 0.5 { 1 } else { 0 } },
-                HistogramBucket { le: 1.0, count: if value <= 1.0 { 1 } else { 0 } },
-                HistogramBucket { le: 2.5, count: if value <= 2.5 { 1 } else { 0 } },
-                HistogramBucket { le: 5.0, count: if value <= 5.0 { 1 } else { 0 } },
-                HistogramBucket { le: 10.0, count: if value <= 10.0 { 1 } else { 0 } },
-                HistogramBucket { le: f64::INFINITY, count: 1 },
+                HistogramBucket {
+                    le: 0.005,
+                    count: if value <= 0.005 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.01,
+                    count: if value <= 0.01 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.025,
+                    count: if value <= 0.025 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.05,
+                    count: if value <= 0.05 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.1,
+                    count: if value <= 0.1 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.25,
+                    count: if value <= 0.25 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 0.5,
+                    count: if value <= 0.5 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 1.0,
+                    count: if value <= 1.0 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 2.5,
+                    count: if value <= 2.5 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 5.0,
+                    count: if value <= 5.0 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: 10.0,
+                    count: if value <= 10.0 { 1 } else { 0 },
+                },
+                HistogramBucket {
+                    le: f64::INFINITY,
+                    count: 1,
+                },
             ];
 
-            self.histograms.insert(key, Histogram {
-                name: name.to_string(),
-                help: help.to_string(),
-                labels,
-                buckets,
-                sum: value,
-                count: 1,
-            });
+            self.histograms.insert(
+                key,
+                Histogram {
+                    name: name.to_string(),
+                    help: help.to_string(),
+                    labels,
+                    buckets,
+                    sum: value,
+                    count: 1,
+                },
+            );
         }
     }
 
@@ -798,8 +893,10 @@ impl MetricsRegistry {
             let label_str = if counter.labels.is_empty() {
                 String::new()
             } else {
-                format!("{{{}}}",
-                    counter.labels
+                format!(
+                    "{{{}}}",
+                    counter
+                        .labels
                         .iter()
                         .map(|(k, v)| format!("{}=\"{}\"", k, v))
                         .collect::<Vec<_>>()
@@ -807,7 +904,10 @@ impl MetricsRegistry {
                 )
             };
 
-            output.push_str(&format!("{}{} {}\n", counter.name, label_str, counter.value));
+            output.push_str(&format!(
+                "{}{} {}\n",
+                counter.name, label_str, counter.value
+            ));
         }
 
         // Export gauges
@@ -818,8 +918,10 @@ impl MetricsRegistry {
             let label_str = if gauge.labels.is_empty() {
                 String::new()
             } else {
-                format!("{{{}}}",
-                    gauge.labels
+                format!(
+                    "{{{}}}",
+                    gauge
+                        .labels
                         .iter()
                         .map(|(k, v)| format!("{}=\"{}\"", k, v))
                         .collect::<Vec<_>>()
@@ -838,8 +940,10 @@ impl MetricsRegistry {
             let base_labels = if histogram.labels.is_empty() {
                 String::new()
             } else {
-                format!(",{}",
-                    histogram.labels
+                format!(
+                    ",{}",
+                    histogram
+                        .labels
                         .iter()
                         .map(|(k, v)| format!("{}=\"{}\"", k, v))
                         .collect::<Vec<_>>()
@@ -862,12 +966,14 @@ impl MetricsRegistry {
             }
 
             // Export sum and count
-            output.push_str(&format!("{}_sum{{{}}} {}\n",
+            output.push_str(&format!(
+                "{}_sum{{{}}} {}\n",
                 histogram.name,
                 base_labels.trim_start_matches(','),
                 histogram.sum
             ));
-            output.push_str(&format!("{}_count{{{}}} {}\n",
+            output.push_str(&format!(
+                "{}_count{{{}}} {}\n",
                 histogram.name,
                 base_labels.trim_start_matches(','),
                 histogram.count
