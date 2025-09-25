@@ -1,10 +1,10 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::{sleep, interval};
+use tokio::time::{interval, sleep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMonitor {
@@ -397,13 +397,21 @@ impl PortMonitor {
     async fn parse_netstat_output(&mut self, output: &str) -> Result<()> {
         let now = SystemTime::now();
 
-        for line in output.lines().skip(2) { // Skip headers
+        for line in output.lines().skip(2) {
+            // Skip headers
             if let Ok(mut port_info) = self.parse_netstat_line(line) {
                 // Check if this is a new port
                 if !self.listening_ports.contains_key(&port_info.port) {
-                    self.add_port_event(port_info.port, PortEventType::PortOpened,
-                                      &format!("Port {} opened by {}", port_info.port, port_info.process_name),
-                                      None).await;
+                    self.add_port_event(
+                        port_info.port,
+                        PortEventType::PortOpened,
+                        &format!(
+                            "Port {} opened by {}",
+                            port_info.port, port_info.process_name
+                        ),
+                        None,
+                    )
+                    .await;
 
                     self.check_port_security_risk(&port_info).await;
                 }
@@ -431,7 +439,8 @@ impl PortMonitor {
         // Parse address:port
         let local_addr = parts[3];
         let port = if let Some(colon_pos) = local_addr.rfind(':') {
-            local_addr[colon_pos + 1..].parse::<u16>()
+            local_addr[colon_pos + 1..]
+                .parse::<u16>()
                 .map_err(|_| NovaError::ConfigError("Invalid port".to_string()))?
         } else {
             return Err(NovaError::ConfigError("No port found".to_string()));
@@ -444,25 +453,28 @@ impl PortMonitor {
             } else if addr_str == ":::" || addr_str == "::" {
                 IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0))
             } else {
-                addr_str.parse().unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
+                addr_str
+                    .parse()
+                    .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
             }
         } else {
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
         };
 
         // Parse process info if available
-        let (process_name, process_id) = if parts.len() > 6 && !parts[6].is_empty() && parts[6] != "-" {
-            if let Some(slash_pos) = parts[6].find('/') {
-                let pid_str = &parts[6][..slash_pos];
-                let name = &parts[6][slash_pos + 1..];
-                let pid = pid_str.parse().unwrap_or(0);
-                (name.to_string(), pid)
+        let (process_name, process_id) =
+            if parts.len() > 6 && !parts[6].is_empty() && parts[6] != "-" {
+                if let Some(slash_pos) = parts[6].find('/') {
+                    let pid_str = &parts[6][..slash_pos];
+                    let name = &parts[6][slash_pos + 1..];
+                    let pid = pid_str.parse().unwrap_or(0);
+                    (name.to_string(), pid)
+                } else {
+                    ("unknown".to_string(), 0)
+                }
             } else {
                 ("unknown".to_string(), 0)
-            }
-        } else {
-            ("unknown".to_string(), 0)
-        };
+            };
 
         let now = SystemTime::now();
         let service_name = self.identify_service(port, &protocol);
@@ -488,9 +500,11 @@ impl PortMonitor {
 
     async fn parse_ss_output(&mut self, output: &str) -> Result<()> {
         // Enhanced parsing with ss output for more detailed connection info
-        for line in output.lines().skip(1) { // Skip header
+        for line in output.lines().skip(1) {
+            // Skip header
             if let Ok(conn_info) = self.parse_ss_line(line) {
-                self.active_connections.insert(conn_info.id.clone(), conn_info);
+                self.active_connections
+                    .insert(conn_info.id.clone(), conn_info);
             }
         }
         Ok(())
@@ -523,19 +537,25 @@ impl PortMonitor {
         };
 
         // Parse addresses
-        let local_addr: SocketAddr = parts[4].parse()
+        let local_addr: SocketAddr = parts[4]
+            .parse()
             .map_err(|_| NovaError::ConfigError("Invalid local address".to_string()))?;
 
         let remote_addr: SocketAddr = if parts.len() > 5 && parts[5] != "*:*" {
-            parts[5].parse()
+            parts[5]
+                .parse()
                 .map_err(|_| NovaError::ConfigError("Invalid remote address".to_string()))?
         } else {
             "0.0.0.0:0".parse().unwrap()
         };
 
-        let connection_id = format!("{}:{}->{}:{}",
-                                  local_addr.ip(), local_addr.port(),
-                                  remote_addr.ip(), remote_addr.port());
+        let connection_id = format!(
+            "{}:{}->{}:{}",
+            local_addr.ip(),
+            local_addr.port(),
+            remote_addr.ip(),
+            remote_addr.port()
+        );
 
         let connection_type = self.determine_connection_type(&local_addr, &remote_addr);
 
@@ -583,7 +603,12 @@ impl PortMonitor {
         Some(service.to_string())
     }
 
-    fn assess_port_risk(&self, port: u16, protocol: &PortProtocol, process_name: &str) -> RiskLevel {
+    fn assess_port_risk(
+        &self,
+        port: u16,
+        protocol: &PortProtocol,
+        process_name: &str,
+    ) -> RiskLevel {
         // High-risk ports and processes
         if matches!(port, 23 | 135 | 139 | 445 | 1433 | 1521 | 3389) {
             return RiskLevel::High;
@@ -614,16 +639,19 @@ impl PortMonitor {
 
     fn is_externally_exposed(&self, bind_addr: &IpAddr) -> bool {
         match bind_addr {
-            IpAddr::V4(addr) => {
-                *addr == Ipv4Addr::new(0, 0, 0, 0) || !addr.is_private()
-            }
+            IpAddr::V4(addr) => *addr == Ipv4Addr::new(0, 0, 0, 0) || !addr.is_private(),
             IpAddr::V6(addr) => {
-                *addr == Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0) || !addr.is_loopback() && !addr.is_multicast()
+                *addr == Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)
+                    || !addr.is_loopback() && !addr.is_multicast()
             }
         }
     }
 
-    fn determine_connection_type(&self, local_addr: &SocketAddr, remote_addr: &SocketAddr) -> ConnectionType {
+    fn determine_connection_type(
+        &self,
+        local_addr: &SocketAddr,
+        remote_addr: &SocketAddr,
+    ) -> ConnectionType {
         let local_ip = local_addr.ip();
         let remote_ip = remote_addr.ip();
 
@@ -640,12 +668,8 @@ impl PortMonitor {
 
     fn is_internal_ip(&self, ip: &IpAddr) -> bool {
         match ip {
-            IpAddr::V4(addr) => {
-                addr.is_private() || addr.is_loopback()
-            }
-            IpAddr::V6(addr) => {
-                addr.is_loopback() || addr.is_unique_local()
-            }
+            IpAddr::V4(addr) => addr.is_private() || addr.is_loopback(),
+            IpAddr::V6(addr) => addr.is_loopback() || addr.is_unique_local(),
         }
     }
 
@@ -653,11 +677,11 @@ impl PortMonitor {
         match addr {
             IpAddr::V4(addr) => {
                 !addr.is_loopback()
-                && !addr.is_private()
-                && !addr.is_link_local()
-                && !addr.is_broadcast()
-                && !addr.is_multicast()
-                && *addr != Ipv4Addr::new(0, 0, 0, 0)
+                    && !addr.is_private()
+                    && !addr.is_link_local()
+                    && !addr.is_broadcast()
+                    && !addr.is_multicast()
+                    && *addr != Ipv4Addr::new(0, 0, 0, 0)
             }
             IpAddr::V6(addr) => {
                 !addr.is_loopback()
@@ -677,7 +701,11 @@ impl PortMonitor {
         let mut connections_to_analyze = Vec::new();
         for connection in self.active_connections.values_mut() {
             if let Err(e) = Self::update_connection_stats(connection).await {
-                log_debug!("Failed to update stats for connection {}: {:?}", connection.id, e);
+                log_debug!(
+                    "Failed to update stats for connection {}: {:?}",
+                    connection.id,
+                    e
+                );
             }
             // Collect connections for security analysis
             connections_to_analyze.push(connection.clone());
@@ -704,11 +732,14 @@ impl PortMonitor {
         Ok(())
     }
 
-    async fn analyze_connection_for_alerts(&self, connection: &ActiveConnection) -> Option<SecurityAlert> {
+    async fn analyze_connection_for_alerts(
+        &self,
+        connection: &ActiveConnection,
+    ) -> Option<SecurityAlert> {
         // Check for suspicious patterns
-        if self.is_global_ip(&connection.remote_addr.ip()) &&
-           !self.is_known_service_ip(&connection.remote_addr.ip()) {
-
+        if self.is_global_ip(&connection.remote_addr.ip())
+            && !self.is_known_service_ip(&connection.remote_addr.ip())
+        {
             if let Some(geo_info) = self.get_geographic_info(&connection.remote_addr.ip()).await {
                 if geo_info.is_suspicious || geo_info.threat_score > 0.7 {
                     return Some(SecurityAlert {
@@ -716,14 +747,18 @@ impl PortMonitor {
                         alert_type: AlertType::SuspiciousConnection,
                         severity: AlertSeverity::Medium,
                         title: "Suspicious external connection detected".to_string(),
-                        description: format!("Connection to {} from {}", connection.remote_addr, geo_info.country),
+                        description: format!(
+                            "Connection to {} from {}",
+                            connection.remote_addr, geo_info.country
+                        ),
                         source_ip: Some(connection.remote_addr.ip()),
                         dest_port: Some(connection.local_addr.port()),
                         process_name: Some(connection.process_name.clone()),
                         timestamp: SystemTime::now(),
                         resolved: false,
                         false_positive: false,
-                        remediation_steps: self.generate_remediation_steps(&AlertType::SuspiciousConnection),
+                        remediation_steps: self
+                            .generate_remediation_steps(&AlertType::SuspiciousConnection),
                     });
                 }
             }
@@ -783,8 +818,7 @@ impl PortMonitor {
         let timeout = Duration::from_secs(300); // 5 minutes
 
         self.active_connections.retain(|_id, conn| {
-            if conn.state == ConnectionState::Closed ||
-               conn.state == ConnectionState::TimeWait {
+            if conn.state == ConnectionState::Closed || conn.state == ConnectionState::TimeWait {
                 if let Ok(elapsed) = now.duration_since(conn.established_at) {
                     elapsed < timeout
                 } else {
@@ -826,19 +860,29 @@ impl PortMonitor {
                 first_seen: connection.established_at,
                 last_seen: now,
                 frequency_score: 1.0, // Calculate based on frequency
-                is_allowed: true, // Check against policies
+                is_allowed: true,     // Check against policies
                 policy_matched: None,
             };
 
             if self.is_internal_ip(&connection.remote_addr.ip()) {
-                let key = format!("{}:{}", connection.remote_addr.ip(), connection.local_addr.port());
-                self.communication_matrix.internal_communications
+                let key = format!(
+                    "{}:{}",
+                    connection.remote_addr.ip(),
+                    connection.local_addr.port()
+                );
+                self.communication_matrix
+                    .internal_communications
                     .entry(key)
                     .or_insert_with(Vec::new)
                     .push(flow);
             } else {
-                let key = format!("{}:{}", connection.remote_addr.ip(), connection.local_addr.port());
-                self.communication_matrix.external_communications
+                let key = format!(
+                    "{}:{}",
+                    connection.remote_addr.ip(),
+                    connection.local_addr.port()
+                );
+                self.communication_matrix
+                    .external_communications
                     .entry(key)
                     .or_insert_with(Vec::new)
                     .push(flow);
@@ -859,7 +903,8 @@ impl PortMonitor {
         let mut large_transfers = Vec::new();
         for flows in self.communication_matrix.external_communications.values() {
             for flow in flows {
-                if flow.bytes_transferred > 1_000_000_000 { // 1GB threshold
+                if flow.bytes_transferred > 1_000_000_000 {
+                    // 1GB threshold
                     large_transfers.push(flow.clone());
                 }
             }
@@ -871,11 +916,15 @@ impl PortMonitor {
                 AlertType::UnusualTraffic,
                 AlertSeverity::Medium,
                 "Large data transfer detected",
-                &format!("Large transfer ({} bytes) to {}", flow.bytes_transferred, flow.dest_ip),
+                &format!(
+                    "Large transfer ({} bytes) to {}",
+                    flow.bytes_transferred, flow.dest_ip
+                ),
                 Some(flow.source_ip),
                 Some(flow.dest_port),
                 None,
-            ).await;
+            )
+            .await;
         }
 
         Ok(())
@@ -907,8 +956,7 @@ impl PortMonitor {
         // Collect high-risk ports to avoid borrow checker issues
         let mut high_risk_ports = Vec::new();
         for port_info in self.listening_ports.values() {
-            if port_info.security_risk == RiskLevel::High &&
-               port_info.is_exposed_externally {
+            if port_info.security_risk == RiskLevel::High && port_info.is_exposed_externally {
                 high_risk_ports.push(port_info.clone());
             }
         }
@@ -919,12 +967,15 @@ impl PortMonitor {
                 AlertType::UnauthorizedPortOpen,
                 AlertSeverity::High,
                 "High-risk port exposed externally",
-                &format!("Port {} ({}) is exposed externally with high security risk",
-                        port_info.port, port_info.process_name),
+                &format!(
+                    "Port {} ({}) is exposed externally with high security risk",
+                    port_info.port, port_info.process_name
+                ),
                 Some(port_info.bind_address),
                 Some(port_info.port),
                 Some(port_info.process_name.clone()),
-            ).await;
+            )
+            .await;
         }
         Ok(())
     }
@@ -947,12 +998,15 @@ impl PortMonitor {
                     AlertType::ServiceVulnerability,
                     AlertSeverity::Medium,
                     "Service with known vulnerabilities detected",
-                    &format!("Service {} on port {} has known vulnerabilities",
-                            service, port_info.port),
+                    &format!(
+                        "Service {} on port {} has known vulnerabilities",
+                        service, port_info.port
+                    ),
                     Some(port_info.bind_address),
                     Some(port_info.port),
                     Some(port_info.process_name.clone()),
-                ).await;
+                )
+                .await;
             }
         }
         Ok(())
@@ -961,17 +1015,19 @@ impl PortMonitor {
     fn has_known_vulnerabilities(&self, service: &str, port: u16) -> bool {
         // Check against vulnerability database
         match (service, port) {
-            ("SSH", 22) => false, // Generally secure if updated
+            ("SSH", 22) => false,   // Generally secure if updated
             ("Telnet", 23) => true, // Always insecure
-            ("FTP", 21) => true, // Generally insecure
-            ("HTTP", 80) => true, // Unencrypted
+            ("FTP", 21) => true,    // Generally insecure
+            ("HTTP", 80) => true,   // Unencrypted
             _ => false,
         }
     }
 
     async fn check_policy_compliance(&mut self) -> Result<()> {
         // Check if current network state complies with defined policies
-        let enabled_policies: Vec<_> = self.network_policies.iter()
+        let enabled_policies: Vec<_> = self
+            .network_policies
+            .iter()
             .filter(|p| p.enabled)
             .cloned()
             .collect();
@@ -1003,7 +1059,8 @@ impl PortMonitor {
                         Some(connection.remote_addr.ip()),
                         Some(connection.local_addr.port()),
                         Some(connection.process_name.clone()),
-                    ).await;
+                    )
+                    .await;
                 }
                 PolicyAction::Alert => {
                     self.create_security_alert(
@@ -1014,19 +1071,24 @@ impl PortMonitor {
                         Some(connection.remote_addr.ip()),
                         Some(connection.local_addr.port()),
                         Some(connection.process_name.clone()),
-                    ).await;
+                    )
+                    .await;
                 }
                 _ => {}
             }
         }
     }
 
-    fn connection_matches_policy(&self, connection: &ActiveConnection, policy: &NetworkPolicy) -> bool {
+    fn connection_matches_policy(
+        &self,
+        connection: &ActiveConnection,
+        policy: &NetworkPolicy,
+    ) -> bool {
         // Check if connection matches policy criteria
-        self.ip_matches_pattern(&connection.remote_addr.ip(), &policy.source_criteria) &&
-        self.ip_matches_pattern(&connection.local_addr.ip(), &policy.dest_criteria) &&
-        self.port_matches_pattern(connection.local_addr.port(), &policy.port_criteria) &&
-        (policy.protocol.is_none() || policy.protocol.as_ref() == Some(&connection.protocol))
+        self.ip_matches_pattern(&connection.remote_addr.ip(), &policy.source_criteria)
+            && self.ip_matches_pattern(&connection.local_addr.ip(), &policy.dest_criteria)
+            && self.port_matches_pattern(connection.local_addr.port(), &policy.port_criteria)
+            && (policy.protocol.is_none() || policy.protocol.as_ref() == Some(&connection.protocol))
     }
 
     fn ip_matches_pattern(&self, ip: &IpAddr, pattern: &IpPattern) -> bool {
@@ -1089,7 +1151,11 @@ impl PortMonitor {
             remediation_steps: self.generate_remediation_steps(&alert_type),
         };
 
-        log_warn!("Security alert created: {} - {}", alert.title, alert.description);
+        log_warn!(
+            "Security alert created: {} - {}",
+            alert.title,
+            alert.description
+        );
         self.security_alerts.push(alert);
     }
 
@@ -1132,13 +1198,16 @@ impl PortMonitor {
             process_name: None,
         };
 
-        self.port_history.entry(port).or_insert_with(Vec::new).push(event);
+        self.port_history
+            .entry(port)
+            .or_insert_with(Vec::new)
+            .push(event);
     }
 
     async fn check_port_security_risk(&mut self, port_info: &ListeningPort) {
-        if port_info.security_risk == RiskLevel::Critical ||
-           (port_info.security_risk == RiskLevel::High && port_info.is_exposed_externally) {
-
+        if port_info.security_risk == RiskLevel::Critical
+            || (port_info.security_risk == RiskLevel::High && port_info.is_exposed_externally)
+        {
             self.create_security_alert(
                 AlertType::UnauthorizedPortOpen,
                 AlertSeverity::High,
@@ -1147,7 +1216,8 @@ impl PortMonitor {
                 Some(port_info.bind_address),
                 Some(port_info.port),
                 Some(port_info.process_name.clone()),
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -1172,8 +1242,16 @@ impl PortMonitor {
         self.port_history.get(&port)
     }
 
-    pub async fn perform_port_scan(&mut self, target: IpAddr, scan_type: ScanType) -> Result<PortScanResult> {
-        log_info!("Performing port scan on {} with type {:?}", target, scan_type);
+    pub async fn perform_port_scan(
+        &mut self,
+        target: IpAddr,
+        scan_type: ScanType,
+    ) -> Result<PortScanResult> {
+        log_info!(
+            "Performing port scan on {} with type {:?}",
+            target,
+            scan_type
+        );
 
         let start_time = SystemTime::now();
         let mut open_ports = Vec::new();
@@ -1183,19 +1261,19 @@ impl PortMonitor {
         // Define port ranges based on scan type
         let ports_to_scan: Vec<u16> = match scan_type {
             ScanType::ComprehensiveScan => (1..=65535).collect(),
-            _ => vec![21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 3306, 5432, 6379, 27017],
+            _ => vec![
+                21, 22, 23, 25, 53, 80, 110, 143, 443, 993, 995, 3306, 5432, 6379, 27017,
+            ],
         };
 
         for port in ports_to_scan {
             match self.scan_port(target, port, &scan_type).await {
-                Ok(port_info) => {
-                    match port_info.state {
-                        PortState::Open => open_ports.push(port_info),
-                        PortState::Closed => closed_ports.push(port),
-                        PortState::Filtered => filtered_ports.push(port),
-                        _ => {}
-                    }
-                }
+                Ok(port_info) => match port_info.state {
+                    PortState::Open => open_ports.push(port_info),
+                    PortState::Closed => closed_ports.push(port),
+                    PortState::Filtered => filtered_ports.push(port),
+                    _ => {}
+                },
                 Err(_) => closed_ports.push(port),
             }
         }

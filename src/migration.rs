@@ -1,9 +1,9 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant, sleep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationJob {
@@ -25,11 +25,11 @@ pub struct MigrationJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MigrationType {
-    Live,           // Zero-downtime migration
-    Offline,        // VM shutdown, migrate, startup
-    PostCopy,       // Start VM on destination, migrate memory in background
-    PreCopy,        // Traditional live migration
-    Hybrid,         // Intelligent combination
+    Live,     // Zero-downtime migration
+    Offline,  // VM shutdown, migrate, startup
+    PostCopy, // Start VM on destination, migrate memory in background
+    PreCopy,  // Traditional live migration
+    Hybrid,   // Intelligent combination
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,14 +48,14 @@ pub enum MigrationStatus {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MigrationConfig {
-    pub auto_converge: bool,        // Automatically adjust migration speed
-    pub compress: bool,             // Enable compression
-    pub multifd: bool,              // Use multiple file descriptors
-    pub parallel_connections: u32,   // Number of parallel streams
-    pub bandwidth_limit_mbps: u32,   // Bandwidth limit
-    pub downtime_limit_ms: u64,     // Maximum acceptable downtime
-    pub timeout_seconds: u64,        // Migration timeout
-    pub verify_destination: bool,    // Verify destination before starting
+    pub auto_converge: bool,          // Automatically adjust migration speed
+    pub compress: bool,               // Enable compression
+    pub multifd: bool,                // Use multiple file descriptors
+    pub parallel_connections: u32,    // Number of parallel streams
+    pub bandwidth_limit_mbps: u32,    // Bandwidth limit
+    pub downtime_limit_ms: u64,       // Maximum acceptable downtime
+    pub timeout_seconds: u64,         // Migration timeout
+    pub verify_destination: bool,     // Verify destination before starting
     pub persistent_reservation: bool, // Handle persistent reservations
 }
 
@@ -140,9 +140,13 @@ impl MigrationManager {
         &mut self,
         vm_name: &str,
         destination_host: &str,
-        force_type: Option<MigrationType>
+        force_type: Option<MigrationType>,
     ) -> Result<String> {
-        log_info!("Starting migration for VM '{}' to host '{}'", vm_name, destination_host);
+        log_info!(
+            "Starting migration for VM '{}' to host '{}'",
+            vm_name,
+            destination_host
+        );
 
         let job_id = uuid::Uuid::new_v4().to_string();
         let job_id_clone = job_id.clone();
@@ -152,7 +156,8 @@ impl MigrationManager {
         let migration_type = if let Some(forced) = force_type {
             forced
         } else {
-            self.select_optimal_migration_type(vm_name, destination_host).await?
+            self.select_optimal_migration_type(vm_name, destination_host)
+                .await?
         };
 
         let job = MigrationJob {
@@ -181,9 +186,14 @@ impl MigrationManager {
         // Start migration process
         let migration_manager = self.clone_for_async();
         tokio::spawn(async move {
-            if let Err(e) = migration_manager.execute_migration(job_id_clone.clone()).await {
+            if let Err(e) = migration_manager
+                .execute_migration(job_id_clone.clone())
+                .await
+            {
                 log_error!("Migration failed for job {}: {:?}", job_id_clone, e);
-                migration_manager.mark_job_failed(&job_id_clone, &e.to_string()).await;
+                migration_manager
+                    .mark_job_failed(&job_id_clone, &e.to_string())
+                    .await;
             }
         });
 
@@ -203,15 +213,9 @@ impl MigrationManager {
             MigrationType::Live | MigrationType::PreCopy => {
                 self.execute_live_migration(&mut job).await?
             }
-            MigrationType::PostCopy => {
-                self.execute_postcopy_migration(&mut job).await?
-            }
-            MigrationType::Offline => {
-                self.execute_offline_migration(&mut job).await?
-            }
-            MigrationType::Hybrid => {
-                self.execute_hybrid_migration(&mut job).await?
-            }
+            MigrationType::PostCopy => self.execute_postcopy_migration(&mut job).await?,
+            MigrationType::Offline => self.execute_offline_migration(&mut job).await?,
+            MigrationType::Hybrid => self.execute_hybrid_migration(&mut job).await?,
         }
 
         Ok(())
@@ -221,32 +225,39 @@ impl MigrationManager {
         log_info!("Executing live migration for job: {}", job.job_id);
 
         // Phase 1: Preparation
-        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination).await;
+        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination)
+            .await;
         self.prepare_destination(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::PreparingSource).await;
+        self.update_job_status(&job.job_id, MigrationStatus::PreparingSource)
+            .await;
         self.prepare_source(job).await?;
 
         // Phase 2: Start migration
-        self.update_job_status(&job.job_id, MigrationStatus::TransferringMemory).await;
+        self.update_job_status(&job.job_id, MigrationStatus::TransferringMemory)
+            .await;
         self.start_memory_migration(job).await?;
 
         // Phase 3: Storage migration (if needed)
         if job.storage_migration {
-            self.update_job_status(&job.job_id, MigrationStatus::TransferringStorage).await;
+            self.update_job_status(&job.job_id, MigrationStatus::TransferringStorage)
+                .await;
             self.migrate_storage(job).await?;
         }
 
         // Phase 4: Monitor and complete
         self.monitor_migration_progress(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver).await;
+        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver)
+            .await;
         self.complete_migration(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::Completing).await;
+        self.update_job_status(&job.job_id, MigrationStatus::Completing)
+            .await;
         self.cleanup_migration(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::Completed).await;
+        self.update_job_status(&job.job_id, MigrationStatus::Completed)
+            .await;
         job.completed_at = Some(chrono::Utc::now());
 
         log_info!("Live migration completed for job: {}", job.job_id);
@@ -257,21 +268,25 @@ impl MigrationManager {
         log_info!("Executing post-copy migration for job: {}", job.job_id);
 
         // Prepare destination
-        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination).await;
+        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination)
+            .await;
         self.prepare_destination(job).await?;
 
         // Start VM on destination with minimal memory
         self.start_postcopy_destination(job).await?;
 
         // Switch over immediately
-        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver).await;
+        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver)
+            .await;
         self.switch_vm_to_destination(job).await?;
 
         // Continue transferring memory in background
-        self.update_job_status(&job.job_id, MigrationStatus::TransferringMemory).await;
+        self.update_job_status(&job.job_id, MigrationStatus::TransferringMemory)
+            .await;
         self.complete_postcopy_transfer(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::Completed).await;
+        self.update_job_status(&job.job_id, MigrationStatus::Completed)
+            .await;
         job.completed_at = Some(chrono::Utc::now());
 
         log_info!("Post-copy migration completed for job: {}", job.job_id);
@@ -285,20 +300,24 @@ impl MigrationManager {
         self.shutdown_vm(&job.vm_name).await?;
 
         // Prepare destination
-        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination).await;
+        self.update_job_status(&job.job_id, MigrationStatus::PreparingDestination)
+            .await;
         self.prepare_destination(job).await?;
 
         // Transfer storage if needed
         if job.storage_migration {
-            self.update_job_status(&job.job_id, MigrationStatus::TransferringStorage).await;
+            self.update_job_status(&job.job_id, MigrationStatus::TransferringStorage)
+                .await;
             self.migrate_storage_offline(job).await?;
         }
 
         // Start VM on destination
-        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver).await;
+        self.update_job_status(&job.job_id, MigrationStatus::SwitchingOver)
+            .await;
         self.start_vm_on_destination(job).await?;
 
-        self.update_job_status(&job.job_id, MigrationStatus::Completed).await;
+        self.update_job_status(&job.job_id, MigrationStatus::Completed)
+            .await;
         job.completed_at = Some(chrono::Utc::now());
 
         log_info!("Offline migration completed for job: {}", job.job_id);
@@ -312,7 +331,7 @@ impl MigrationManager {
         let live_start = Instant::now();
         if let Err(_) = self.attempt_live_migration(job).await {
             log_warn!("Live migration failed, falling back to post-copy");
-            
+
             // Fall back to post-copy if live migration struggles
             if live_start.elapsed() > Duration::from_secs(self.config.timeout_seconds / 2) {
                 return self.execute_postcopy_migration(job).await;
@@ -326,19 +345,22 @@ impl MigrationManager {
     async fn select_optimal_migration_type(
         &self,
         vm_name: &str,
-        destination_host: &str
+        destination_host: &str,
     ) -> Result<MigrationType> {
         log_info!("Selecting optimal migration type for VM: {}", vm_name);
 
         // Analyze VM characteristics
         let vm_analysis = self.analyze_vm_for_migration(vm_name).await?;
-        let network_analysis = self.analyze_network_to_destination(destination_host).await?;
+        let network_analysis = self
+            .analyze_network_to_destination(destination_host)
+            .await?;
 
         // Decision logic
         if vm_analysis.memory_size_gb > 16.0 && network_analysis.bandwidth_mbps < 1000 {
             // Large VM on slow network - use post-copy
             Ok(MigrationType::PostCopy)
-        } else if vm_analysis.memory_dirty_rate > 100 { // MB/s
+        } else if vm_analysis.memory_dirty_rate > 100 {
+            // MB/s
             // High memory churn - use post-copy
             Ok(MigrationType::PostCopy)
         } else if vm_analysis.is_critical && network_analysis.latency_ms < 5.0 {
@@ -363,11 +385,12 @@ impl MigrationManager {
 
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
-            
+
             // Parse memory size
             if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory")) {
                 if let Some(mem_str) = mem_line.split_whitespace().nth(2) {
-                    analysis.memory_size_gb = mem_str.parse::<u64>().unwrap_or(2048) as f32 / 1024.0;
+                    analysis.memory_size_gb =
+                        mem_str.parse::<u64>().unwrap_or(2048) as f32 / 1024.0;
                 }
             }
         }
@@ -390,7 +413,10 @@ impl MigrationManager {
         Ok(analysis)
     }
 
-    async fn analyze_network_to_destination(&self, destination_host: &str) -> Result<NetworkAnalysis> {
+    async fn analyze_network_to_destination(
+        &self,
+        destination_host: &str,
+    ) -> Result<NetworkAnalysis> {
         log_debug!("Analyzing network to destination: {}", destination_host);
 
         let mut analysis = NetworkAnalysis::default();
@@ -414,26 +440,31 @@ impl MigrationManager {
         analysis.bandwidth_mbps = if analysis.latency_ms < 1.0 {
             10000 // 10Gbps for very low latency
         } else if analysis.latency_ms < 5.0 {
-            1000  // 1Gbps for low latency
+            1000 // 1Gbps for low latency
         } else {
-            100   // 100Mbps for higher latency
+            100 // 100Mbps for higher latency
         };
 
         Ok(analysis)
     }
 
     async fn prepare_destination(&self, job: &MigrationJob) -> Result<()> {
-        log_info!("Preparing destination host for migration: {}", job.destination_host);
+        log_info!(
+            "Preparing destination host for migration: {}",
+            job.destination_host
+        );
 
         // Verify destination host is reachable
-        self.verify_destination_connectivity(&job.destination_host).await?;
+        self.verify_destination_connectivity(&job.destination_host)
+            .await?;
 
         // Check available resources
         self.verify_destination_resources(job).await?;
 
         // Prepare shared storage if needed
         if let Some(storage) = &self.shared_storage {
-            self.prepare_shared_storage(&job.destination_host, storage).await?;
+            self.prepare_shared_storage(&job.destination_host, storage)
+                .await?;
         }
 
         Ok(())
@@ -444,7 +475,15 @@ impl MigrationManager {
 
         // Test SSH connectivity
         let output = Command::new("ssh")
-            .args(&["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no", host, "echo", "ok"])
+            .args(&[
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "StrictHostKeyChecking=no",
+                host,
+                "echo",
+                "ok",
+            ])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -462,7 +501,10 @@ impl MigrationManager {
 
         if !output.status.success() {
             log_error!("Cannot connect to libvirt on destination: {}", host);
-            return Err(NovaError::LibvirtError(format!("Libvirt unavailable on {}", host)));
+            return Err(NovaError::LibvirtError(format!(
+                "Libvirt unavailable on {}",
+                host
+            )));
         }
 
         log_info!("Destination connectivity verified: {}", host);
@@ -494,7 +536,7 @@ impl MigrationManager {
         log_info!("Starting memory migration for VM: {}", job.vm_name);
 
         let dest_uri = format!("qemu+ssh://{}/system", job.destination_host);
-        
+
         let mut migrate_cmd = Command::new("virsh");
         migrate_cmd.args(&["migrate", "--live", "--verbose", &job.vm_name, &dest_uri]);
 
@@ -502,25 +544,27 @@ impl MigrationManager {
         if self.config.compress {
             migrate_cmd.arg("--compressed");
         }
-        
+
         if self.config.auto_converge {
             migrate_cmd.arg("--auto-converge");
         }
 
         if self.config.parallel_connections > 1 {
-            migrate_cmd.args(&["--parallel", "--parallel-connections", &self.config.parallel_connections.to_string()]);
+            migrate_cmd.args(&[
+                "--parallel",
+                "--parallel-connections",
+                &self.config.parallel_connections.to_string(),
+            ]);
         }
 
         migrate_cmd.args(&["--bandwidth", &self.config.bandwidth_limit_mbps.to_string()]);
         migrate_cmd.args(&["--timeout", &self.config.timeout_seconds.to_string()]);
 
         // Start migration in background
-        let child = migrate_cmd
-            .spawn()
-            .map_err(|e| {
-                log_error!("Failed to start migration: {}", e);
-                NovaError::SystemCommandFailed
-            })?;
+        let child = migrate_cmd.spawn().map_err(|e| {
+            log_error!("Failed to start migration: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
 
         log_info!("Memory migration started for VM: {}", job.vm_name);
         Ok(())
@@ -531,7 +575,7 @@ impl MigrationManager {
 
         loop {
             let progress = self.get_migration_progress(&job.vm_name).await?;
-            
+
             // Update metrics
             {
                 let mut metrics = self.metrics.lock().unwrap();
@@ -545,7 +589,8 @@ impl MigrationManager {
                 0.0
             };
 
-            self.update_job_progress(&job.job_id, progress_percent).await;
+            self.update_job_progress(&job.job_id, progress_percent)
+                .await;
 
             // Check if migration is complete
             if progress.ram_remaining_bytes == 0 {
@@ -553,7 +598,8 @@ impl MigrationManager {
             }
 
             // Check for convergence issues
-            if progress.iteration > 20 && progress.dirty_rate_per_second > progress.pages_per_second {
+            if progress.iteration > 20 && progress.dirty_rate_per_second > progress.pages_per_second
+            {
                 log_warn!("Migration may not converge, considering post-copy switch");
                 // Could implement automatic post-copy switch here
             }
@@ -577,13 +623,13 @@ impl MigrationManager {
         }
 
         let info = String::from_utf8_lossy(&output.stdout);
-        
+
         // Parse migration statistics (simplified)
         let metrics = MigrationMetrics {
             job_id: "placeholder".to_string(),
-            ram_total_bytes: 2147483648, // 2GB placeholder
+            ram_total_bytes: 2147483648,       // 2GB placeholder
             ram_transferred_bytes: 1073741824, // 1GB placeholder
-            ram_remaining_bytes: 1073741824, // 1GB placeholder
+            ram_remaining_bytes: 1073741824,   // 1GB placeholder
             disk_total_bytes: 0,
             disk_transferred_bytes: 0,
             transfer_rate_mbps: 100.0,
@@ -619,12 +665,13 @@ impl MigrationManager {
         let mut jobs = self.active_jobs.lock().unwrap();
         if let Some(job) = jobs.get_mut(job_id) {
             job.progress_percent = progress;
-            
+
             // Estimate completion time
             if progress > 0.0 && progress < 100.0 {
                 let elapsed = chrono::Utc::now().signed_duration_since(job.started_at);
                 let estimated_total = elapsed.num_seconds() as f32 * (100.0 / progress);
-                job.estimated_completion = Some(job.started_at + chrono::Duration::seconds(estimated_total as i64));
+                job.estimated_completion =
+                    Some(job.started_at + chrono::Duration::seconds(estimated_total as i64));
             }
         }
     }
@@ -665,7 +712,7 @@ impl MigrationManager {
 
     pub async fn cancel_migration(&mut self, job_id: &str) -> Result<()> {
         log_info!("Cancelling migration job: {}", job_id);
-        
+
         if let Some(job) = self.get_migration_job(job_id) {
             // Cancel the migration
             let output = Command::new("virsh")
@@ -674,7 +721,8 @@ impl MigrationManager {
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
             if output.status.success() {
-                self.update_job_status(job_id, MigrationStatus::Cancelled).await;
+                self.update_job_status(job_id, MigrationStatus::Cancelled)
+                    .await;
                 log_info!("Migration job {} cancelled successfully", job_id);
             }
         }
@@ -683,23 +731,57 @@ impl MigrationManager {
     }
 
     // Placeholder implementations for complex operations
-    async fn prepare_source(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn migrate_storage(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn complete_migration(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn cleanup_migration(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn start_postcopy_destination(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn switch_vm_to_destination(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn complete_postcopy_transfer(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn shutdown_vm(&self, _vm_name: &str) -> Result<()> { Ok(()) }
-    async fn migrate_storage_offline(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn start_vm_on_destination(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn attempt_live_migration(&self, _job: &MigrationJob) -> Result<()> { Ok(()) }
-    async fn prepare_shared_storage(&self, _host: &str, _storage: &SharedStorageConfig) -> Result<()> { Ok(()) }
+    async fn prepare_source(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn migrate_storage(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn complete_migration(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn cleanup_migration(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn start_postcopy_destination(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn switch_vm_to_destination(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn complete_postcopy_transfer(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn shutdown_vm(&self, _vm_name: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn migrate_storage_offline(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn start_vm_on_destination(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn attempt_live_migration(&self, _job: &MigrationJob) -> Result<()> {
+        Ok(())
+    }
+    async fn prepare_shared_storage(
+        &self,
+        _host: &str,
+        _storage: &SharedStorageConfig,
+    ) -> Result<()> {
+        Ok(())
+    }
     async fn get_vm_resource_info(&self, _vm_name: &str) -> Result<VmResourceInfo> {
-        Ok(VmResourceInfo { memory_mb: 2048, cpu_cores: 2 })
+        Ok(VmResourceInfo {
+            memory_mb: 2048,
+            cpu_cores: 2,
+        })
     }
     async fn get_host_resources(&self, _host: &str) -> Result<HostResources> {
-        Ok(HostResources { available_memory_mb: 16384, available_cpu_cores: 8 })
+        Ok(HostResources {
+            available_memory_mb: 16384,
+            available_cpu_cores: 8,
+        })
     }
 }
 

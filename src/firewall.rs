@@ -1,4 +1,4 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
@@ -153,10 +153,10 @@ pub struct RuleConflict {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConflictType {
-    Shadowing,      // Rule never matches due to earlier rule
-    Redundant,      // Rule duplicates existing functionality
-    Contradictory,  // Rules have opposing effects
-    Performance,    // Rule ordering causes performance issues
+    Shadowing,     // Rule never matches due to earlier rule
+    Redundant,     // Rule duplicates existing functionality
+    Contradictory, // Rules have opposing effects
+    Performance,   // Rule ordering causes performance issues
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -315,9 +315,9 @@ impl FirewallManager {
             chain: "INPUT".to_string(), // Would parse from context
             table: table.to_string(),
             target: RuleTarget::Accept, // Parse from parts
-            protocol: None, // Parse from parts
-            source: None,   // Parse from parts
-            destination: None, // Parse from parts
+            protocol: None,             // Parse from parts
+            source: None,               // Parse from parts
+            destination: None,          // Parse from parts
             port_range: None,
             interface: None,
             state: None,
@@ -373,7 +373,10 @@ impl FirewallManager {
         }
 
         let zones_text = String::from_utf8_lossy(&output.stdout);
-        Ok(zones_text.split_whitespace().map(|s| s.to_string()).collect())
+        Ok(zones_text
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect())
     }
 
     async fn load_firewalld_zone_rules(&mut self, _zone: &str) -> Result<()> {
@@ -403,7 +406,10 @@ impl FirewallManager {
     }
 
     pub async fn add_rule(&mut self, rule: FirewallRule) -> Result<()> {
-        log_info!("Adding firewall rule: {:?}", rule.comment.as_deref().unwrap_or("unnamed"));
+        log_info!(
+            "Adding firewall rule: {:?}",
+            rule.comment.as_deref().unwrap_or("unnamed")
+        );
 
         // Validate rule
         self.validate_rule(&rule)?;
@@ -432,11 +438,15 @@ impl FirewallManager {
     fn validate_rule(&self, rule: &FirewallRule) -> Result<()> {
         // Validate rule syntax and parameters
         if rule.chain.is_empty() {
-            return Err(NovaError::ConfigError("Chain name cannot be empty".to_string()));
+            return Err(NovaError::ConfigError(
+                "Chain name cannot be empty".to_string(),
+            ));
         }
 
         if rule.table.is_empty() {
-            return Err(NovaError::ConfigError("Table name cannot be empty".to_string()));
+            return Err(NovaError::ConfigError(
+                "Table name cannot be empty".to_string(),
+            ));
         }
 
         // Additional validation logic
@@ -535,7 +545,10 @@ impl FirewallManager {
             }
         }
 
-        Err(NovaError::NetworkNotFound(format!("Rule {} not found", rule_id)))
+        Err(NovaError::NetworkNotFound(format!(
+            "Rule {} not found",
+            rule_id
+        )))
     }
 
     async fn remove_iptables_rule(&self, _rule: &FirewallRule) -> Result<()> {
@@ -595,7 +608,12 @@ impl FirewallManager {
         Ok(())
     }
 
-    fn detect_conflict(&self, rule1: &FirewallRule, rule2: &FirewallRule, rule1_first: bool) -> Option<RuleConflict> {
+    fn detect_conflict(
+        &self,
+        rule1: &FirewallRule,
+        rule2: &FirewallRule,
+        rule1_first: bool,
+    ) -> Option<RuleConflict> {
         // Check for shadowing
         if rule1_first && self.rules_overlap(rule1, rule2) && rule1.target != rule2.target {
             return Some(RuleConflict {
@@ -627,10 +645,10 @@ impl FirewallManager {
     }
 
     fn rules_equivalent(&self, rule1: &FirewallRule, rule2: &FirewallRule) -> bool {
-        rule1.protocol == rule2.protocol &&
-        rule1.source == rule2.source &&
-        rule1.destination == rule2.destination &&
-        rule1.target == rule2.target
+        rule1.protocol == rule2.protocol
+            && rule1.source == rule2.source
+            && rule1.destination == rule2.destination
+            && rule1.target == rule2.target
     }
 
     pub async fn monitor_traffic_flows(&mut self) -> Result<()> {
@@ -710,7 +728,9 @@ impl FirewallManager {
                 if chain.rules.len() > 20 {
                     suggestions.push(format!(
                         "Chain {}.{} has {} rules - consider optimization",
-                        table.name, chain.name, chain.rules.len()
+                        table.name,
+                        chain.name,
+                        chain.rules.len()
                     ));
                 }
             }

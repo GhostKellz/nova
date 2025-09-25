@@ -1,6 +1,8 @@
-use crate::console::{ConsoleManager, ConsoleSession, ConsoleType, ConnectionInfo, ConsoleConfig};
-use crate::rustdesk_integration::{RustDeskManager, RustDeskConfig, RustDeskSession, PerformanceProfile};
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::console::{ConnectionInfo, ConsoleConfig, ConsoleManager, ConsoleSession, ConsoleType};
+use crate::rustdesk_integration::{
+    PerformanceProfile, RustDeskConfig, RustDeskManager, RustDeskSession,
+};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,10 +20,10 @@ pub struct EnhancedConsoleConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PreferredProtocol {
-    RustDesk,     // Highest performance
-    SPICE,        // Good performance, native libvirt
-    VNC,          // Universal compatibility
-    Auto,         // Auto-select based on VM capabilities
+    RustDesk, // Highest performance
+    SPICE,    // Good performance, native libvirt
+    VNC,      // Universal compatibility
+    Auto,     // Auto-select based on VM capabilities
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +67,7 @@ impl EnhancedConsoleManager {
     pub fn new(config: EnhancedConsoleConfig) -> Self {
         let console_manager = ConsoleManager::new(config.standard_console.clone());
         let rustdesk_manager = RustDeskManager::new(config.rustdesk_config.clone());
-        
+
         Self {
             config,
             console_manager,
@@ -77,39 +79,42 @@ impl EnhancedConsoleManager {
 
     /// Create the best possible console connection for a VM
     pub async fn create_optimal_console(
-        &mut self, 
-        vm_name: &str, 
-        vm_ip: Option<&str>
+        &mut self,
+        vm_name: &str,
+        vm_ip: Option<&str>,
     ) -> Result<UnifiedConsoleSession> {
         log_info!("Creating optimal console connection for VM: {}", vm_name);
 
         // Analyze VM capabilities and network conditions
         let vm_analysis = self.analyze_vm_capabilities(vm_name, vm_ip).await?;
-        
+
         // Select the best protocol based on analysis
         let selected_protocol = self.select_optimal_protocol(&vm_analysis).await;
-        
-        log_info!("Selected protocol for VM '{}': {:?}", vm_name, selected_protocol);
+
+        log_info!(
+            "Selected protocol for VM '{}': {:?}",
+            vm_name,
+            selected_protocol
+        );
 
         let session = match selected_protocol {
             PreferredProtocol::RustDesk => {
-                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis).await?
+                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis)
+                    .await?
             }
-            PreferredProtocol::SPICE => {
-                self.create_spice_session(vm_name, vm_analysis).await?
-            }
-            PreferredProtocol::VNC => {
-                self.create_vnc_session(vm_name, vm_analysis).await?
-            }
+            PreferredProtocol::SPICE => self.create_spice_session(vm_name, vm_analysis).await?,
+            PreferredProtocol::VNC => self.create_vnc_session(vm_name, vm_analysis).await?,
             PreferredProtocol::Auto => {
                 // This should not happen as select_optimal_protocol returns specific protocol
-                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis).await?
+                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis)
+                    .await?
             }
         };
 
         // Start performance monitoring
         if self.config.performance_monitoring {
-            self.start_performance_monitoring(&session.session_id).await?;
+            self.start_performance_monitoring(&session.session_id)
+                .await?;
         }
 
         // Store session
@@ -118,20 +123,23 @@ impl EnhancedConsoleManager {
             sessions.insert(session.session_id.clone(), session.clone());
         }
 
-        log_info!("Optimal console session created: {} (score: {:.2})", 
-                 session.session_id, session.performance_score);
-        
+        log_info!(
+            "Optimal console session created: {} (score: {:.2})",
+            session.session_id,
+            session.performance_score
+        );
+
         Ok(session)
     }
 
     async fn create_rustdesk_session(
-        &mut self, 
-        vm_name: &str, 
-        vm_ip: Option<&str>, 
-        analysis: VmAnalysis
+        &mut self,
+        vm_name: &str,
+        vm_ip: Option<&str>,
+        analysis: VmAnalysis,
     ) -> Result<UnifiedConsoleSession> {
         log_info!("Creating RustDesk session for VM: {}", vm_name);
-        
+
         let vm_ip = vm_ip.ok_or_else(|| {
             log_error!("VM IP required for RustDesk connection");
             NovaError::SystemCommandFailed
@@ -139,8 +147,9 @@ impl EnhancedConsoleManager {
 
         // Determine optimal performance profile
         let performance_profile = self.determine_performance_profile(&analysis);
-        
-        let rustdesk_session = self.rustdesk_manager
+
+        let rustdesk_session = self
+            .rustdesk_manager
             .create_rustdesk_session(vm_name, vm_ip, performance_profile)
             .await?;
 
@@ -169,15 +178,13 @@ impl EnhancedConsoleManager {
     }
 
     async fn create_spice_session(
-        &mut self, 
-        vm_name: &str, 
-        analysis: VmAnalysis
+        &mut self,
+        vm_name: &str,
+        analysis: VmAnalysis,
     ) -> Result<UnifiedConsoleSession> {
         log_info!("Creating SPICE session for VM: {}", vm_name);
-        
-        let console_session = self.console_manager
-            .create_spice_console(vm_name)
-            .await?;
+
+        let console_session = self.console_manager.create_spice_console(vm_name).await?;
 
         let features = SessionFeatures {
             file_transfer: false, // SPICE doesn't have native file transfer
@@ -204,13 +211,14 @@ impl EnhancedConsoleManager {
     }
 
     async fn create_vnc_session(
-        &mut self, 
-        vm_name: &str, 
-        analysis: VmAnalysis
+        &mut self,
+        vm_name: &str,
+        analysis: VmAnalysis,
     ) -> Result<UnifiedConsoleSession> {
         log_info!("Creating enhanced VNC session for VM: {}", vm_name);
-        
-        let console_session = self.console_manager
+
+        let console_session = self
+            .console_manager
             .create_vnc_console(vm_name, true) // Enhanced VNC
             .await?;
 
@@ -239,14 +247,14 @@ impl EnhancedConsoleManager {
     }
 
     async fn analyze_vm_capabilities(
-        &self, 
-        vm_name: &str, 
-        vm_ip: Option<&str>
+        &self,
+        vm_name: &str,
+        vm_ip: Option<&str>,
     ) -> Result<VmAnalysis> {
         log_info!("Analyzing VM capabilities: {}", vm_name);
-        
+
         let mut analysis = VmAnalysis::default();
-        
+
         // Check VM specs via libvirt
         if let Ok(output) = tokio::process::Command::new("virsh")
             .args(&["dominfo", vm_name])
@@ -254,21 +262,21 @@ impl EnhancedConsoleManager {
             .await
         {
             let info = String::from_utf8_lossy(&output.stdout);
-            
+
             // Parse CPU and memory info
             if let Some(cpu_line) = info.lines().find(|line| line.contains("CPU(s)")) {
                 if let Some(cpu_str) = cpu_line.split_whitespace().nth(1) {
                     analysis.cpu_cores = cpu_str.parse().unwrap_or(1);
                 }
             }
-            
+
             if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory")) {
                 if let Some(mem_str) = mem_line.split_whitespace().nth(2) {
                     analysis.memory_mb = mem_str.parse().unwrap_or(1024);
                 }
             }
         }
-        
+
         // Check for GPU passthrough
         if let Ok(output) = tokio::process::Command::new("virsh")
             .args(&["dumpxml", vm_name])
@@ -278,25 +286,30 @@ impl EnhancedConsoleManager {
             let xml = String::from_utf8_lossy(&output.stdout);
             analysis.has_gpu = xml.contains("<hostdev") && xml.contains("type='pci'");
         }
-        
+
         // Check network connectivity and latency if IP provided
         if let Some(ip) = vm_ip {
             analysis.network_latency_ms = self.measure_network_latency(ip).await;
             analysis.network_bandwidth_mbps = self.measure_network_bandwidth(ip).await;
         }
-        
+
         // Detect OS type and capabilities
         analysis.os_type = self.detect_os_type(vm_name).await;
         analysis.supports_guest_agent = self.check_guest_agent(vm_name).await;
-        
+
         // Multi-monitor support (mainly for SPICE and RustDesk)
-        analysis.supports_multi_monitor = analysis.has_gpu || 
-            matches!(analysis.os_type.as_str(), "windows" | "linux");
-        
-        log_info!("VM analysis complete for '{}': {} cores, {}MB RAM, GPU: {}, OS: {}", 
-                 vm_name, analysis.cpu_cores, analysis.memory_mb, 
-                 analysis.has_gpu, analysis.os_type);
-        
+        analysis.supports_multi_monitor =
+            analysis.has_gpu || matches!(analysis.os_type.as_str(), "windows" | "linux");
+
+        log_info!(
+            "VM analysis complete for '{}': {} cores, {}MB RAM, GPU: {}, OS: {}",
+            vm_name,
+            analysis.cpu_cores,
+            analysis.memory_mb,
+            analysis.has_gpu,
+            analysis.os_type
+        );
+
         Ok(analysis)
     }
 
@@ -304,38 +317,40 @@ impl EnhancedConsoleManager {
         match &self.config.preferred_protocol {
             PreferredProtocol::Auto => {
                 // Intelligent protocol selection based on VM capabilities
-                
+
                 // RustDesk is preferred for high-performance scenarios
-                if analysis.cpu_cores >= 2 && 
-                   analysis.memory_mb >= 2048 && 
-                   analysis.network_latency_ms < 50.0 {
+                if analysis.cpu_cores >= 2
+                    && analysis.memory_mb >= 2048
+                    && analysis.network_latency_ms < 50.0
+                {
                     return PreferredProtocol::RustDesk;
                 }
-                
+
                 // SPICE for good balance with libvirt integration
-                if analysis.supports_guest_agent && 
-                   analysis.cpu_cores >= 1 {
+                if analysis.supports_guest_agent && analysis.cpu_cores >= 1 {
                     return PreferredProtocol::SPICE;
                 }
-                
+
                 // VNC as fallback
                 PreferredProtocol::VNC
             }
-            other => other.clone()
+            other => other.clone(),
         }
     }
 
     fn determine_performance_profile(&self, analysis: &VmAnalysis) -> PerformanceProfile {
         // Select optimal RustDesk performance profile based on VM capabilities
-        
-        if analysis.has_gpu && 
-           analysis.cpu_cores >= 4 && 
-           analysis.memory_mb >= 4096 && 
-           analysis.network_bandwidth_mbps >= 100.0 {
+
+        if analysis.has_gpu
+            && analysis.cpu_cores >= 4
+            && analysis.memory_mb >= 4096
+            && analysis.network_bandwidth_mbps >= 100.0
+        {
             PerformanceProfile::UltraHigh
-        } else if analysis.cpu_cores >= 2 && 
-                  analysis.memory_mb >= 2048 && 
-                  analysis.network_bandwidth_mbps >= 50.0 {
+        } else if analysis.cpu_cores >= 2
+            && analysis.memory_mb >= 2048
+            && analysis.network_bandwidth_mbps >= 50.0
+        {
             PerformanceProfile::High
         } else if analysis.network_bandwidth_mbps < 10.0 {
             PerformanceProfile::LowBandwidth
@@ -367,16 +382,20 @@ impl EnhancedConsoleManager {
         if self.measure_network_latency(ip).await < 10.0 {
             1000.0 // Assume gigabit for low latency (LAN)
         } else if self.measure_network_latency(ip).await < 50.0 {
-            100.0  // Assume 100Mbps for moderate latency
+            100.0 // Assume 100Mbps for moderate latency
         } else {
-            10.0   // Assume 10Mbps for high latency
+            10.0 // Assume 10Mbps for high latency
         }
     }
 
     async fn detect_os_type(&self, vm_name: &str) -> String {
         // Try to detect OS via guest agent or XML analysis
         if let Ok(output) = tokio::process::Command::new("virsh")
-            .args(&["qemu-agent-command", vm_name, "{\"execute\":\"guest-get-osinfo\"}"])
+            .args(&[
+                "qemu-agent-command",
+                vm_name,
+                "{\"execute\":\"guest-get-osinfo\"}",
+            ])
             .output()
             .await
         {
@@ -396,7 +415,11 @@ impl EnhancedConsoleManager {
 
     async fn check_guest_agent(&self, vm_name: &str) -> bool {
         tokio::process::Command::new("virsh")
-            .args(&["qemu-agent-command", vm_name, "{\"execute\":\"guest-ping\"}"])
+            .args(&[
+                "qemu-agent-command",
+                vm_name,
+                "{\"execute\":\"guest-ping\"}",
+            ])
             .output()
             .await
             .map(|output| output.status.success())
@@ -404,25 +427,28 @@ impl EnhancedConsoleManager {
     }
 
     async fn start_performance_monitoring(&self, session_id: &str) -> Result<()> {
-        log_info!("Starting performance monitoring for session: {}", session_id);
-        
+        log_info!(
+            "Starting performance monitoring for session: {}",
+            session_id
+        );
+
         let session_id_clone = session_id.to_string();
         let scores_clone = self.performance_scores.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 // Collect performance metrics and calculate score
                 let score = Self::calculate_performance_score(&session_id_clone).await;
-                
+
                 {
                     let mut scores = scores_clone.lock().unwrap();
                     scores.insert(session_id_clone.clone(), score);
                 }
-                
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
         });
-        
+
         Ok(())
     }
 
@@ -432,7 +458,7 @@ impl EnhancedConsoleManager {
         // - FPS
         // - Bandwidth usage
         // - CPU/Memory usage
-        
+
         // Simplified scoring for now
         85.0
     }
@@ -455,7 +481,7 @@ impl EnhancedConsoleManager {
 
     pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
         log_info!("Closing unified console session: {}", session_id);
-        
+
         if let Some(session) = self.get_session(session_id) {
             match session.protocol_used {
                 ActiveProtocol::RustDesk(_) => {
@@ -466,39 +492,44 @@ impl EnhancedConsoleManager {
                 }
             }
         }
-        
+
         // Remove from unified sessions
         {
             let mut sessions = self.unified_sessions.lock().unwrap();
             sessions.remove(session_id);
         }
-        
+
         {
             let mut scores = self.performance_scores.lock().unwrap();
             scores.remove(session_id);
         }
-        
+
         Ok(())
     }
 
     /// Switch protocols for an active session (if possible)
     pub async fn switch_protocol(
-        &mut self, 
-        session_id: &str, 
-        new_protocol: PreferredProtocol
+        &mut self,
+        session_id: &str,
+        new_protocol: PreferredProtocol,
     ) -> Result<UnifiedConsoleSession> {
-        log_info!("Switching protocol for session: {} to {:?}", session_id, new_protocol);
-        
+        log_info!(
+            "Switching protocol for session: {} to {:?}",
+            session_id,
+            new_protocol
+        );
+
         // Get current session
-        let current_session = self.get_session(session_id)
+        let current_session = self
+            .get_session(session_id)
             .ok_or(NovaError::NetworkNotFound(session_id.to_string()))?;
-        
+
         // Close current session
         self.close_session(session_id).await?;
-        
+
         // Create new session with different protocol
         self.config.preferred_protocol = new_protocol;
-        
+
         // Determine VM IP from current session if needed
         let vm_ip = match &current_session.protocol_used {
             ActiveProtocol::RustDesk(rd_session) => {
@@ -507,8 +538,9 @@ impl EnhancedConsoleManager {
             }
             ActiveProtocol::Standard(_) => None,
         };
-        
-        self.create_optimal_console(&current_session.vm_name, vm_ip).await
+
+        self.create_optimal_console(&current_session.vm_name, vm_ip)
+            .await
     }
 }
 

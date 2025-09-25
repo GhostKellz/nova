@@ -1,10 +1,10 @@
-use crate::console::{ConsoleSession, ConsoleType, ConnectionInfo};
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::console::{ConnectionInfo, ConsoleSession, ConsoleType};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,9 +40,9 @@ pub struct RustDeskSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PerformanceProfile {
-    UltraHigh,  // Minimal compression, max quality
-    High,       // Balanced quality/performance
-    Balanced,   // Auto-adjust based on network
+    UltraHigh,    // Minimal compression, max quality
+    High,         // Balanced quality/performance
+    Balanced,     // Auto-adjust based on network
     LowBandwidth, // Heavy compression for slow networks
     Custom(CustomProfile),
 }
@@ -94,10 +94,10 @@ impl RustDeskManager {
 
     // Create high-performance RustDesk session for VM
     pub async fn create_rustdesk_session(
-        &mut self, 
-        vm_name: &str, 
+        &mut self,
+        vm_name: &str,
         vm_ip: &str,
-        profile: PerformanceProfile
+        profile: PerformanceProfile,
     ) -> Result<RustDeskSession> {
         log_info!("Creating RustDesk session for VM: {} ({})", vm_name, vm_ip);
 
@@ -111,7 +111,8 @@ impl RustDeskManager {
         let password = self.generate_secure_password();
 
         // Install and configure RustDesk in VM if needed
-        self.ensure_rustdesk_in_vm(vm_name, vm_ip, &rustdesk_id, &password).await?;
+        self.ensure_rustdesk_in_vm(vm_name, vm_ip, &rustdesk_id, &password)
+            .await?;
 
         // Set up relay server for optimal routing
         let relay_server = self.select_optimal_relay_server(vm_ip).await;
@@ -122,8 +123,10 @@ impl RustDeskManager {
             rustdesk_id: rustdesk_id.clone(),
             password: password.clone(),
             relay_server: relay_server.clone(),
-            connection_url: format!("rustdesk://{}?password={}&relay={}", 
-                                   rustdesk_id, password, relay_server),
+            connection_url: format!(
+                "rustdesk://{}?password={}&relay={}",
+                rustdesk_id, password, relay_server
+            ),
             performance_profile: profile,
             created_at: chrono::Utc::now(),
             last_connected: None,
@@ -136,29 +139,38 @@ impl RustDeskManager {
             sessions.insert(session_id.clone(), session.clone());
         }
 
-        log_info!("RustDesk session created: {} -> {}", session_id, rustdesk_id);
+        log_info!(
+            "RustDesk session created: {} -> {}",
+            session_id,
+            rustdesk_id
+        );
         Ok(session)
     }
 
     // Install RustDesk in VM with optimal configuration
     async fn ensure_rustdesk_in_vm(
-        &self, 
-        vm_name: &str, 
-        vm_ip: &str, 
-        rustdesk_id: &str, 
-        password: &str
+        &self,
+        vm_name: &str,
+        vm_ip: &str,
+        rustdesk_id: &str,
+        password: &str,
     ) -> Result<()> {
-        log_info!("Ensuring RustDesk is installed and configured in VM: {}", vm_name);
+        log_info!(
+            "Ensuring RustDesk is installed and configured in VM: {}",
+            vm_name
+        );
 
         // Check if already installed via SSH or guest agent
         if self.check_rustdesk_installed_in_vm(vm_ip).await {
             log_info!("RustDesk already installed in VM: {}", vm_name);
-            return self.configure_rustdesk_in_vm(vm_ip, rustdesk_id, password).await;
+            return self
+                .configure_rustdesk_in_vm(vm_ip, rustdesk_id, password)
+                .await;
         }
 
         // Auto-install RustDesk based on VM OS
         let os_type = self.detect_vm_os_type(vm_name).await?;
-        
+
         match os_type.as_str() {
             "linux" => self.install_rustdesk_linux(vm_ip).await?,
             "windows" => self.install_rustdesk_windows(vm_ip).await?,
@@ -170,15 +182,16 @@ impl RustDeskManager {
         }
 
         // Configure with our settings
-        self.configure_rustdesk_in_vm(vm_ip, rustdesk_id, password).await?;
-        
+        self.configure_rustdesk_in_vm(vm_ip, rustdesk_id, password)
+            .await?;
+
         log_info!("RustDesk installed and configured in VM: {}", vm_name);
         Ok(())
     }
 
     async fn install_rustdesk_linux(&self, vm_ip: &str) -> Result<()> {
         log_info!("Installing RustDesk on Linux VM: {}", vm_ip);
-        
+
         // Download and install RustDesk via SSH
         let install_script = r#"
             wget https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-x86_64.AppImage -O /tmp/rustdesk.AppImage
@@ -213,7 +226,7 @@ EOF
 
     async fn install_rustdesk_windows(&self, vm_ip: &str) -> Result<()> {
         log_info!("Installing RustDesk on Windows VM: {}", vm_ip);
-        
+
         // Use PowerShell to download and install
         let install_script = r#"
             $url = 'https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-1.2.3-x86_64.exe'
@@ -232,7 +245,7 @@ EOF
 
     async fn install_rustdesk_macos(&self, vm_ip: &str) -> Result<()> {
         log_info!("Installing RustDesk on macOS VM: {}", vm_ip);
-        
+
         let install_script = r#"
             curl -L https://github.com/rustdesk/rustdesk/releases/latest/download/rustdesk-macos.dmg -o /tmp/rustdesk.dmg
             hdiutil attach /tmp/rustdesk.dmg
@@ -248,12 +261,16 @@ EOF
     }
 
     async fn configure_rustdesk_in_vm(
-        &self, 
-        vm_ip: &str, 
-        rustdesk_id: &str, 
-        password: &str
+        &self,
+        vm_ip: &str,
+        rustdesk_id: &str,
+        password: &str,
     ) -> Result<()> {
-        log_info!("Configuring RustDesk in VM: {} with ID: {}", vm_ip, rustdesk_id);
+        log_info!(
+            "Configuring RustDesk in VM: {} with ID: {}",
+            vm_ip,
+            rustdesk_id
+        );
 
         // Configure RustDesk with our custom settings
         let config_commands = vec![
@@ -278,7 +295,10 @@ EOF
     }
 
     async fn apply_performance_optimizations(&self, vm_ip: &str) -> Result<()> {
-        log_info!("Applying RustDesk performance optimizations for VM: {}", vm_ip);
+        log_info!(
+            "Applying RustDesk performance optimizations for VM: {}",
+            vm_ip
+        );
 
         let optimizations = vec![
             // Hardware acceleration
@@ -307,9 +327,13 @@ EOF
     pub async fn connect_with_performance_profile(
         &mut self,
         session_id: &str,
-        profile: PerformanceProfile
+        profile: PerformanceProfile,
     ) -> Result<()> {
-        log_info!("Connecting to RustDesk session: {} with profile: {:?}", session_id, profile);
+        log_info!(
+            "Connecting to RustDesk session: {} with profile: {:?}",
+            session_id,
+            profile
+        );
 
         let session = {
             let sessions = self.sessions.lock().unwrap();
@@ -329,40 +353,51 @@ EOF
             match profile {
                 PerformanceProfile::UltraHigh => {
                     rustdesk_cmd.args(&[
-                        "--quality", "100",
-                        "--fps", "60",
-                        "--codec", "h265",
-                        "--hwcodec", "true",
-                        "--low-latency", "true"
+                        "--quality",
+                        "100",
+                        "--fps",
+                        "60",
+                        "--codec",
+                        "h265",
+                        "--hwcodec",
+                        "true",
+                        "--low-latency",
+                        "true",
                     ]);
                 }
                 PerformanceProfile::High => {
                     rustdesk_cmd.args(&[
-                        "--quality", "80",
-                        "--fps", "30",
-                        "--codec", "h264",
-                        "--hwcodec", "true"
+                        "--quality",
+                        "80",
+                        "--fps",
+                        "30",
+                        "--codec",
+                        "h264",
+                        "--hwcodec",
+                        "true",
                     ]);
                 }
                 PerformanceProfile::Balanced => {
                     rustdesk_cmd.args(&[
-                        "--quality", "60",
-                        "--fps", "25",
-                        "--auto-quality", "true"
+                        "--quality",
+                        "60",
+                        "--fps",
+                        "25",
+                        "--auto-quality",
+                        "true",
                     ]);
                 }
                 PerformanceProfile::LowBandwidth => {
-                    rustdesk_cmd.args(&[
-                        "--quality", "30",
-                        "--fps", "15",
-                        "--compress", "high"
-                    ]);
+                    rustdesk_cmd.args(&["--quality", "30", "--fps", "15", "--compress", "high"]);
                 }
                 PerformanceProfile::Custom(custom) => {
                     rustdesk_cmd.args(&[
-                        "--quality", &custom.quality.to_string(),
-                        "--fps", &custom.fps.to_string(),
-                        "--compress", &custom.compression.to_string()
+                        "--quality",
+                        &custom.quality.to_string(),
+                        "--fps",
+                        &custom.fps.to_string(),
+                        "--compress",
+                        &custom.compression.to_string(),
                     ]);
                 }
             }
@@ -396,7 +431,10 @@ EOF
 
     // Performance monitoring
     pub async fn start_performance_monitoring(&self, session_id: &str) -> Result<()> {
-        log_info!("Starting performance monitoring for session: {}", session_id);
+        log_info!(
+            "Starting performance monitoring for session: {}",
+            session_id
+        );
 
         let session_id_clone = session_id.to_string();
         let metrics_clone = self.metrics.clone();
@@ -417,7 +455,7 @@ EOF
     async fn collect_performance_metrics(session_id: &str) -> Result<RustDeskMetrics> {
         // Collect real-time performance metrics
         // This would integrate with RustDesk's API or log parsing
-        
+
         Ok(RustDeskMetrics {
             session_id: session_id.to_string(),
             fps: 30.0,
@@ -449,7 +487,11 @@ EOF
     }
 
     pub async fn record_session(&self, session_id: &str, output_path: &str) -> Result<()> {
-        log_info!("Starting session recording for: {} -> {}", session_id, output_path);
+        log_info!(
+            "Starting session recording for: {} -> {}",
+            session_id,
+            output_path
+        );
         // RustDesk can record sessions for compliance/training
         Ok(())
     }
@@ -510,7 +552,11 @@ EOF
 
     async fn check_guest_agent_installed(&self, vm_name: &str) -> bool {
         Command::new("virsh")
-            .args(&["qemu-agent-command", vm_name, "{\"execute\":\"guest-ping\"}"])
+            .args(&[
+                "qemu-agent-command",
+                vm_name,
+                "{\"execute\":\"guest-ping\"}",
+            ])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -519,12 +565,20 @@ EOF
     async fn execute_in_vm(&self, vm_ip: &str, command: &str) -> Result<()> {
         // Execute command in VM via SSH or guest agent
         let output = Command::new("ssh")
-            .args(&["-o", "StrictHostKeyChecking=no", &format!("root@{}", vm_ip), command])
+            .args(&[
+                "-o",
+                "StrictHostKeyChecking=no",
+                &format!("root@{}", vm_ip),
+                command,
+            ])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
         if !output.status.success() {
-            log_error!("Failed to execute command in VM: {}", String::from_utf8_lossy(&output.stderr));
+            log_error!(
+                "Failed to execute command in VM: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Err(NovaError::SystemCommandFailed);
         }
 
@@ -583,7 +637,7 @@ impl Default for RustDeskConfig {
             server_port: 21116,
             relay_servers: vec![
                 "relay1.rustdesk.com".to_string(),
-                "relay2.rustdesk.com".to_string()
+                "relay2.rustdesk.com".to_string(),
             ],
             encryption_enabled: true,
             hardware_acceleration: true,

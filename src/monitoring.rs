@@ -1,4 +1,4 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
@@ -87,14 +87,24 @@ impl NetworkMonitor {
     }
 
     // Start continuous monitoring
-    pub async fn start_monitoring(&mut self, interfaces: Vec<String>, interval_seconds: u64) -> Result<()> {
-        log_info!("Starting network monitoring for {} interfaces", interfaces.len());
+    pub async fn start_monitoring(
+        &mut self,
+        interfaces: Vec<String>,
+        interval_seconds: u64,
+    ) -> Result<()> {
+        log_info!(
+            "Starting network monitoring for {} interfaces",
+            interfaces.len()
+        );
 
         self.monitoring_active = true;
 
         // Note: In a real implementation, this would need proper async handling
         // For now, we'll just store the config and implement polling differently
-        log_info!("Network monitoring configured for interfaces: {:?}", interfaces);
+        log_info!(
+            "Network monitoring configured for interfaces: {:?}",
+            interfaces
+        );
 
         Ok(())
     }
@@ -106,8 +116,8 @@ impl NetworkMonitor {
 
     // Get current network statistics for an interface
     pub async fn get_interface_stats(&self, interface: &str) -> Result<NetworkStats> {
-        let proc_net_dev = std::fs::read_to_string("/proc/net/dev")
-            .map_err(|_| NovaError::SystemCommandFailed)?;
+        let proc_net_dev =
+            std::fs::read_to_string("/proc/net/dev").map_err(|_| NovaError::SystemCommandFailed)?;
 
         for line in proc_net_dev.lines() {
             if line.contains(interface) && line.contains(":") {
@@ -138,7 +148,11 @@ impl NetworkMonitor {
     }
 
     // Calculate bandwidth between two stat samples
-    fn calculate_bandwidth(&self, current: &NetworkStats, previous: &NetworkStats) -> Result<BandwidthUsage> {
+    fn calculate_bandwidth(
+        &self,
+        current: &NetworkStats,
+        previous: &NetworkStats,
+    ) -> Result<BandwidthUsage> {
         let time_diff = current.timestamp.saturating_sub(previous.timestamp) as f64;
         if time_diff == 0.0 {
             return Err(NovaError::InvalidConfig);
@@ -165,7 +179,11 @@ impl NetworkMonitor {
     }
 
     // Get bandwidth history for an interface
-    pub fn get_bandwidth_history(&self, interface: &str, limit: Option<usize>) -> Vec<&BandwidthUsage> {
+    pub fn get_bandwidth_history(
+        &self,
+        interface: &str,
+        limit: Option<usize>,
+    ) -> Vec<&BandwidthUsage> {
         if let Some(history) = self.bandwidth_history.get(interface) {
             if let Some(limit) = limit {
                 history.iter().rev().take(limit).collect()
@@ -276,16 +294,19 @@ impl NetworkMonitor {
         // Discover connections between bridges and interfaces
         self.discover_connections(&mut topology).await?;
 
-        log_info!("Discovered {} bridges and {} connections",
-                 topology.bridges.len(), topology.connections.len());
+        log_info!(
+            "Discovered {} bridges and {} connections",
+            topology.bridges.len(),
+            topology.connections.len()
+        );
 
         Ok(topology)
     }
 
     async fn discover_linux_bridges(&self, topology: &mut NetworkTopology) -> Result<()> {
         // Get list of bridges from /sys/class/net
-        let sys_net = std::fs::read_dir("/sys/class/net")
-            .map_err(|_| NovaError::SystemCommandFailed)?;
+        let sys_net =
+            std::fs::read_dir("/sys/class/net").map_err(|_| NovaError::SystemCommandFailed)?;
 
         for entry in sys_net {
             if let Ok(entry) = entry {
@@ -298,7 +319,8 @@ impl NetworkMonitor {
                     if let Ok(brif_dir) = std::fs::read_dir(bridge_path.join("brif")) {
                         for iface_entry in brif_dir {
                             if let Ok(iface_entry) = iface_entry {
-                                interfaces.push(iface_entry.file_name().to_string_lossy().to_string());
+                                interfaces
+                                    .push(iface_entry.file_name().to_string_lossy().to_string());
                             }
                         }
                     }
@@ -434,8 +456,16 @@ impl NetworkMonitor {
                     connections.push(ConnectionInfo {
                         protocol: parts[0].to_string(),
                         local_addr: parts[3].to_string(),
-                        remote_addr: if parts.len() > 4 { parts[4].to_string() } else { "*".to_string() },
-                        state: if parts.len() > 5 { parts[5].to_string() } else { "UNKNOWN".to_string() },
+                        remote_addr: if parts.len() > 4 {
+                            parts[4].to_string()
+                        } else {
+                            "*".to_string()
+                        },
+                        state: if parts.len() > 5 {
+                            parts[5].to_string()
+                        } else {
+                            "UNKNOWN".to_string()
+                        },
                         process: None, // Would need additional parsing with -p flag
                     });
                 }

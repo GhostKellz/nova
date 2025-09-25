@@ -1,10 +1,10 @@
-use crate::{log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use std::fs;
-use std::path::Path;
-use std::str::FromStr;
 use std::net::Ipv4Addr;
+use std::path::Path;
+use std::process::Command;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibvirtNetwork {
@@ -94,6 +94,8 @@ impl LibvirtManager {
             return Ok(());
         }
 
+        self.networks.clear();
+
         // Get list of all networks (active and inactive)
         let output = Command::new("virsh")
             .args(&["net-list", "--all", "--name"])
@@ -121,6 +123,28 @@ impl LibvirtManager {
         }
 
         log_info!("Discovered {} libvirt networks", self.networks.len());
+        Ok(())
+    }
+
+    pub async fn set_network_autostart(&self, name: &str, enable: bool) -> Result<()> {
+        log_info!("Setting libvirt network autostart {} -> {}", name, enable);
+
+        let mut args = vec!["net-autostart", name];
+        if !enable {
+            args.insert(1, "--disable");
+        }
+
+        let output = Command::new("virsh")
+            .args(&args)
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to update autostart: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
         Ok(())
     }
 
@@ -172,13 +196,16 @@ impl LibvirtManager {
             if let Some(bridge_end) = xml_content[bridge_start..].find("/>") {
                 let bridge_tag = &xml_content[bridge_start..bridge_start + bridge_end + 2];
 
-                let bridge_name = self.extract_attribute(bridge_tag, "name")
+                let bridge_name = self
+                    .extract_attribute(bridge_tag, "name")
                     .unwrap_or_else(|| format!("virbr-{}", name));
 
-                let stp = self.extract_attribute(bridge_tag, "stp")
+                let stp = self
+                    .extract_attribute(bridge_tag, "stp")
                     .and_then(|s| s.parse::<bool>().ok());
 
-                let delay = self.extract_attribute(bridge_tag, "delay")
+                let delay = self
+                    .extract_attribute(bridge_tag, "delay")
                     .and_then(|s| s.parse::<u32>().ok());
 
                 network.bridge = Some(BridgeConfig {
@@ -256,12 +283,11 @@ impl LibvirtManager {
 
                         if let (Some(start_str), Some(end_str)) = (
                             self.extract_attribute(range_tag, "start"),
-                            self.extract_attribute(range_tag, "end")
+                            self.extract_attribute(range_tag, "end"),
                         ) {
-                            if let (Ok(start), Ok(end)) = (
-                                Ipv4Addr::from_str(&start_str),
-                                Ipv4Addr::from_str(&end_str)
-                            ) {
+                            if let (Ok(start), Ok(end)) =
+                                (Ipv4Addr::from_str(&start_str), Ipv4Addr::from_str(&end_str))
+                            {
                                 return Some(DhcpRange {
                                     start,
                                     end,
@@ -347,35 +373,53 @@ impl LibvirtManager {
     fn generate_network_xml(&self, network: &LibvirtNetwork) -> Result<String> {
         let mut xml = String::new();
 
-        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-");
-        xml.push_str(&format!("<network>
+        xml.push_str(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+",
+        );
+        xml.push_str(&format!(
+            "<network>
   <name>{}</name>
-", network.name));
+",
+            network.name
+        ));
 
         if let Some(uuid) = &network.uuid {
-            xml.push_str(&format!("  <uuid>{}</uuid>
-", uuid));
+            xml.push_str(&format!(
+                "  <uuid>{}</uuid>
+",
+                uuid
+            ));
         }
 
         // Forward mode
         if let Some(forward) = &network.forward {
             if forward.mode == "nat" {
-                xml.push_str("  <forward mode='nat'/>
-");
+                xml.push_str(
+                    "  <forward mode='nat'/>
+",
+                );
             } else if forward.mode == "bridge" {
                 if let Some(dev) = &forward.dev {
-                    xml.push_str(&format!("  <forward mode='bridge'>
+                    xml.push_str(&format!(
+                        "  <forward mode='bridge'>
     <interface dev='{}'/>
   </forward>
-", dev));
+",
+                        dev
+                    ));
                 } else {
-                    xml.push_str("  <forward mode='bridge'/>
-");
+                    xml.push_str(
+                        "  <forward mode='bridge'/>
+",
+                    );
                 }
             } else {
-                xml.push_str(&format!("  <forward mode='{}'/>
-", forward.mode));
+                xml.push_str(&format!(
+                    "  <forward mode='{}'/>
+",
+                    forward.mode
+                ));
             }
         }
 
@@ -388,37 +432,56 @@ impl LibvirtManager {
             if let Some(delay) = bridge.delay {
                 bridge_attrs.push_str(&format!(" delay='{}'", delay));
             }
-            xml.push_str(&format!("  <bridge {}/>
-", bridge_attrs));
+            xml.push_str(&format!(
+                "  <bridge {}/>
+",
+                bridge_attrs
+            ));
         }
 
         // IP configuration
         if let Some(ip) = &network.ip {
-            xml.push_str(&format!("  <ip address='{}' netmask='{}'>
-", ip.address, ip.netmask));
+            xml.push_str(&format!(
+                "  <ip address='{}' netmask='{}'>
+",
+                ip.address, ip.netmask
+            ));
 
             if let Some(dhcp) = &ip.dhcp {
-                xml.push_str("    <dhcp>
-");
-                xml.push_str(&format!("      <range start='{}' end='{}'/>
-", dhcp.start, dhcp.end));
+                xml.push_str(
+                    "    <dhcp>
+",
+                );
+                xml.push_str(&format!(
+                    "      <range start='{}' end='{}'/>
+",
+                    dhcp.start, dhcp.end
+                ));
 
                 for host in &dhcp.hosts {
-                    xml.push_str(&format!("      <host mac='{}' name='{}' ip='{}'/>
+                    xml.push_str(&format!(
+                        "      <host mac='{}' name='{}' ip='{}'/>
 ",
-                                         host.mac, host.name, host.ip));
+                        host.mac, host.name, host.ip
+                    ));
                 }
 
-                xml.push_str("    </dhcp>
-");
+                xml.push_str(
+                    "    </dhcp>
+",
+                );
             }
 
-            xml.push_str("  </ip>
-");
+            xml.push_str(
+                "  </ip>
+",
+            );
         }
 
-        xml.push_str("</network>
-");
+        xml.push_str(
+            "</network>
+",
+        );
 
         Ok(xml)
     }
@@ -428,9 +491,7 @@ impl LibvirtManager {
         log_info!("Deleting libvirt network: {}", name);
 
         // Stop the network if it's running
-        let _ = Command::new("virsh")
-            .args(&["net-destroy", name])
-            .output();
+        let _ = Command::new("virsh").args(&["net-destroy", name]).output();
 
         // Undefine the network
         let output = Command::new("virsh")
@@ -497,10 +558,13 @@ impl LibvirtManager {
 
     // Create a default NAT network (similar to libvirt's default network)
     pub fn create_default_nat_network(&self, name: &str, subnet: &str) -> LibvirtNetwork {
-        let network_addr = Ipv4Addr::from_str(&format!("{}.1", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
+        let network_addr =
+            Ipv4Addr::from_str(&format!("{}.1", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
         let netmask = Ipv4Addr::new(255, 255, 255, 0);
-        let dhcp_start = Ipv4Addr::from_str(&format!("{}.2", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
-        let dhcp_end = Ipv4Addr::from_str(&format!("{}.254", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
+        let dhcp_start =
+            Ipv4Addr::from_str(&format!("{}.2", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
+        let dhcp_end =
+            Ipv4Addr::from_str(&format!("{}.254", &subnet[..subnet.rfind('.').unwrap()])).unwrap();
 
         LibvirtNetwork {
             name: name.to_string(),

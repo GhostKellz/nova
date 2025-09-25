@@ -1,8 +1,11 @@
-use crate::{config::ContainerConfig, instance::Instance, log_debug, log_error, log_info, log_warn, NovaError, Result};
+use crate::{
+    NovaError, Result, config::ContainerConfig, instance::Instance, log_debug, log_error, log_info,
+    log_warn,
+};
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 // TODO: Replace with Bolt runtime integration once available
 // See BOLT_INT.md for integration requirements
@@ -20,7 +23,11 @@ impl ContainerManager {
         }
     }
 
-    pub async fn start_container(&self, name: &str, config: Option<&ContainerConfig>) -> Result<()> {
+    pub async fn start_container(
+        &self,
+        name: &str,
+        config: Option<&ContainerConfig>,
+    ) -> Result<()> {
         log_info!("Starting container: {}", name);
 
         // Check if container is already running
@@ -53,9 +60,9 @@ impl ContainerManager {
         // Start the container
         let mut cmd = Command::new("bash");
         cmd.arg(&script_path)
-           .stdin(Stdio::null())
-           .stdout(Stdio::null())
-           .stderr(Stdio::piped());
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
 
         log_debug!("Container command: {:?}", cmd);
 
@@ -71,7 +78,8 @@ impl ContainerManager {
         // For now, we just track the PID in the instance
 
         // Create or update instance
-        let mut instance = Instance::new(name.to_string(), crate::instance::InstanceType::Container);
+        let mut instance =
+            Instance::new(name.to_string(), crate::instance::InstanceType::Container);
         instance.set_pid(Some(pid));
         instance.update_status(crate::instance::InstanceStatus::Starting);
         instance.cpu_cores = 1; // Containers typically share CPU
@@ -155,7 +163,10 @@ impl ContainerManager {
         instances.get(name).cloned()
     }
 
-    pub async fn get_container_status(&self, name: &str) -> Result<crate::instance::InstanceStatus> {
+    pub async fn get_container_status(
+        &self,
+        name: &str,
+    ) -> Result<crate::instance::InstanceStatus> {
         let instances = self.instances.lock().unwrap();
         if let Some(instance) = instances.get(name) {
             Ok(instance.status)
@@ -167,17 +178,27 @@ impl ContainerManager {
     fn generate_container_script(&self, name: &str, config: &ContainerConfig) -> Result<String> {
         let mut script = String::new();
 
-        script.push_str("#!/bin/bash
-");
-        script.push_str("set -e
+        script.push_str(
+            "#!/bin/bash
+",
+        );
+        script.push_str(
+            "set -e
 
-");
+",
+        );
 
-        script.push_str(&format!("# Nova container script for '{}'
-", name));
-        script.push_str(&format!("echo \"Starting Nova container: {}\"
+        script.push_str(&format!(
+            "# Nova container script for '{}'
+",
+            name
+        ));
+        script.push_str(&format!(
+            "echo \"Starting Nova container: {}\"
 
-", name));
+",
+            name
+        ));
 
         // Set process name for easy identification
         script.push_str(&format!("exec -a nova-container-{} ", name));
@@ -272,9 +293,9 @@ impl ContainerManager {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContainerRuntime {
-    Bolt,    // Primary: High-performance Rust container runtime
-    Docker,  // Fallback: Industry standard
-    Podman,  // Fallback: Daemonless alternative
+    Bolt,   // Primary: High-performance Rust container runtime
+    Docker, // Fallback: Industry standard
+    Podman, // Fallback: Daemonless alternative
     None,
 }
 
