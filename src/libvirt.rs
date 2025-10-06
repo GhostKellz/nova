@@ -2,7 +2,6 @@ use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::Ipv4Addr;
-use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
 

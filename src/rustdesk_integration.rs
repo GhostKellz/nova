@@ -1,5 +1,4 @@
-use crate::console::{ConnectionInfo, ConsoleSession, ConsoleType};
-use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use crate::{NovaError, Result, log_error, log_info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
@@ -480,7 +479,7 @@ EOF
         Ok(())
     }
 
-    pub async fn share_clipboard(&self, session_id: &str, content: &str) -> Result<()> {
+    pub async fn share_clipboard(&self, session_id: &str, _content: &str) -> Result<()> {
         log_info!("Sharing clipboard content for session: {}", session_id);
         // RustDesk supports real-time clipboard sync
         Ok(())
@@ -497,7 +496,7 @@ EOF
     }
 
     // Utility functions
-    async fn select_optimal_relay_server(&self, vm_ip: &str) -> String {
+    async fn select_optimal_relay_server(&self, _vm_ip: &str) -> String {
         // Test latency to different relay servers and select the best
         // For now, return the primary server
         self.config.server_host.clone()

@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleSession {
@@ -444,7 +442,7 @@ impl ConsoleManager {
         // Remove from active sessions
         {
             let mut sessions = self.sessions.lock().unwrap();
-            if let Some(mut session) = sessions.get_mut(session_id) {
+            if let Some(session) = sessions.get_mut(session_id) {
                 session.active = false;
             }
         }
@@ -645,6 +643,7 @@ impl ConsoleManager {
             .unwrap_or(false)
     }
 
+    #[allow(dead_code)]
     fn check_novnc_available(&self) -> bool {
         Command::new("websockify")
             .arg("--version")

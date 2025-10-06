@@ -1,17 +1,15 @@
-use crate::arch_integration::{ArchNetworkConfig, ArchNetworkManager};
+use crate::arch_integration::ArchNetworkManager;
 use crate::libvirt::{LibvirtManager, LibvirtNetwork};
-use crate::monitoring::{BandwidthUsage, NetworkMonitor, NetworkTopology, PacketCaptureConfig};
-use crate::network::{
-    BridgeConfig, DhcpConfig, NatConfig, NetworkInterface, NetworkManager, SwitchType,
-    VirtualSwitch,
-};
-use crate::{Result, log_error, log_info};
+use crate::log_info;
+use crate::monitoring::{BandwidthUsage, NetworkMonitor, NetworkTopology};
+use crate::network::{NetworkInterface, NetworkManager, SwitchType, VirtualSwitch};
 
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+#[allow(dead_code)]
 pub struct NetworkingGui {
     // Core managers
     network_manager: Arc<Mutex<NetworkManager>>,
@@ -82,6 +80,7 @@ struct CaptureDialog {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TopologyView {
     zoom: f32,
     pan_offset: Vec2,

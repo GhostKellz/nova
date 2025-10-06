@@ -1,6 +1,6 @@
-use crate::firewall::{FirewallManager, FirewallRule, TrafficFlow};
-use crate::port_monitor::{ActiveConnection, ListeningPort, PortMonitor, SecurityAlert};
-use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use crate::firewall::FirewallManager;
+use crate::port_monitor::PortMonitor;
+use crate::{NovaError, Result, log_debug, log_error, log_info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ pub struct MetricsRegistry {
     counters: HashMap<String, Counter>,
     gauges: HashMap<String, Gauge>,
     histograms: HashMap<String, Histogram>,
-    summaries: HashMap<String, Summary>,
+    _summaries: HashMap<String, Summary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,7 +715,7 @@ impl MetricsRegistry {
             counters: HashMap::new(),
             gauges: HashMap::new(),
             histograms: HashMap::new(),
-            summaries: HashMap::new(),
+            _summaries: HashMap::new(),
         }
     }
 

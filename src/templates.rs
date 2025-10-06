@@ -123,6 +123,38 @@ impl TemplateManager {
         self.templates.push(self.create_cicd_testbed());
         self.templates.push(self.create_go_devenv());
         self.templates.push(self.create_nodejs_devenv());
+
+        // Advanced catalog (preview)
+        self.templates.extend(vec![
+            self.create_reverse_proxy(),
+            self.create_static_website(),
+            self.create_postgres_cluster(),
+            self.create_redis_cache(),
+            self.create_mongodb_replica(),
+            self.create_logging_stack(),
+            self.create_jupyter_lab(),
+            self.create_network_security(),
+            self.create_vault_cluster(),
+            self.create_pihole_unbound(),
+            self.create_wireguard_vpn(),
+            self.create_minecraft_server(),
+            self.create_game_server_stack(),
+            self.create_collaboration_suite(),
+            self.create_nginx_proxy_stack(),
+            self.create_jamstack_site(),
+            self.create_ha_postgres_cluster(),
+            self.create_redis_cluster(),
+            self.create_mongodb_replica_set(),
+            self.create_elk_stack(),
+            self.create_data_science_lab(),
+            self.create_security_stack(),
+            self.create_hashicorp_vault(),
+            self.create_dns_security_stack(),
+            self.create_vpn_server(),
+            self.create_game_server(),
+            self.create_multi_game_platform(),
+            self.create_nextcloud_suite(),
+        ]);
     }
 
     fn create_lamp_stack(&self) -> ContainerTemplate {

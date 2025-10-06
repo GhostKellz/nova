@@ -1,4 +1,4 @@
-use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use crate::{NovaError, Result, log_debug, log_error, log_info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
@@ -138,7 +138,7 @@ pub struct FirewallManager {
     backend: FirewallBackend,
     tables: HashMap<String, FirewallTable>,
     active_flows: Vec<TrafficFlow>,
-    interfaces: HashMap<String, NetworkInterface>,
+    _interfaces: HashMap<String, NetworkInterface>,
     rule_conflicts: Vec<RuleConflict>,
 }
 
@@ -176,7 +176,7 @@ impl FirewallManager {
             backend,
             tables: HashMap::new(),
             active_flows: Vec::new(),
-            interfaces: HashMap::new(),
+            _interfaces: HashMap::new(),
             rule_conflicts: Vec::new(),
         })
     }
@@ -307,7 +307,7 @@ impl FirewallManager {
     }
 
     fn parse_iptables_rule_line(&self, line: &str, table: &str) -> Result<FirewallRule> {
-        let parts: Vec<&str> = line.split_whitespace().collect();
+        let _parts: Vec<&str> = line.split_whitespace().collect();
 
         // Basic parsing - would need more sophisticated parsing for real implementation
         let rule = FirewallRule {
@@ -756,7 +756,7 @@ impl Default for FirewallManager {
             backend: FirewallBackend::Iptables,
             tables: HashMap::new(),
             active_flows: Vec::new(),
-            interfaces: HashMap::new(),
+            _interfaces: HashMap::new(),
             rule_conflicts: Vec::new(),
         })
     }
