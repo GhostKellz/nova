@@ -3,7 +3,7 @@ use crate::{
     NovaError, Result,
     config::{DiskFormat, VmConfig},
     instance::Instance,
-    libvirt::{LibvirtManager, LibvirtNetwork},
+    libvirt::LibvirtManager,
     log_debug, log_error, log_info, log_warn,
     network::NetworkManager,
 };

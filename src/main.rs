@@ -6,11 +6,13 @@ use nova::{
     libvirt::LibvirtManager,
     logger,
     network::{
-        BridgeConfig, InterfaceState, NetworkManager, SwitchOrigin, SwitchStatus, SwitchType,
+        BridgeConfig, InterfaceState, NetworkManager, SwitchOrigin, SwitchProfile, SwitchStatus,
+        SwitchType,
     },
     templates::TemplateManager,
     vm::VmManager,
 };
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -157,6 +159,18 @@ enum NetworkCommands {
         /// Switch type backend
         #[arg(value_enum, long = "type", default_value = "bridge")]
         switch_type: NetworkSwitchTypeArg,
+        /// Profile to apply after creating the bridge
+        #[arg(value_enum, long = "profile")]
+        profile: Option<NetworkProfileArg>,
+        /// Uplink interface for external or NAT profiles
+        #[arg(long = "uplink", value_name = "IFACE")]
+        uplink: Option<String>,
+        /// Subnet in CIDR form for NAT profile (e.g. 192.168.200.1/24)
+        #[arg(long = "subnet", value_name = "CIDR")]
+        subnet: Option<String>,
+        /// DHCP allocation range for NAT profile (format: start-end)
+        #[arg(long = "dhcp-range", value_name = "START-END")]
+        dhcp_range: Option<String>,
         /// Interfaces to attach after creation
         #[arg(long = "attach", value_name = "IFACE")]
         attach_interfaces: Vec<String>,
@@ -234,10 +248,84 @@ impl From<NetworkSwitchTypeArg> for SwitchType {
     }
 }
 
+#[derive(ValueEnum, Clone)]
+enum NetworkProfileArg {
+    Internal,
+    External,
+    Nat,
+}
+
+impl NetworkProfileArg {
+    fn into_switch_profile(
+        self,
+        uplink: Option<String>,
+        subnet: Option<String>,
+        dhcp_range: Option<String>,
+    ) -> Result<SwitchProfile> {
+        match self {
+            NetworkProfileArg::Internal => Ok(SwitchProfile::Internal),
+            NetworkProfileArg::External => {
+                let uplink = uplink.ok_or_else(|| {
+                    NovaError::ConfigError(
+                        "--uplink is required for the external profile".to_string(),
+                    )
+                })?;
+                Ok(SwitchProfile::External { uplink })
+            }
+            NetworkProfileArg::Nat => {
+                let uplink = uplink.ok_or_else(|| {
+                    NovaError::ConfigError("--uplink is required for the NAT profile".to_string())
+                })?;
+                let subnet_cidr = subnet.ok_or_else(|| {
+                    NovaError::ConfigError("--subnet is required for the NAT profile".to_string())
+                })?;
+
+                let (dhcp_range_start, dhcp_range_end) = if let Some(range) = dhcp_range {
+                    let (start, end) = parse_cli_dhcp_range(&range)?;
+                    (Some(start), Some(end))
+                } else {
+                    (None, None)
+                };
+
+                Ok(SwitchProfile::Nat {
+                    uplink,
+                    subnet_cidr,
+                    dhcp_range_start,
+                    dhcp_range_end,
+                })
+            }
+        }
+    }
+}
+
 #[derive(clap::ValueEnum, Clone)]
 enum InstanceType {
     Vm,
     Container,
+}
+
+fn parse_cli_dhcp_range(range: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
+    let mut parts = range.split('-');
+    let start = parts
+        .next()
+        .ok_or_else(|| NovaError::ConfigError("Invalid DHCP range".to_string()))?
+        .trim()
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NovaError::ConfigError("Invalid DHCP start address".to_string()))?;
+    let end = parts
+        .next()
+        .ok_or_else(|| NovaError::ConfigError("Invalid DHCP range".to_string()))?
+        .trim()
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NovaError::ConfigError("Invalid DHCP end address".to_string()))?;
+
+    if u32::from(start) > u32::from(end) {
+        return Err(NovaError::ConfigError(
+            "DHCP range start must be <= end".to_string(),
+        ));
+    }
+
+    Ok((start, end))
 }
 
 #[tokio::main]
@@ -607,6 +695,10 @@ Volumes:"
                     println!("  Status: {:?}", switch.status);
                     println!("  Origin: {:?}", switch.origin);
                     println!("  STP Enabled: {}", switch.stp_enabled);
+                    match &switch.profile {
+                        Some(profile) => println!("  Profile: {:?}", profile),
+                        None => println!("  Profile: -"),
+                    }
                     println!(
                         "  Interfaces: {}",
                         if switch.interfaces.is_empty() {
@@ -635,13 +727,27 @@ Volumes:"
             NetworkCommands::Create {
                 name,
                 switch_type,
+                profile,
+                uplink,
+                subnet,
+                dhcp_range,
                 attach_interfaces,
                 stp,
             } => {
                 let mut network_manager = NetworkManager::new();
                 let switch_type: SwitchType = switch_type.into();
+                let profile_config = if let Some(profile_arg) = profile {
+                    Some(profile_arg.into_switch_profile(
+                        uplink.clone(),
+                        subnet.clone(),
+                        dhcp_range.clone(),
+                    )?)
+                } else {
+                    None
+                };
+                let profile_clone = profile_config.clone();
                 network_manager
-                    .create_virtual_switch(&name, switch_type.clone())
+                    .create_virtual_switch(&name, switch_type.clone(), profile_config)
                     .await?;
 
                 if stp {
@@ -657,13 +763,28 @@ Volumes:"
                     network_manager.configure_bridge(&config).await?;
                 }
 
+                let uplink_to_skip = profile_clone.as_ref().and_then(|profile| match profile {
+                    SwitchProfile::External { uplink } => Some(uplink.clone()),
+                    SwitchProfile::Internal | SwitchProfile::Nat { .. } => None,
+                });
+
                 for iface in attach_interfaces {
+                    if uplink_to_skip.as_deref() == Some(iface.as_str()) {
+                        continue;
+                    }
                     network_manager
                         .add_interface_to_switch(&name, &iface)
                         .await?;
                 }
 
-                println!("Bridge '{}' ({:?}) created successfully", name, switch_type);
+                if let Some(profile) = profile_clone {
+                    println!(
+                        "Bridge '{}' ({:?}) created successfully with {:?} profile",
+                        name, switch_type, profile
+                    );
+                } else {
+                    println!("Bridge '{}' ({:?}) created successfully", name, switch_type);
+                }
             }
             NetworkCommands::Delete { name } => {
                 let mut network_manager = NetworkManager::new();

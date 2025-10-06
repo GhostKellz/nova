@@ -1,11 +1,34 @@
 use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use dirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::fs;
+use std::io::Write;
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
+const NETWORK_STATE_DIR_FALLBACK: &str = "/var/lib/nova/networks";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SwitchProfile {
+    Internal,
+    External {
+        uplink: String,
+    },
+    Nat {
+        uplink: String,
+        subnet_cidr: String,
+        dhcp_range_start: Option<Ipv4Addr>,
+        dhcp_range_end: Option<Ipv4Addr>,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualSwitch {
@@ -17,6 +40,8 @@ pub struct VirtualSwitch {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub status: SwitchStatus,
     pub origin: SwitchOrigin,
+    #[serde(default)]
+    pub profile: Option<SwitchProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -98,9 +123,83 @@ pub struct NatConfig {
     pub masquerade: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSwitch {
+    name: String,
+    switch_type: SwitchType,
+    profile: Option<SwitchProfile>,
+}
+
+fn network_state_dir() -> PathBuf {
+    if let Some(mut dir) = dirs::data_dir() {
+        dir.push("nova");
+        dir.push("networks");
+        dir
+    } else {
+        PathBuf::from(NETWORK_STATE_DIR_FALLBACK)
+    }
+}
+
+fn network_state_file(name: &str) -> PathBuf {
+    let mut path = network_state_dir();
+    path.push(format!("{}.json", name));
+    path
+}
+
+fn load_all_persisted_switches() -> Result<Vec<PersistedSwitch>> {
+    let dir = network_state_dir();
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut persisted = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+
+        let content = fs::read_to_string(entry.path())?;
+        if let Ok(state) = serde_json::from_str::<PersistedSwitch>(&content) {
+            persisted.push(state);
+        }
+    }
+
+    Ok(persisted)
+}
+
+fn load_persisted_switch(name: &str) -> Result<Option<PersistedSwitch>> {
+    let path = network_state_file(name);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(path)?;
+    let state: PersistedSwitch = serde_json::from_str(&content)?;
+    Ok(Some(state))
+}
+
+fn persist_switch_state(state: &PersistedSwitch) -> Result<()> {
+    let dir = network_state_dir();
+    fs::create_dir_all(&dir)?;
+    let path = network_state_file(&state.name);
+    let payload = serde_json::to_string_pretty(state)?;
+    fs::write(path, payload)?;
+    Ok(())
+}
+
+fn remove_persisted_switch(name: &str) -> Result<()> {
+    let path = network_state_file(name);
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
 pub struct NetworkManager {
     switches: HashMap<String, VirtualSwitch>,
     interfaces: HashMap<String, NetworkInterface>,
+    restored_profiles: HashSet<String>,
     last_refresh_at: Option<chrono::DateTime<chrono::Utc>>,
     last_refresh_instant: Option<Instant>,
     refresh_interval: Duration,
@@ -111,6 +210,7 @@ impl NetworkManager {
         Self {
             switches: HashMap::new(),
             interfaces: HashMap::new(),
+            restored_profiles: HashSet::new(),
             last_refresh_at: None,
             last_refresh_instant: None,
             refresh_interval: Duration::from_secs(10),
@@ -126,10 +226,13 @@ impl NetworkManager {
         }
 
         self.switches = retained;
+        self.restored_profiles
+            .retain(|name| self.switches.contains_key(name));
         self.interfaces.clear();
 
         self.discover_interfaces().await?;
         self.rebuild_switch_memberships();
+        self.hydrate_persisted_switches().await?;
 
         self.last_refresh_instant = Some(Instant::now());
         self.last_refresh_at = Some(chrono::Utc::now());
@@ -139,6 +242,174 @@ impl NetworkManager {
 
     pub fn set_refresh_interval(&mut self, interval: Duration) {
         self.refresh_interval = interval;
+    }
+
+    async fn hydrate_persisted_switches(&mut self) -> Result<()> {
+        let persisted = load_all_persisted_switches()?;
+        for state in persisted {
+            let switch_name = state.name.clone();
+
+            if let Some(existing) = self.switches.get_mut(&switch_name) {
+                existing.origin = SwitchOrigin::Nova;
+                existing.switch_type = state.switch_type.clone();
+                existing.profile = state.profile.clone();
+            } else {
+                self.switches.insert(
+                    switch_name.clone(),
+                    VirtualSwitch {
+                        name: switch_name.clone(),
+                        switch_type: state.switch_type.clone(),
+                        interfaces: Vec::new(),
+                        vlan_id: None,
+                        stp_enabled: false,
+                        created_at: chrono::Utc::now(),
+                        status: SwitchStatus::Inactive,
+                        origin: SwitchOrigin::Nova,
+                        profile: state.profile.clone(),
+                    },
+                );
+            }
+
+            let mut bridge_ready = bridge_exists(&switch_name);
+            if !bridge_ready {
+                match state.switch_type {
+                    SwitchType::LinuxBridge => {
+                        if let Err(err) = self.create_linux_bridge(&switch_name).await {
+                            log_error!("Failed to recreate Linux bridge {}: {}", switch_name, err);
+                            continue;
+                        }
+                        bridge_ready = true;
+                    }
+                    SwitchType::OpenVSwitch => {
+                        if let Err(err) = self.create_ovs_bridge(&switch_name).await {
+                            log_error!("Failed to recreate OVS bridge {}: {}", switch_name, err);
+                            continue;
+                        }
+                        bridge_ready = true;
+                    }
+                }
+            }
+
+            if let Some(switch) = self.switches.get_mut(&switch_name) {
+                if bridge_ready || is_test_mode() {
+                    switch.status = SwitchStatus::Active;
+                }
+            }
+
+            if let Some(profile) = state.profile.clone() {
+                if self.restored_profiles.contains(&switch_name) {
+                    continue;
+                }
+
+                #[cfg(test)]
+                record_restore_attempt(&state.name);
+
+                match self.restore_persisted_profile(&state, &profile).await {
+                    Ok(()) => {
+                        self.restored_profiles.insert(switch_name.clone());
+                        if let Some(switch) = self.switches.get_mut(&switch_name) {
+                            switch.status = SwitchStatus::Active;
+                        }
+                    }
+                    Err(err) => {
+                        log_error!("Failed to restore profile for {}: {}", switch_name, err);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn restore_persisted_profile(
+        &mut self,
+        state: &PersistedSwitch,
+        profile: &SwitchProfile,
+    ) -> Result<()> {
+        match profile {
+            SwitchProfile::Internal => Ok(()),
+            SwitchProfile::External { uplink } => {
+                let already_attached = self
+                    .interfaces
+                    .get(uplink)
+                    .and_then(|iface| iface.bridge.as_ref())
+                    .map_or(false, |bridge| bridge == &state.name);
+
+                if !already_attached {
+                    self.add_interface_to_switch(&state.name, uplink).await?;
+                } else if let Some(switch) = self.switches.get_mut(&state.name) {
+                    if !switch.interfaces.iter().any(|iface| iface == uplink) {
+                        switch.interfaces.push(uplink.clone());
+                    }
+                }
+
+                if let Some(iface) = self.interfaces.get_mut(uplink) {
+                    iface.bridge = Some(state.name.clone());
+                }
+
+                if let Some(switch) = self.switches.get_mut(&state.name) {
+                    switch.status = SwitchStatus::Active;
+                }
+
+                Ok(())
+            }
+            SwitchProfile::Nat {
+                uplink,
+                subnet_cidr,
+                dhcp_range_start,
+                dhcp_range_end,
+            } => {
+                self.assign_bridge_address(&state.name, subnet_cidr, None)
+                    .await?;
+
+                let (gateway_ip, prefix) = parse_cidr(subnet_cidr)?;
+                let mask = prefix_to_mask(prefix)
+                    .ok_or_else(|| NovaError::ConfigError("Invalid subnet prefix".to_string()))?;
+                let subnet_mask = mask_to_ipv4(mask);
+
+                let (range_start, range_end) = match (dhcp_range_start, dhcp_range_end) {
+                    (Some(start), Some(end)) => (*start, *end),
+                    (None, None) => default_dhcp_range(gateway_ip, prefix).ok_or_else(|| {
+                        NovaError::ConfigError(
+                            "Unable to derive DHCP range from provided subnet".to_string(),
+                        )
+                    })?,
+                    _ => {
+                        return Err(NovaError::ConfigError(
+                            "DHCP range requires both start and end addresses".to_string(),
+                        ));
+                    }
+                };
+
+                let dhcp_config = DhcpConfig {
+                    enabled: true,
+                    range_start,
+                    range_end,
+                    subnet_mask,
+                    gateway: gateway_ip,
+                    dns_servers: vec![gateway_ip],
+                    lease_time: 86_400,
+                };
+
+                let _ = self.stop_dhcp(&state.name).await;
+                self.configure_dhcp(&dhcp_config, &state.name).await?;
+
+                let nat_config = NatConfig {
+                    enabled: true,
+                    internal_interface: state.name.clone(),
+                    external_interface: uplink.clone(),
+                    masquerade: true,
+                };
+
+                self.configure_nat(&nat_config).await?;
+
+                if let Some(switch) = self.switches.get_mut(&state.name) {
+                    switch.status = SwitchStatus::Active;
+                }
+
+                Ok(())
+            }
+        }
     }
 
     pub async fn ensure_fresh_state(&mut self) -> Result<()> {
@@ -223,10 +494,12 @@ impl NetworkManager {
         &mut self,
         name: &str,
         switch_type: SwitchType,
+        profile: Option<SwitchProfile>,
     ) -> Result<()> {
         log_info!("Creating virtual switch: {} ({:?})", name, switch_type);
 
-        match switch_type {
+        let has_profile = profile.is_some();
+        match &switch_type {
             SwitchType::LinuxBridge => {
                 self.create_linux_bridge(name).await?;
             }
@@ -235,22 +508,128 @@ impl NetworkManager {
             }
         }
 
+        let profile_to_apply = profile.clone();
+
         let switch = VirtualSwitch {
             name: name.to_string(),
-            switch_type,
+            switch_type: switch_type.clone(),
             interfaces: Vec::new(),
             vlan_id: None,
             stp_enabled: false,
             created_at: chrono::Utc::now(),
             status: SwitchStatus::Active,
             origin: SwitchOrigin::Nova,
+            profile: profile.clone(),
         };
 
         self.switches.insert(name.to_string(), switch);
+
+        if let Some(profile) = profile_to_apply {
+            match profile {
+                SwitchProfile::Internal => {}
+                SwitchProfile::External { uplink } => {
+                    if let Err(err) = self.add_interface_to_switch(name, &uplink).await {
+                        let _ = self.delete_virtual_switch(name).await;
+                        return Err(err);
+                    }
+                }
+                SwitchProfile::Nat {
+                    uplink,
+                    subnet_cidr,
+                    dhcp_range_start,
+                    dhcp_range_end,
+                } => {
+                    if let Err(err) = self.assign_bridge_address(name, &subnet_cidr, None).await {
+                        let _ = self.delete_virtual_switch(name).await;
+                        return Err(err);
+                    }
+
+                    let (gateway_ip, prefix) = match parse_cidr(&subnet_cidr) {
+                        Ok(values) => values,
+                        Err(err) => {
+                            let _ = self.delete_virtual_switch(name).await;
+                            return Err(err);
+                        }
+                    };
+                    let mask = match prefix_to_mask(prefix) {
+                        Some(mask) => mask,
+                        None => {
+                            let _ = self.delete_virtual_switch(name).await;
+                            return Err(NovaError::ConfigError(
+                                "Invalid subnet prefix".to_string(),
+                            ));
+                        }
+                    };
+                    let subnet_mask = mask_to_ipv4(mask);
+
+                    let (range_start, range_end) = match (dhcp_range_start, dhcp_range_end) {
+                        (Some(start), Some(end)) => (start, end),
+                        (None, None) => match default_dhcp_range(gateway_ip, prefix) {
+                            Some(range) => range,
+                            None => {
+                                let _ = self.delete_virtual_switch(name).await;
+                                return Err(NovaError::ConfigError(
+                                    "Unable to derive DHCP range from provided subnet".to_string(),
+                                ));
+                            }
+                        },
+                        _ => {
+                            let _ = self.delete_virtual_switch(name).await;
+                            return Err(NovaError::ConfigError(
+                                "DHCP range requires both start and end addresses".to_string(),
+                            ));
+                        }
+                    };
+
+                    let dhcp_config = DhcpConfig {
+                        enabled: true,
+                        range_start,
+                        range_end,
+                        subnet_mask,
+                        gateway: gateway_ip,
+                        dns_servers: vec![gateway_ip],
+                        lease_time: 86_400,
+                    };
+
+                    if let Err(err) = self.configure_dhcp(&dhcp_config, name).await {
+                        let _ = self.delete_virtual_switch(name).await;
+                        return Err(err);
+                    }
+
+                    let nat_config = NatConfig {
+                        enabled: true,
+                        internal_interface: name.to_string(),
+                        external_interface: uplink.clone(),
+                        masquerade: true,
+                    };
+
+                    if let Err(err) = self.configure_nat(&nat_config).await {
+                        let _ = self.stop_dhcp(name).await;
+                        let _ = self.delete_virtual_switch(name).await;
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        let persisted = PersistedSwitch {
+            name: name.to_string(),
+            switch_type,
+            profile,
+        };
+        persist_switch_state(&persisted)?;
+        if has_profile {
+            self.restored_profiles.insert(name.to_string());
+        }
         Ok(())
     }
 
     async fn create_linux_bridge(&self, name: &str) -> Result<()> {
+        if is_test_mode() {
+            log_debug!("[test] Pretending to create Linux bridge {}", name);
+            return Ok(());
+        }
+
         // Create bridge using ip command (modern approach)
         let output = Command::new("ip")
             .args(&["link", "add", "name", name, "type", "bridge"])
@@ -288,6 +667,11 @@ impl NetworkManager {
             return self.create_linux_bridge(name).await;
         }
 
+        if is_test_mode() {
+            log_debug!("[test] Pretending to create OVS bridge {}", name);
+            return Ok(());
+        }
+
         let output = Command::new("ovs-vsctl")
             .args(&["add-br", name])
             .output()
@@ -309,8 +693,53 @@ impl NetworkManager {
     pub async fn delete_virtual_switch(&mut self, name: &str) -> Result<()> {
         log_info!("Deleting virtual switch: {}", name);
 
+        let persisted_state = load_persisted_switch(name)?;
+
+        let profile = self
+            .switches
+            .get(name)
+            .and_then(|switch| switch.profile.clone())
+            .or_else(|| {
+                persisted_state
+                    .as_ref()
+                    .and_then(|state| state.profile.clone())
+            });
+
+        if let Some(profile) = profile {
+            match profile {
+                SwitchProfile::Nat { uplink, .. } => {
+                    let nat_config = NatConfig {
+                        enabled: false,
+                        internal_interface: name.to_string(),
+                        external_interface: uplink.clone(),
+                        masquerade: true,
+                    };
+                    let _ = self.configure_nat(&nat_config).await;
+                    let _ = self.stop_dhcp(name).await;
+                    let _ = Command::new("ip")
+                        .args(&["addr", "flush", "dev", name])
+                        .output();
+                }
+                SwitchProfile::External { uplink } => {
+                    let _ = Command::new("ip")
+                        .args(&["link", "set", "dev", &uplink, "nomaster"])
+                        .output();
+                }
+                SwitchProfile::Internal => {}
+            }
+        }
+
         if let Some(switch) = self.switches.get(name) {
             match switch.switch_type {
+                SwitchType::LinuxBridge => {
+                    self.delete_linux_bridge(name).await?;
+                }
+                SwitchType::OpenVSwitch => {
+                    self.delete_ovs_bridge(name).await?;
+                }
+            }
+        } else if let Some(state) = &persisted_state {
+            match state.switch_type {
                 SwitchType::LinuxBridge => {
                     self.delete_linux_bridge(name).await?;
                 }
@@ -321,6 +750,8 @@ impl NetworkManager {
         }
 
         self.switches.remove(name);
+        remove_persisted_switch(name)?;
+        self.restored_profiles.remove(name);
         Ok(())
     }
 
@@ -451,6 +882,15 @@ impl NetworkManager {
     }
 
     async fn add_interface_to_linux_bridge(&self, bridge: &str, interface: &str) -> Result<()> {
+        if is_test_mode() {
+            log_debug!(
+                "[test] Pretending to add interface {} to Linux bridge {}",
+                interface,
+                bridge
+            );
+            return Ok(());
+        }
+
         let output = Command::new("ip")
             .args(&["link", "set", "dev", interface, "master", bridge])
             .output()
@@ -470,6 +910,15 @@ impl NetworkManager {
     }
 
     async fn add_interface_to_ovs_bridge(&self, bridge: &str, interface: &str) -> Result<()> {
+        if is_test_mode() {
+            log_debug!(
+                "[test] Pretending to add interface {} to OVS bridge {}",
+                interface,
+                bridge
+            );
+            return Ok(());
+        }
+
         let output = Command::new("ovs-vsctl")
             .args(&["add-port", bridge, interface])
             .output()
@@ -569,6 +1018,51 @@ impl NetworkManager {
             log_debug!("Set bridge parameter {}={} for {}", param, value, bridge);
         }
 
+        Ok(())
+    }
+
+    pub async fn assign_bridge_address(
+        &self,
+        bridge: &str,
+        cidr: &str,
+        flush_from: Option<&str>,
+    ) -> Result<()> {
+        if is_test_mode() {
+            log_debug!(
+                "[test] Pretending to assign {} to bridge {} (flush {:?})",
+                cidr,
+                bridge,
+                flush_from
+            );
+            return Ok(());
+        }
+
+        if let Some(source) = flush_from {
+            log_info!(
+                "Flushing IP configuration from {} before assigning to {}",
+                source,
+                bridge
+            );
+            let _ = Command::new("ip")
+                .args(&["addr", "flush", "dev", source])
+                .output();
+        }
+
+        let output = Command::new("ip")
+            .args(&["addr", "replace", cidr, "dev", bridge])
+            .output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if !output.status.success() {
+            log_error!("Failed to assign address {} to bridge {}", cidr, bridge);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        let _ = Command::new("ip")
+            .args(&["link", "set", "dev", bridge, "up"])
+            .output();
+
+        log_info!("Assigned address {} to bridge {}", cidr, bridge);
         Ok(())
     }
 
@@ -679,6 +1173,7 @@ impl NetworkManager {
                                     created_at: chrono::Utc::now(),
                                     status,
                                     origin: SwitchOrigin::System,
+                                    profile: None,
                                 });
                             }
                         }
@@ -894,6 +1389,15 @@ impl NetworkManager {
             return self.stop_dhcp(interface).await;
         }
 
+        if is_test_mode() {
+            log_debug!(
+                "[test] Skipping dnsmasq launch for interface {} with config {:?}",
+                interface,
+                config
+            );
+            return Ok(());
+        }
+
         let conf_file = format!("/tmp/nova-dhcp-{}.conf", interface);
         let mut dhcp_conf = String::new();
 
@@ -915,7 +1419,7 @@ impl NetworkManager {
         )); // Gateway
 
         // DNS servers
-        for (i, dns) in config.dns_servers.iter().enumerate() {
+        for dns in config.dns_servers.iter() {
             dhcp_conf.push_str(&format!(
                 "dhcp-option=6,{}
 ",
@@ -970,6 +1474,11 @@ impl NetworkManager {
     pub async fn stop_dhcp(&self, interface: &str) -> Result<()> {
         log_info!("Stopping DHCP for interface {}", interface);
 
+        if is_test_mode() {
+            log_debug!("[test] No DHCP teardown needed for {}", interface);
+            return Ok(());
+        }
+
         let pid_file = format!("/tmp/nova-dhcp-{}.pid", interface);
 
         if let Ok(pid_content) = std::fs::read_to_string(&pid_file) {
@@ -994,11 +1503,33 @@ impl NetworkManager {
             config.external_interface
         );
 
-        if !config.enabled {
-            return self.remove_nat_rules(config).await;
+        if is_test_mode() {
+            log_debug!(
+                "[test] Skipping NAT configuration for {}",
+                config.internal_interface
+            );
+            return Ok(());
         }
 
-        // Enable IP forwarding
+        if !config.enabled {
+            if self.check_nft_available() {
+                let _ = self.remove_nat_with_nftables(config).await;
+            }
+            if self.check_iptables_available() {
+                let _ = self.remove_nat_with_iptables(config).await;
+            }
+            return Ok(());
+        }
+
+        // Ensure clean slate before applying rules
+        if self.check_nft_available() {
+            let _ = self.remove_nat_with_nftables(config).await;
+        }
+        if self.check_iptables_available() {
+            let _ = self.remove_nat_with_iptables(config).await;
+        }
+
+        // Enable IP forwarding globally
         let output = Command::new("sysctl")
             .args(&["-w", "net.ipv4.ip_forward=1"])
             .output()
@@ -1009,8 +1540,19 @@ impl NetworkManager {
             return Err(NovaError::SystemCommandFailed);
         }
 
+        if self.check_nft_available() {
+            self.apply_nat_with_nftables(config).await
+        } else if self.check_iptables_available() {
+            self.apply_nat_with_iptables(config).await
+        } else {
+            Err(NovaError::NetworkError(
+                "No nftables or iptables backend available for NAT".to_string(),
+            ))
+        }
+    }
+
+    async fn apply_nat_with_iptables(&self, config: &NatConfig) -> Result<()> {
         if config.masquerade {
-            // Add masquerade rule
             let output = Command::new("iptables")
                 .args(&[
                     "-t",
@@ -1026,12 +1568,11 @@ impl NetworkManager {
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
             if !output.status.success() {
-                log_error!("Failed to add masquerade rule");
+                log_error!("Failed to add masquerade rule via iptables");
                 return Err(NovaError::SystemCommandFailed);
             }
         }
 
-        // Add forward rules
         let output = Command::new("iptables")
             .args(&[
                 "-A",
@@ -1047,7 +1588,7 @@ impl NetworkManager {
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
         if !output.status.success() {
-            log_error!("Failed to add forward rule");
+            log_error!("Failed to add forward rule via iptables");
             return Err(NovaError::SystemCommandFailed);
         }
 
@@ -1070,18 +1611,14 @@ impl NetworkManager {
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
         if !output.status.success() {
-            log_error!("Failed to add return forward rule");
+            log_error!("Failed to add return forward rule via iptables");
             return Err(NovaError::SystemCommandFailed);
         }
 
-        log_info!("NAT configuration applied successfully");
         Ok(())
     }
 
-    async fn remove_nat_rules(&self, config: &NatConfig) -> Result<()> {
-        log_info!("Removing NAT rules for {}", config.internal_interface);
-
-        // Remove masquerade rule
+    async fn remove_nat_with_iptables(&self, config: &NatConfig) -> Result<()> {
         if config.masquerade {
             let _ = Command::new("iptables")
                 .args(&[
@@ -1097,7 +1634,6 @@ impl NetworkManager {
                 .output();
         }
 
-        // Remove forward rules
         let _ = Command::new("iptables")
             .args(&[
                 "-D",
@@ -1128,6 +1664,69 @@ impl NetworkManager {
             ])
             .output();
 
+        Ok(())
+    }
+
+    async fn apply_nat_with_nftables(&self, config: &NatConfig) -> Result<()> {
+        let table_name = Self::nft_table_name(&config.internal_interface);
+        let _ = Command::new("nft")
+            .args(&["delete", "table", "inet", &table_name])
+            .output();
+
+        let script = format!(
+            r#"table inet {table_name} {{
+    chain prerouting {{
+        type nat hook prerouting priority -100;
+    }}
+
+    chain postrouting {{
+        type nat hook postrouting priority 100;
+        oifname "{external}" masquerade
+    }}
+
+    chain forward {{
+        type filter hook forward priority 0;
+        iifname "{internal}" oifname "{external}" accept
+        iifname "{external}" oifname "{internal}" ct state related,established accept
+    }}
+}}
+"#,
+            table_name = table_name,
+            internal = config.internal_interface,
+            external = config.external_interface
+        );
+
+        let mut child = Command::new("nft")
+            .arg("-f")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin.write_all(script.as_bytes())?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|_| NovaError::SystemCommandFailed)?;
+        if !output.status.success() {
+            log_error!(
+                "Failed to apply nftables NAT rules: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        Ok(())
+    }
+
+    async fn remove_nat_with_nftables(&self, config: &NatConfig) -> Result<()> {
+        let table_name = Self::nft_table_name(&config.internal_interface);
+        let _ = Command::new("nft")
+            .args(&["delete", "table", "inet", &table_name])
+            .output();
         Ok(())
     }
 
@@ -1146,6 +1745,18 @@ impl NetworkManager {
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
+    }
+
+    pub fn check_nft_available(&self) -> bool {
+        Command::new("nft")
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    fn nft_table_name(internal: &str) -> String {
+        format!("nova_{}", internal.replace('-', "_"))
     }
 
     pub fn check_ebtables_available(&self) -> bool {
@@ -1174,5 +1785,216 @@ pub enum FilterAction {
 impl Default for NetworkManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8)> {
+    let mut parts = cidr.split('/');
+    let addr_part = parts
+        .next()
+        .ok_or_else(|| NovaError::ConfigError("Invalid CIDR".to_string()))?;
+    let prefix_part = parts
+        .next()
+        .ok_or_else(|| NovaError::ConfigError("Invalid CIDR".to_string()))?;
+
+    let address = addr_part
+        .parse::<Ipv4Addr>()
+        .map_err(|_| NovaError::ConfigError("Invalid IPv4 address".to_string()))?;
+    let prefix = prefix_part
+        .parse::<u8>()
+        .map_err(|_| NovaError::ConfigError("Invalid prefix length".to_string()))?;
+
+    if prefix > 32 {
+        return Err(NovaError::ConfigError(
+            "CIDR prefix out of range".to_string(),
+        ));
+    }
+
+    Ok((address, prefix))
+}
+
+fn prefix_to_mask(prefix: u8) -> Option<u32> {
+    if prefix > 32 {
+        return None;
+    }
+    if prefix == 0 {
+        Some(0)
+    } else {
+        Some(!0u32 << (32 - prefix))
+    }
+}
+
+fn mask_to_ipv4(mask: u32) -> Ipv4Addr {
+    Ipv4Addr::from(mask)
+}
+
+fn default_dhcp_range(ip: Ipv4Addr, prefix: u8) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    if prefix >= 31 {
+        return None;
+    }
+
+    let mask = prefix_to_mask(prefix)?;
+    let network = u32::from(ip) & mask;
+    let broadcast = network | !mask;
+
+    let start = network.saturating_add(10);
+    let end = broadcast.saturating_sub(10);
+
+    if start >= end {
+        return None;
+    }
+
+    Some((Ipv4Addr::from(start), Ipv4Addr::from(end)))
+}
+
+fn bridge_exists(name: &str) -> bool {
+    Path::new(&format!("/sys/class/net/{}", name)).exists()
+}
+
+fn is_test_mode() -> bool {
+    cfg!(test) || matches!(env::var("NOVA_TEST_MODE"), Ok(val) if val == "1")
+}
+
+#[cfg(test)]
+static RESTORE_ATTEMPTS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+#[cfg(test)]
+fn record_restore_attempt(name: &str) {
+    RESTORE_ATTEMPTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .push(name.to_string());
+}
+
+#[cfg(test)]
+fn restore_attempts_snapshot() -> Vec<String> {
+    RESTORE_ATTEMPTS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap()
+        .clone()
+}
+
+#[cfg(test)]
+fn clear_restore_attempts() {
+    if let Some(store) = RESTORE_ATTEMPTS.get() {
+        store.lock().unwrap().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn setup_test_env() -> tempfile::TempDir {
+        clear_restore_attempts();
+        unsafe {
+            std::env::set_var("NOVA_TEST_MODE", "1");
+        }
+        let tmp = tempdir().expect("temp dir");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+        tmp
+    }
+
+    fn teardown_test_env(tmp: tempfile::TempDir) {
+        drop(tmp);
+        unsafe {
+            std::env::remove_var("NOVA_TEST_MODE");
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        clear_restore_attempts();
+    }
+
+    #[tokio::test]
+    async fn hydrate_restoration_behaviors() {
+        let tmp = setup_test_env();
+
+        let nat_state = PersistedSwitch {
+            name: "nova-nat-test".to_string(),
+            switch_type: SwitchType::LinuxBridge,
+            profile: Some(SwitchProfile::Nat {
+                uplink: "eth0".to_string(),
+                subnet_cidr: "192.168.200.1/24".to_string(),
+                dhcp_range_start: None,
+                dhcp_range_end: None,
+            }),
+        };
+
+        persist_switch_state(&nat_state).expect("persist nat state");
+
+        let mut manager = NetworkManager::new();
+        manager
+            .hydrate_persisted_switches()
+            .await
+            .expect("hydrate nat first");
+
+        let nat_attempts = restore_attempts_snapshot();
+        assert_eq!(nat_attempts, vec!["nova-nat-test".to_string()]);
+        assert!(manager.restored_profiles.contains("nova-nat-test"));
+
+        let nat_switch = manager
+            .switches
+            .get("nova-nat-test")
+            .expect("nat switch inserted");
+        assert!(matches!(nat_switch.status, SwitchStatus::Active));
+        assert!(matches!(
+            nat_switch.profile,
+            Some(SwitchProfile::Nat { .. })
+        ));
+
+        manager
+            .hydrate_persisted_switches()
+            .await
+            .expect("hydrate nat second");
+        let nat_attempts_after = restore_attempts_snapshot();
+        assert_eq!(nat_attempts_after, vec!["nova-nat-test".to_string()]);
+
+        teardown_test_env(tmp);
+
+        let tmp = setup_test_env();
+
+        let ext_state = PersistedSwitch {
+            name: "nova-ext-test".to_string(),
+            switch_type: SwitchType::LinuxBridge,
+            profile: Some(SwitchProfile::External {
+                uplink: "enp3s0".to_string(),
+            }),
+        };
+
+        persist_switch_state(&ext_state).expect("persist ext state");
+
+        let mut manager = NetworkManager::new();
+        manager
+            .hydrate_persisted_switches()
+            .await
+            .expect("hydrate ext first");
+
+        let ext_attempts = restore_attempts_snapshot();
+        assert_eq!(ext_attempts, vec!["nova-ext-test".to_string()]);
+
+        let ext_switch = manager
+            .switches
+            .get("nova-ext-test")
+            .expect("ext switch exists");
+        assert!(matches!(ext_switch.status, SwitchStatus::Active));
+        assert!(ext_switch.interfaces.contains(&"enp3s0".to_string()));
+        assert!(matches!(
+            ext_switch.profile,
+            Some(SwitchProfile::External { .. })
+        ));
+
+        manager
+            .hydrate_persisted_switches()
+            .await
+            .expect("hydrate ext second");
+
+        let ext_attempts_after = restore_attempts_snapshot();
+        assert_eq!(ext_attempts_after, vec!["nova-ext-test".to_string()]);
+
+        teardown_test_env(tmp);
     }
 }

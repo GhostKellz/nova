@@ -89,6 +89,31 @@ nova snapshot vm win11
 nova logs container api
 ``` 
 
+## Networking Persistence & Recovery
+
+Nova now keeps track of managed switches so they survive daemon or host restarts. Key points:
+
+- Every Nova-managed bridge is serialized to `~/.local/share/nova/networks/<switch>.json` (falling back to `/var/lib/nova/networks` when XDG paths are unavailable).
+- On startup the networking subsystem recreates missing bridges, reapplies NAT/DHCP settings, and reattaches uplinks for `external` and `nat` profiles.
+- The CLI supports profile-aware creation. Example:
+
+```bash
+nova net create hyperv0 --type bridge \
+  --profile nat --uplink enp6s0 \
+  --subnet 192.168.220.1/24 --dhcp-range 192.168.220.50-192.168.220.150
+```
+
+### Verifying restart recovery
+
+1. Create a persistent switch (see above) and confirm the JSON state file exists.
+2. Restart the Nova service or reload the binary.
+3. Run `nova net ls` — the bridge should report `Active`, NAT masquerade should be present, and uplinks should still be attached.
+4. For automated regression coverage run:
+
+```bash
+cargo test network::tests::hydrate_restoration_behaviors
+```
+
 ## Roadmap
 
 ### Phase 1 – Core

@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::sleep;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkStats {
@@ -72,7 +71,7 @@ pub struct TopologyConnection {
 }
 
 pub struct NetworkMonitor {
-    stats_history: HashMap<String, Vec<NetworkStats>>,
+    _stats_history: HashMap<String, Vec<NetworkStats>>,
     bandwidth_history: HashMap<String, Vec<BandwidthUsage>>,
     monitoring_active: bool,
 }
@@ -80,7 +79,7 @@ pub struct NetworkMonitor {
 impl NetworkMonitor {
     pub fn new() -> Self {
         Self {
-            stats_history: HashMap::new(),
+            _stats_history: HashMap::new(),
             bandwidth_history: HashMap::new(),
             monitoring_active: false,
         }
@@ -90,7 +89,7 @@ impl NetworkMonitor {
     pub async fn start_monitoring(
         &mut self,
         interfaces: Vec<String>,
-        interval_seconds: u64,
+        _interval_seconds: u64,
     ) -> Result<()> {
         log_info!(
             "Starting network monitoring for {} interfaces",
@@ -148,6 +147,7 @@ impl NetworkMonitor {
     }
 
     // Calculate bandwidth between two stat samples
+    #[allow(dead_code)]
     fn calculate_bandwidth(
         &self,
         current: &NetworkStats,

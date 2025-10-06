@@ -72,7 +72,8 @@ pub struct SharedStorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SharedStorageType {
     NFS,
-    iSCSI,
+    #[serde(rename = "iSCSI")]
+    IScsi,
     Ceph,
     GlusterFS,
     LocalCluster, // For local storage with rsync
@@ -401,7 +402,7 @@ impl MigrationManager {
             .output()
         {
             if output.status.success() {
-                let info = String::from_utf8_lossy(&output.stdout);
+                let _info = String::from_utf8_lossy(&output.stdout);
                 // Parse dirty rate from QEMU monitor
                 analysis.memory_dirty_rate = 50; // Placeholder
             }
@@ -561,7 +562,7 @@ impl MigrationManager {
         migrate_cmd.args(&["--timeout", &self.config.timeout_seconds.to_string()]);
 
         // Start migration in background
-        let child = migrate_cmd.spawn().map_err(|e| {
+        let _child = migrate_cmd.spawn().map_err(|e| {
             log_error!("Failed to start migration: {}", e);
             NovaError::SystemCommandFailed
         })?;
@@ -622,7 +623,7 @@ impl MigrationManager {
             return Err(NovaError::SystemCommandFailed);
         }
 
-        let info = String::from_utf8_lossy(&output.stdout);
+        let _info = String::from_utf8_lossy(&output.stdout);
 
         // Parse migration statistics (simplified)
         let metrics = MigrationMetrics {
@@ -643,7 +644,7 @@ impl MigrationManager {
     }
 
     // Utility methods
-    async fn requires_storage_migration(&self, vm_name: &str) -> Result<bool> {
+    async fn requires_storage_migration(&self, _vm_name: &str) -> Result<bool> {
         // Check if VM uses shared storage
         Ok(self.shared_storage.is_none())
     }

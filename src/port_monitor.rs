@@ -1,10 +1,10 @@
 use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::{interval, sleep};
+use std::time::{Duration, SystemTime};
+use tokio::time::interval;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMonitor {
@@ -606,7 +606,7 @@ impl PortMonitor {
     fn assess_port_risk(
         &self,
         port: u16,
-        protocol: &PortProtocol,
+        _protocol: &PortProtocol,
         process_name: &str,
     ) -> RiskLevel {
         // High-risk ports and processes
@@ -805,7 +805,7 @@ impl PortMonitor {
         }
     }
 
-    async fn detect_port_scan_pattern(&self, connection: &ActiveConnection) -> bool {
+    async fn detect_port_scan_pattern(&self, _connection: &ActiveConnection) -> bool {
         // Look for patterns indicating port scanning
         // - Multiple connections from same IP to different ports
         // - Rapid connection attempts

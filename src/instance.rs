@@ -30,6 +30,8 @@ pub struct Instance {
     pub cpu_cores: u32,
     pub memory_mb: u64,
     pub network: Option<String>,
+    #[serde(default)]
+    pub ip_address: Option<String>,
 }
 
 impl Instance {
@@ -46,6 +48,7 @@ impl Instance {
             cpu_cores: 2,
             memory_mb: 1024,
             network: None,
+            ip_address: None,
         }
     }
 
@@ -56,6 +59,11 @@ impl Instance {
 
     pub fn set_pid(&mut self, pid: Option<u32>) {
         self.pid = pid;
+        self.last_updated = Utc::now();
+    }
+
+    pub fn set_ip_address(&mut self, ip: Option<String>) {
+        self.ip_address = ip;
         self.last_updated = Utc::now();
     }
 

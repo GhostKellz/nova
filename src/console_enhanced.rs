@@ -1,8 +1,8 @@
-use crate::console::{ConnectionInfo, ConsoleConfig, ConsoleManager, ConsoleSession, ConsoleType};
+use crate::console::{ConsoleConfig, ConsoleManager, ConsoleSession};
 use crate::rustdesk_integration::{
     PerformanceProfile, RustDeskConfig, RustDeskManager, RustDeskSession,
 };
-use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use crate::{NovaError, Result, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -99,15 +99,58 @@ impl EnhancedConsoleManager {
 
         let session = match selected_protocol {
             PreferredProtocol::RustDesk => {
-                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis)
+                if let Some(ip) = vm_ip {
+                    match self
+                        .create_rustdesk_session(vm_name, Some(ip), vm_analysis.clone())
+                        .await
+                    {
+                        Ok(session) => session,
+                        Err(err) => {
+                            log_warn!(
+                                "RustDesk session failed for '{}': {:?}. Falling back to SPICE",
+                                vm_name,
+                                err
+                            );
+                            self.create_spice_session(vm_name, vm_analysis.clone())
+                                .await?
+                        }
+                    }
+                } else {
+                    log_warn!(
+                        "No management IP available for '{}'; using SPICE console fallback",
+                        vm_name
+                    );
+                    self.create_spice_session(vm_name, vm_analysis.clone())
+                        .await?
+                }
+            }
+            PreferredProtocol::SPICE => {
+                self.create_spice_session(vm_name, vm_analysis.clone())
                     .await?
             }
-            PreferredProtocol::SPICE => self.create_spice_session(vm_name, vm_analysis).await?,
-            PreferredProtocol::VNC => self.create_vnc_session(vm_name, vm_analysis).await?,
+            PreferredProtocol::VNC => self.create_vnc_session(vm_name).await?,
             PreferredProtocol::Auto => {
-                // This should not happen as select_optimal_protocol returns specific protocol
-                self.create_rustdesk_session(vm_name, vm_ip, vm_analysis)
-                    .await?
+                // Should never happen; already resolved above
+                if let Some(ip) = vm_ip {
+                    match self
+                        .create_rustdesk_session(vm_name, Some(ip), vm_analysis.clone())
+                        .await
+                    {
+                        Ok(session) => session,
+                        Err(err) => {
+                            log_warn!(
+                                "Auto protocol RustDesk fallback for '{}' failed: {:?}",
+                                vm_name,
+                                err
+                            );
+                            self.create_spice_session(vm_name, vm_analysis.clone())
+                                .await?
+                        }
+                    }
+                } else {
+                    self.create_spice_session(vm_name, vm_analysis.clone())
+                        .await?
+                }
             }
         };
 
@@ -210,11 +253,7 @@ impl EnhancedConsoleManager {
         Ok(session)
     }
 
-    async fn create_vnc_session(
-        &mut self,
-        vm_name: &str,
-        analysis: VmAnalysis,
-    ) -> Result<UnifiedConsoleSession> {
+    async fn create_vnc_session(&mut self, vm_name: &str) -> Result<UnifiedConsoleSession> {
         log_info!("Creating enhanced VNC session for VM: {}", vm_name);
 
         let console_session = self
@@ -452,7 +491,7 @@ impl EnhancedConsoleManager {
         Ok(())
     }
 
-    async fn calculate_performance_score(session_id: &str) -> f32 {
+    async fn calculate_performance_score(_session_id: &str) -> f32 {
         // Calculate performance score based on multiple factors:
         // - Latency
         // - FPS
@@ -477,6 +516,32 @@ impl EnhancedConsoleManager {
     pub fn get_performance_score(&self, session_id: &str) -> Option<f32> {
         let scores = self.performance_scores.lock().unwrap();
         scores.get(session_id).copied()
+    }
+
+    pub async fn launch_session_client(&mut self, session_id: &str) -> Result<()> {
+        let session = self
+            .get_session(session_id)
+            .ok_or(NovaError::NetworkNotFound(session_id.to_string()))?;
+
+        match &session.protocol_used {
+            ActiveProtocol::RustDesk(rd_session) => {
+                self.rustdesk_manager
+                    .connect_with_performance_profile(
+                        &session.session_id,
+                        rd_session.performance_profile.clone(),
+                    )
+                    .await?;
+            }
+            ActiveProtocol::Standard(_) => {
+                log_info!(
+                    "Session '{}' is using {:?}; launch viewer manually via supported client",
+                    session_id,
+                    session.protocol_used
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
@@ -532,7 +597,7 @@ impl EnhancedConsoleManager {
 
         // Determine VM IP from current session if needed
         let vm_ip = match &current_session.protocol_used {
-            ActiveProtocol::RustDesk(rd_session) => {
+            ActiveProtocol::RustDesk(_rd_session) => {
                 // Extract IP from RustDesk session if available
                 Some("192.168.1.100") // Placeholder
             }
