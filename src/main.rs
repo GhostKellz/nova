@@ -733,7 +733,7 @@ async fn main() -> Result<()> {
         },
         Commands::List => {
             let vms = vm_manager.list_vms();
-            let containers = container_manager.list_containers();
+            let containers = container_manager.list_containers_async().await;
 
             println!(
                 "{:<20} {:<12} {:<12} {:<8} {:<12}",

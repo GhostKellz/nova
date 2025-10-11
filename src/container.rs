@@ -103,47 +103,53 @@ impl ContainerManager {
         Ok(())
     }
 
-    pub fn list_containers(&self) -> Vec<Instance> {
-        // Use tokio runtime to block on async call
-        let runtime = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                // If no runtime is available, create a new one
-                tokio::runtime::Runtime::new().map(|rt| rt.handle().clone())
-            });
-
-        match runtime {
-            Ok(handle) => {
-                match handle.block_on(async {
-                    self.runtime.list_containers(true).await
-                }) {
-                    Ok(containers) => {
-                        // Convert ContainerInfo to Instance
-                        containers.iter().map(|c| {
-                            let mut instance = Instance::new(c.name.clone(), crate::instance::InstanceType::Container);
-                            instance.update_status(match c.status {
-                                crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
-                                crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
-                                crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
-                                crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
-                                crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
-                                _ => crate::instance::InstanceStatus::Error,
-                            });
-                            if let Some(pid) = c.pid {
-                                instance.set_pid(Some(pid));
-                            }
-                            instance.network = c.network.clone();
-                            instance
-                        }).collect()
+    /// Async version of list_containers (for CLI use)
+    pub async fn list_containers_async(&self) -> Vec<Instance> {
+        match self.runtime.list_containers(true).await {
+            Ok(containers) => {
+                // Convert ContainerInfo to Instance
+                containers.iter().map(|c| {
+                    let mut instance = Instance::new(c.name.clone(), crate::instance::InstanceType::Container);
+                    instance.update_status(match c.status {
+                        crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
+                        crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
+                        crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
+                        crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
+                        crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+                        _ => crate::instance::InstanceStatus::Error,
+                    });
+                    if let Some(pid) = c.pid {
+                        instance.set_pid(Some(pid));
                     }
-                    Err(e) => {
-                        log_warn!("Failed to list containers: {:?}", e);
-                        Vec::new()
-                    }
-                }
+                    instance.network = c.network.clone();
+                    instance
+                }).collect()
             }
-            Err(_) => {
-                log_warn!("No tokio runtime available for list_containers");
+            Err(e) => {
+                log_warn!("Failed to list containers: {:?}", e);
                 Vec::new()
+            }
+        }
+    }
+
+    /// Sync version of list_containers (for GUI use)
+    pub fn list_containers(&self) -> Vec<Instance> {
+        // Check if we're already in an async runtime
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // We're in an async context - can't use block_on
+            // Return empty for now - GUI should use spawn_blocking or separate thread
+            log_warn!("list_containers() called from async context - use list_containers_async() instead");
+            Vec::new()
+        } else {
+            // Not in async context - create runtime and block
+            match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt.block_on(async {
+                    self.list_containers_async().await
+                }),
+                Err(_) => {
+                    log_warn!("Failed to create tokio runtime for list_containers");
+                    Vec::new()
+                }
             }
         }
     }

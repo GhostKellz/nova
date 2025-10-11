@@ -136,20 +136,20 @@ impl DockerRuntime {
         args
     }
 
-    /// Parse Docker ps output
+    /// Parse Docker ps output (pipe-delimited format)
     fn parse_docker_ps_line(&self, line: &str) -> Option<ContainerInfo> {
-        // Docker ps format: CONTAINER ID IMAGE COMMAND CREATED STATUS PORTS NAMES
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 7 {
+        // Docker ps --format output: ID|NAME|IMAGE|STATUS
+        let parts: Vec<&str> = line.split('|').collect();
+        if parts.len() < 4 {
             return None;
         }
 
-        let status = Self::parse_status(parts.get(4).unwrap_or(&""));
+        let status = Self::parse_status(parts[3]);
 
         Some(ContainerInfo {
             id: parts[0].to_string(),
-            name: parts.last().unwrap_or(&"").to_string(),
-            image: parts.get(1).unwrap_or(&"").to_string(),
+            name: parts[1].to_string(),
+            image: parts[2].to_string(),
             status,
             created: chrono::Utc::now(),
             ports: Vec::new(),
@@ -271,7 +271,7 @@ impl ContainerRuntime for DockerRuntime {
     }
 
     async fn list_containers(&self, all: bool) -> Result<Vec<ContainerInfo>> {
-        let mut args = vec!["ps"];
+        let mut args = vec!["ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}"];
         if all {
             args.push("-a");
         }
@@ -288,7 +288,6 @@ impl ContainerRuntime for DockerRuntime {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let containers: Vec<ContainerInfo> = stdout
             .lines()
-            .skip(1) // Skip header
             .filter_map(|line| self.parse_docker_ps_line(line))
             .collect();
 
