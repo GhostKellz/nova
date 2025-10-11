@@ -525,7 +525,7 @@ nova system setup-systemd-networkd
 ### Launch GUI Applications
 
 ```bash
-# Main Nova GUI
+# Main Nova GUI (automatically optimized for Wayland)
 nova gui
 
 # Network manager GUI
@@ -556,6 +556,40 @@ nova notifications --enable
 # KDE integration
 nova kde-integrate
 ```
+
+### Wayland Optimization
+
+Nova automatically detects and optimizes for Wayland-based desktop environments:
+
+```bash
+# Verify Wayland is being used
+echo $XDG_SESSION_TYPE  # Should show: wayland
+
+# Force Wayland backend (if needed)
+export WINIT_UNIX_BACKEND=wayland
+nova gui
+
+# Check desktop environment detection
+nova gui  # Will log detected DE in console output
+```
+
+**Supported Desktop Environments:**
+- **KDE Plasma (Wayland)** - Arch Linux, Fedora, openSUSE
+- **GNOME (Wayland)** - Fedora, Ubuntu 22.04+, Pop!_OS
+- **Cosmic Desktop** - Pop!_OS 24.04+ (beta)
+
+**Automatic Optimizations:**
+- Hardware GPU acceleration (wgpu backend)
+- High DPI / fractional scaling support
+- Native window decorations (KDE server-side, GNOME client-side)
+- Smooth rendering (60 FPS target with compositor sync)
+- Multi-monitor improvements
+- Reduced input latency
+
+**Documentation:**
+- Full Guide: `docs/WAYLAND_INTEGRATION.md`
+- Quick Start: `docs/WAYLAND_QUICKSTART.md`
+- Implementation Details: `docs/WAYLAND_IMPLEMENTATION_SUMMARY.md`
 
 ## Environment Variables
 
