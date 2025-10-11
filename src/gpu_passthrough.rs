@@ -323,7 +323,32 @@ impl GpuManager {
         if output.status.success() {
             let info = String::from_utf8_lossy(&output.stdout);
             log_debug!("nvbind info: {}", info);
-            // TODO: Parse nvbind JSON output
+
+            // Parse nvbind text output
+            // Format: "GPU 0: GeForce RTX 4090"
+            //         "  PCI Address: 0000:01:00.0"
+            //         "  Memory: 24576 MB"
+            for line in info.lines() {
+                if line.trim().starts_with("GPU ") {
+                    if let Some(colon_pos) = line.find(':') {
+                        let gpu_name = line[colon_pos+1..].trim();
+                        log_debug!("Found GPU via nvbind: {}", gpu_name);
+                    }
+                } else if line.contains("PCI Address:") {
+                    if let Some(colon_pos) = line.find(':') {
+                        let pci_addr = line[colon_pos+1..].trim();
+                        log_debug!("PCI Address: {}", pci_addr);
+                    }
+                } else if line.contains("Memory:") && line.contains("MB") {
+                    if let Some(memory_str) = line.split_whitespace()
+                        .find(|s| s.chars().all(|c| c.is_ascii_digit())) {
+                        if let Ok(memory_mb) = memory_str.parse::<u64>() {
+                            log_debug!("GPU Memory: {} MB", memory_mb);
+                            // Store capability info (would need to match to GPU by PCI address)
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -331,6 +356,8 @@ impl GpuManager {
 
     /// Discover GPU capabilities via nvidia-smi
     fn discover_capabilities_via_nvidia_smi(&self) -> Result<()> {
+        log_info!("Using nvidia-smi for GPU capability discovery");
+
         let output = Command::new("nvidia-smi")
             .args(&["--query-gpu=index,name,memory.total,pcie.link.gen.current,pcie.link.width.current", "--format=csv,noheader"])
             .output();
@@ -339,8 +366,52 @@ impl GpuManager {
             if output.status.success() {
                 let info = String::from_utf8_lossy(&output.stdout);
                 log_debug!("nvidia-smi output: {}", info);
-                // TODO: Parse and store GPU capabilities
+
+                // Parse CSV output
+                // Format: "0, GeForce RTX 4090, 24576 MiB, 4, 16"
+                for line in info.lines() {
+                    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+                    if parts.len() >= 5 {
+                        let index = parts[0];
+                        let name = parts[1];
+                        let memory_str = parts[2].replace(" MiB", "").replace(" MB", "");
+                        let pcie_gen = parts[3];
+                        let pcie_lanes = parts[4];
+
+                        log_debug!("GPU {}: {} (Memory: {} MiB, PCIe Gen {}, x{} lanes)",
+                                   index, name, memory_str, pcie_gen, pcie_lanes);
+
+                        // Parse memory value
+                        if let Ok(memory_mb) = memory_str.parse::<u64>() {
+                            log_debug!("  VRAM: {} MB ({} GB)", memory_mb, memory_mb / 1024);
+                        }
+
+                        // Parse PCIe generation
+                        if let Ok(generation) = pcie_gen.parse::<u8>() {
+                            log_debug!("  PCIe: Gen {} x{} lanes", generation, pcie_lanes);
+
+                            // Calculate theoretical bandwidth
+                            let bandwidth_per_lane_gbps = match generation {
+                                1 => 0.25,
+                                2 => 0.5,
+                                3 => 1.0,
+                                4 => 2.0,
+                                5 => 4.0,
+                                _ => 0.0,
+                            };
+
+                            if let Ok(lanes) = pcie_lanes.parse::<u8>() {
+                                let total_bandwidth = bandwidth_per_lane_gbps * lanes as f64;
+                                log_debug!("  Theoretical Bandwidth: {:.1} GB/s", total_bandwidth);
+                            }
+                        }
+                    }
+                }
+            } else {
+                log_warn!("nvidia-smi command failed or no NVIDIA GPUs detected");
             }
+        } else {
+            log_warn!("nvidia-smi not available on system");
         }
 
         Ok(())
