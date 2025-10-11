@@ -452,6 +452,341 @@ impl TemplateManager {
     async fn calculate_snapshot_size(&self, _vm_name: &str, _snapshot_id: &str) -> Result<u64> {
         Ok(512 * 1024 * 1024) // 512MB placeholder
     }
+
+    /// Revert VM to a specific snapshot
+    pub async fn revert_to_snapshot(
+        &mut self,
+        vm_name: &str,
+        snapshot_name: &str,
+    ) -> Result<()> {
+        log_info!("Reverting VM '{}' to snapshot '{}'", vm_name, snapshot_name);
+
+        // Find snapshot by name
+        let snapshot = self
+            .snapshots
+            .get(vm_name)
+            .and_then(|snapshots| {
+                snapshots.values().find(|s| s.name == snapshot_name)
+            })
+            .ok_or_else(|| NovaError::SnapshotNotFound(snapshot_name.to_string()))?;
+
+        // Stop VM if running
+        let vm_state = self.get_vm_state(vm_name).await?;
+        let was_running = matches!(vm_state, VmState::Running);
+
+        if was_running {
+            log_info!("Stopping VM before snapshot revert");
+            let output = Command::new("virsh")
+                .args(&["destroy", vm_name])
+                .output()?;
+
+            if !output.status.success() {
+                log_error!("Failed to stop VM");
+                return Err(NovaError::SystemCommandFailed);
+            }
+        }
+
+        // Revert snapshot using virsh
+        let output = Command::new("virsh")
+            .args(&["snapshot-revert", vm_name, snapshot_name])
+            .arg("--force")
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to revert snapshot: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Update is_current flag
+        if let Some(snapshots) = self.snapshots.get_mut(vm_name) {
+            for snap in snapshots.values_mut() {
+                snap.is_current = snap.name == snapshot_name;
+            }
+        }
+
+        // Restart VM if it was running
+        if was_running {
+            log_info!("Restarting VM after snapshot revert");
+            let output = Command::new("virsh")
+                .args(&["start", vm_name])
+                .output()?;
+
+            if !output.status.success() {
+                log_error!("Failed to restart VM");
+            }
+        }
+
+        log_info!("Successfully reverted to snapshot '{}'", snapshot_name);
+        Ok(())
+    }
+
+    /// Delete a snapshot
+    pub async fn delete_snapshot(
+        &mut self,
+        vm_name: &str,
+        snapshot_name: &str,
+        delete_children: bool,
+    ) -> Result<()> {
+        log_info!("Deleting snapshot '{}' for VM '{}'", snapshot_name, vm_name);
+
+        // Find snapshot and collect info we need
+        let (has_children, parent_snapshot) = {
+            let snapshot = self
+                .snapshots
+                .get(vm_name)
+                .and_then(|snapshots| {
+                    snapshots.values().find(|s| s.name == snapshot_name)
+                })
+                .ok_or_else(|| NovaError::SnapshotNotFound(snapshot_name.to_string()))?;
+
+            (!snapshot.children.is_empty(), snapshot.parent_snapshot.clone())
+        };
+
+        // Check for children
+        if has_children && !delete_children {
+            return Err(NovaError::SnapshotHasChildren);
+        }
+
+        // Delete using virsh
+        let mut cmd = Command::new("virsh");
+        cmd.args(&["snapshot-delete", vm_name, snapshot_name]);
+
+        if delete_children {
+            cmd.arg("--children");
+        }
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to delete snapshot: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Remove from internal state
+        if let Some(snapshots) = self.snapshots.get_mut(vm_name) {
+            snapshots.retain(|_, s| s.name != snapshot_name);
+
+            // Update parent/child relationships
+            if !delete_children {
+                for snap in snapshots.values_mut() {
+                    if snap.parent_snapshot.as_deref() == Some(snapshot_name) {
+                        snap.parent_snapshot = parent_snapshot.clone();
+                    }
+                    snap.children.retain(|c| c != snapshot_name);
+                }
+            }
+        }
+
+        log_info!("Snapshot '{}' deleted successfully", snapshot_name);
+        Ok(())
+    }
+
+    /// Get snapshot tree for visualization
+    pub fn get_snapshot_tree(&self, vm_name: &str) -> Option<SnapshotTree> {
+        let snapshots = self.snapshots.get(vm_name)?;
+
+        let mut root_snapshots = Vec::new();
+        for snapshot in snapshots.values() {
+            if snapshot.parent_snapshot.is_none() {
+                root_snapshots.push(snapshot.id.clone());
+            }
+        }
+
+        Some(SnapshotTree {
+            vm_name: vm_name.to_string(),
+            root_snapshots,
+            snapshot_map: snapshots.clone(),
+        })
+    }
+
+    /// List snapshots in chronological order
+    pub fn list_snapshots_chronological(&self, vm_name: &str) -> Vec<&VmSnapshot> {
+        if let Some(snapshots) = self.snapshots.get(vm_name) {
+            let mut snapshot_list: Vec<&VmSnapshot> = snapshots.values().collect();
+            snapshot_list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            snapshot_list
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get disk space used by all snapshots for a VM
+    pub fn get_total_snapshot_size(&self, vm_name: &str) -> u64 {
+        self.snapshots
+            .get(vm_name)
+            .map(|snapshots| snapshots.values().map(|s| s.size_bytes).sum())
+            .unwrap_or(0)
+    }
+
+    /// Clone a VM from a snapshot
+    pub async fn clone_vm_from_snapshot(
+        &mut self,
+        source_vm: &str,
+        snapshot_name: &str,
+        new_vm_name: &str,
+    ) -> Result<()> {
+        log_info!(
+            "Cloning VM '{}' from snapshot '{}' to new VM '{}'",
+            source_vm,
+            snapshot_name,
+            new_vm_name
+        );
+
+        // Check if snapshot exists
+        let snapshot = self
+            .snapshots
+            .get(source_vm)
+            .and_then(|snapshots| snapshots.values().find(|s| s.name == snapshot_name))
+            .ok_or_else(|| NovaError::SnapshotNotFound(snapshot_name.to_string()))?;
+
+        // Create clone using virt-clone
+        let output = Command::new("virt-clone")
+            .args(&[
+                "--original", source_vm,
+                "--name", new_vm_name,
+                "--auto-clone",
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to clone VM: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Revert new VM to snapshot state
+        self.revert_to_snapshot(new_vm_name, snapshot_name).await?;
+
+        log_info!("VM '{}' cloned successfully from snapshot", new_vm_name);
+        Ok(())
+    }
+
+    /// Clone a VM (full copy, no snapshot required)
+    pub async fn clone_vm(
+        &mut self,
+        source_vm: &str,
+        new_vm_name: &str,
+        clone_disks: bool,
+    ) -> Result<()> {
+        log_info!(
+            "Cloning VM '{}' to new VM '{}'",
+            source_vm,
+            new_vm_name
+        );
+
+        // Ensure source VM is shut down
+        self.ensure_vm_shutdown(source_vm).await?;
+
+        // Use virt-clone for the operation
+        let mut cmd = Command::new("virt-clone");
+        cmd.args(&["--original", source_vm, "--name", new_vm_name]);
+
+        if clone_disks {
+            cmd.arg("--auto-clone");
+        } else {
+            // Share disks instead of cloning
+            cmd.arg("--preserve-data");
+        }
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to clone VM: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        log_info!("VM '{}' cloned successfully", new_vm_name);
+        Ok(())
+    }
+
+    /// Clone VM with custom disk path
+    pub async fn clone_vm_with_custom_disks(
+        &mut self,
+        source_vm: &str,
+        new_vm_name: &str,
+        disk_paths: Vec<String>,
+    ) -> Result<()> {
+        log_info!(
+            "Cloning VM '{}' to '{}' with custom disk paths",
+            source_vm,
+            new_vm_name
+        );
+
+        self.ensure_vm_shutdown(source_vm).await?;
+
+        let mut cmd = Command::new("virt-clone");
+        cmd.args(&["--original", source_vm, "--name", new_vm_name]);
+
+        for (i, disk_path) in disk_paths.iter().enumerate() {
+            cmd.arg("--file").arg(disk_path);
+        }
+
+        let output = cmd.output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to clone VM: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        log_info!("VM cloned with custom disk paths");
+        Ok(())
+    }
+
+    /// Create linked clone (uses backing store)
+    pub async fn create_linked_clone(
+        &mut self,
+        source_vm: &str,
+        new_vm_name: &str,
+    ) -> Result<()> {
+        log_info!(
+            "Creating linked clone of VM '{}' as '{}'",
+            source_vm,
+            new_vm_name
+        );
+
+        // Get source VM disk
+        let source_disk = self.get_vm_disk_path(source_vm).await?;
+
+        // Create qcow2 image with backing file
+        let new_disk = PathBuf::from(format!(
+            "/var/lib/libvirt/images/{}.qcow2",
+            new_vm_name
+        ));
+
+        let output = Command::new("qemu-img")
+            .args(&[
+                "create",
+                "-f",
+                "qcow2",
+                "-F",
+                "qcow2",
+                "-b",
+                source_disk.to_str().unwrap(),
+                new_disk.to_str().unwrap(),
+            ])
+            .output()?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            log_error!("Failed to create linked clone disk: {}", error);
+            return Err(NovaError::SystemCommandFailed);
+        }
+
+        // Clone VM with new disk
+        self.clone_vm_with_custom_disks(
+            source_vm,
+            new_vm_name,
+            vec![new_disk.to_str().unwrap().to_string()],
+        )
+        .await?;
+
+        log_info!("Linked clone created successfully");
+        Ok(())
+    }
 }
 
 // Helper structs

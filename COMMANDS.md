@@ -49,6 +49,18 @@ nova delete <vm-name>
 nova delete <vm-name> --force  # Skip confirmation
 ```
 
+### Guided VM Configuration Wizard
+
+```bash
+# Generate a NovaFile entry and interactively choose a configured network
+nova wizard vm my-vm --cpu 4 --memory 8Gi --apply
+
+# Skip the prompt by specifying a network explicitly
+nova wizard vm my-vm --network bridge0 --apply
+```
+
+> The wizard inspects the networks defined in your NovaFile and lets you pick one when `--network` is omitted.
+
 ### Advanced VM Operations
 
 ```bash

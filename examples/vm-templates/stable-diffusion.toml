@@ -1,0 +1,199 @@
+# Nova VM Template: Stable Diffusion Workstation
+# Optimized for: AI art generation, Stable Diffusion, ComfyUI, Automatic1111
+
+project = "stable-diffusion-studio"
+
+[vm.sd-studio]
+# Base configuration - needs significant VRAM
+image = "/var/lib/nova/images/ubuntu-22.04-ml.qcow2"
+cpu = 12
+memory = "24Gi"
+
+# GPU - Minimum RTX 3060 (12GB VRAM) recommended
+gpu_passthrough = true
+gpu_device = "auto"
+
+# Display with Looking Glass for real-time preview
+display = "looking-glass"
+
+# Network
+network = "bridge0"
+
+# Storage - Models are HUGE
+disks = [
+    { path = "/var/lib/nova/images/sd-studio.qcow2", size = "80G", type = "system" },
+    { path = "/var/lib/nova/sd-models", size = "500G", type = "models" },  # SD models storage
+    { path = "/var/lib/nova/sd-output", size = "200G", type = "output" }   # Generated images
+]
+
+# Performance
+cpu_mode = "host-passthrough"
+hugepages = true
+
+# NVIDIA config for SD
+[vm.sd-studio.nvidia]
+cuda_version = "12.1"
+cudnn_version = "8.9"
+nvidia_driver = "open"
+vram_optimization = true  # Enable VRAM optimizations for large models
+
+# Pre-installed software
+[vm.sd-studio.software]
+packages = [
+    "python3.11",
+    "python3-pip",
+    "python3-venv",
+    "git",
+    "git-lfs",
+    "wget",
+    "curl",
+    "build-essential",
+    "libgl1",
+    "libglib2.0-0",
+    "google-perftools",  # For tcmalloc (VRAM optimization)
+]
+
+python_packages = [
+    "torch==2.1.0+cu121",
+    "torchvision==0.16.0+cu121",
+    "xformers==0.0.22",  # Memory-efficient attention
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "omegaconf",
+    "pytorch_lightning",
+    "einops",
+    "gradio",
+]
+
+# Automatic1111 Web UI
+[container.automatic1111]
+capsule = "stable-diffusion-webui:latest"
+ports = [
+    "7860:7860",  # Web UI
+    "7861:7861",  # API
+]
+volumes = [
+    "./models:/models",
+    "./outputs:/outputs",
+]
+network = "nova-sd"
+gpu_access = true
+
+# ComfyUI (alternative interface)
+[container.comfyui]
+capsule = "comfyui:latest"
+ports = ["8188:8188"]
+volumes = [
+    "./models:/models",
+    "./outputs:/outputs",
+    "./comfyui-custom-nodes:/custom_nodes",
+]
+network = "nova-sd"
+gpu_access = true
+
+# Model download service
+[container.civitai-downloader]
+capsule = "python:3.11-slim"
+volumes = ["./models:/models"]
+network = "nova-sd"
+command = "python /scripts/download_models.py"
+
+# Network
+[network.nova-sd]
+type = "bridge"
+subnet = "192.168.110.0/24"
+dhcp = true
+
+# Cloud-init setup
+[vm.sd-studio.cloud_init]
+user_data = """
+#cloud-config
+users:
+  - name: sduser
+    groups: sudo, docker
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+
+runcmd:
+  # Install CUDA
+  - wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb
+  - dpkg -i cuda-keyring_1.0-1_all.deb
+  - apt-get update
+  - apt-get install -y cuda-toolkit-12-1 nvidia-open
+
+  # Install Docker with NVIDIA runtime
+  - curl -fsSL https://get.docker.com | sh
+  - distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+  - curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -
+  - curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list
+  - apt-get update && apt-get install -y nvidia-docker2
+  - systemctl restart docker
+
+  # Clone Automatic1111
+  - su - sduser -c "cd /home/sduser && git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git"
+  - su - sduser -c "cd /home/sduser/stable-diffusion-webui && ./webui.sh --skip-torch-cuda-test --exit"
+
+  # Clone ComfyUI
+  - su - sduser -c "cd /home/sduser && git clone https://github.com/comfyanonymous/ComfyUI.git"
+  - su - sduser -c "cd /home/sduser/ComfyUI && python3 -m venv venv"
+  - su - sduser -c "cd /home/sduser/ComfyUI && venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121"
+  - su - sduser -c "cd /home/sduser/ComfyUI && venv/bin/pip install -r requirements.txt"
+
+  # Download base Stable Diffusion model (SD 1.5)
+  - su - sduser -c "mkdir -p /home/sduser/stable-diffusion-webui/models/Stable-diffusion"
+  - su - sduser -c "wget -O /home/sduser/stable-diffusion-webui/models/Stable-diffusion/v1-5-pruned-emaonly.safetensors https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
+
+  # Set up systemd services for auto-start
+  - |
+    cat > /etc/systemd/system/automatic1111.service <<EOF
+    [Unit]
+    Description=Automatic1111 Stable Diffusion Web UI
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=sduser
+    WorkingDirectory=/home/sduser/stable-diffusion-webui
+    ExecStart=/home/sduser/stable-diffusion-webui/webui.sh --listen --xformers
+    Restart=on-failure
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  - systemctl enable automatic1111.service
+
+  # Configure tcmalloc for better VRAM management
+  - echo 'export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4' >> /home/sduser/.bashrc
+  - echo 'export TCMALLOC_LARGE_ALLOC_REPORT_THRESHOLD=10000000000' >> /home/sduser/.bashrc
+"""
+
+# Snapshots - Important for testing model changes
+[vm.sd-studio.snapshots]
+enabled = true
+auto_snapshot = true
+schedule = "weekly"
+retention = 4
+
+# Extensions and models to pre-install
+[vm.sd-studio.extensions]
+automatic1111 = [
+    "sd-webui-controlnet",
+    "stable-diffusion-webui-images-browser",
+    "sd-webui-additional-networks",
+    "adetailer",
+]
+
+models = [
+    "sd-v1-5",          # Stable Diffusion 1.5
+    "sd-v2-1",          # Stable Diffusion 2.1
+    # "sdxl-base",      # SDXL (requires 16GB+ VRAM)
+]
+
+# Optional: Civitai model auto-downloader
+[vm.sd-studio.model_downloader]
+enabled = true
+categories = ["checkpoint", "lora", "embedding"]
+civitai_api_key = ""  # Set your Civitai API key
+"""

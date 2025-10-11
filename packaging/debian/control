@@ -1,0 +1,76 @@
+Source: nova-virtualization
+Section: admin
+Priority: optional
+Maintainer: Nova Team <nova@example.com>
+Build-Depends: debhelper-compat (= 13),
+               cargo,
+               rustc (>= 1.70),
+               librust-clap-dev,
+               librust-serde-dev,
+               librust-tokio-dev,
+               pkg-config,
+               libvirt-dev,
+               cmake
+Standards-Version: 4.6.0
+Homepage: https://github.com/nova-project/nova
+Vcs-Browser: https://github.com/nova-project/nova
+Vcs-Git: https://github.com/nova-project/nova.git
+Rules-Requires-Root: no
+
+Package: nova-virtualization
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         libvirt-daemon-system,
+         qemu-system-x86,
+         qemu-system-gui,
+         ovmf,
+         bridge-utils,
+         dnsmasq-base,
+         iptables,
+         openvswitch-switch
+Recommends: looking-glass-client,
+            virt-viewer,
+            spice-client-gtk
+Suggests: nvidia-driver-535 | nvidia-driver-open,
+          btrfs-progs,
+          zfsutils-linux,
+          nfs-common,
+          ceph-common,
+          lvm2,
+          docker.io | podman
+Description: Wayland-Native Virtualization & Container Manager
+ Nova is a high-performance virtualization and container orchestration
+ platform built entirely in Rust. It unifies KVM/QEMU virtual machines,
+ lightweight containers, and software-defined networking under a single
+ declarative interface.
+ .
+ Key features:
+  - Zero-overhead Rust runtime
+  - Enterprise KVM/QEMU virtualization with GPU passthrough
+  - Lightweight container technology
+  - Infrastructure as Code with TOML configuration
+  - Software-defined networking
+  - Native Wayland GUI
+  - Security-first design
+ .
+ Perfect for AI/ML workloads, development environments, and production
+ deployments on Debian-based systems including Pop!_OS and Ubuntu.
+
+Package: nova-virtualization-gui
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         nova-virtualization (= ${binary:Version}),
+         libgtk-4-1,
+         libwayland-client0
+Description: Wayland-Native GUI for Nova Virtualization Manager
+ This package provides the graphical user interface for Nova, a modern
+ virtualization management platform.
+ .
+ The GUI is built with GTK4 and native Wayland support, providing:
+  - Real-time VM/container monitoring
+  - Interactive network topology visualization
+  - Template gallery and wizard
+  - GPU passthrough configuration
+  - Storage pool management

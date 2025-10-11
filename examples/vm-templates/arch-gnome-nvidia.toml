@@ -1,0 +1,172 @@
+# Nova VM Template: Arch Linux + GNOME + NVIDIA
+# Optimized for: GNOME development, Wayland testing, GTK4 development
+
+project = "arch-gnome-nvidia"
+
+[vm.arch-gnome]
+# Base configuration
+image = "/var/lib/nova/images/arch-gnome-latest.qcow2"
+cpu = 8
+memory = "16Gi"
+
+# GPU Configuration
+gpu_passthrough = true
+gpu_device = "auto"
+gpu_audio = true
+
+# Display - GNOME Wayland
+display = "looking-glass"
+monitors = 2
+
+# Network
+network = "bridge0"
+
+# Storage with Btrfs
+[vm.arch-gnome.storage]
+pool = "nova-btrfs"
+system_disk = { size = "80G", format = "qcow2" }
+data_disk = { size = "150G", format = "raw" }
+
+# Performance
+cpu_mode = "host-passthrough"
+cpu_topology = { sockets = 1, cores = 8, threads = 1 }
+hugepages = true
+
+# NVIDIA configuration for GNOME/Wayland
+[vm.arch-gnome.nvidia]
+driver = "nvidia-open"
+dkms = true
+wayland = true
+gbm_backend = true  # GBM backend for Wayland
+egl_wayland = true
+
+# Arch packages
+[vm.arch-gnome.packages]
+base = [
+    "base-devel",
+    "git",
+    "vim",
+    "neovim",
+    "tmux",
+    "htop",
+    "fish",
+]
+
+nvidia = [
+    "nvidia-open",
+    "nvidia-open-dkms",
+    "nvidia-utils",
+    "lib32-nvidia-utils",
+    "egl-wayland",
+    "libva-nvidia-driver",
+]
+
+gnome = [
+    "gnome",
+    "gnome-extra",
+    "gdm",
+    "gnome-shell-extensions",
+    "gnome-tweaks",
+]
+
+development = [
+    "rust",
+    "cargo",
+    "rustup",
+    "gtk4",
+    "libadwaita",
+    "blueprint-compiler",
+    "meson",
+    "cmake",
+    "vala",
+    "gobject-introspection",
+    "python-gobject",
+    "gnome-builder",
+    "devhelp",
+]
+
+# Wayland configuration for GNOME
+[vm.arch-gnome.wayland]
+enabled = true
+compositor = "mutter"
+nvidia_drm_modeset = true
+nvidia_preserve_memory = true
+force_wayland = true  # Force Wayland for all apps
+
+# GNOME-specific settings
+[vm.arch-gnome.gnome]
+session = "wayland"  # or "xorg"
+extensions = [
+    "dash-to-dock",
+    "appindicator",
+    "blur-my-shell",
+    "gsconnect",
+]
+
+# Development environment
+[vm.arch-gnome.dev_environment]
+rust_toolchains = ["stable", "nightly"]
+gtk_version = 4
+default_shell = "fish"
+
+# Post-installation script
+[vm.arch-gnome.post_install]
+script = """
+#!/bin/bash
+set -e
+
+# Enable multilib
+sed -i '/\\[multilib\\]/,/Include/s/^#//' /etc/pacman.conf
+pacman -Sy
+
+# Install yay
+cd /tmp
+git clone https://aur.archlinux.org/yay.git
+cd yay
+makepkg -si --noconfirm
+cd ~
+
+# Configure NVIDIA for Wayland
+echo "options nvidia-drm modeset=1" > /etc/modprobe.d/nvidia.conf
+echo "options nvidia NVreg_PreserveVideoMemoryAllocations=1" >> /etc/modprobe.d/nvidia.conf
+echo "options nvidia NVreg_EnableGpuFirmware=0" >> /etc/modprobe.d/nvidia.conf
+
+# Enable GDM Wayland
+sed -i 's/#WaylandEnable=false/WaylandEnable=true/' /etc/gdm/custom.conf
+
+# Configure environment for Wayland
+cat >> /etc/environment <<EOF
+MOZ_ENABLE_WAYLAND=1
+QT_QPA_PLATFORM=wayland
+GDK_BACKEND=wayland
+CLUTTER_BACKEND=wayland
+SDL_VIDEODRIVER=wayland
+XDG_SESSION_TYPE=wayland
+__GLX_VENDOR_LIBRARY_NAME=nvidia
+GBM_BACKEND=nvidia-drm
+EOF
+
+# Enable GDM
+systemctl enable gdm
+
+# Rust setup
+rustup default stable
+rustup component add rust-analyzer clippy rustfmt
+
+# Install GNOME development tools
+yay -S --noconfirm gnome-builder-git
+
+echo "Arch + GNOME + NVIDIA Wayland setup complete!"
+"""
+
+# Network
+[network.dev-bridge]
+type = "bridge"
+interfaces = ["enp6s0"]
+
+# Snapshots
+[vm.arch-gnome.snapshots]
+enabled = true
+auto_snapshot = true
+retention = 5
+"""

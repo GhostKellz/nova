@@ -12,6 +12,8 @@ pub enum NovaError {
     NetworkNotFound(String),
     IoError(std::io::Error),
     SerdeError(String),
+    SnapshotNotFound(String),
+    SnapshotHasChildren,
 }
 
 impl fmt::Display for NovaError {
@@ -27,6 +29,8 @@ impl fmt::Display for NovaError {
             NovaError::NetworkNotFound(name) => write!(f, "Network '{}' not found", name),
             NovaError::IoError(err) => write!(f, "IO error: {}", err),
             NovaError::SerdeError(err) => write!(f, "Configuration parse error: {}", err),
+            NovaError::SnapshotNotFound(name) => write!(f, "Snapshot '{}' not found", name),
+            NovaError::SnapshotHasChildren => write!(f, "Snapshot has children and cannot be deleted without --children flag"),
         }
     }
 }

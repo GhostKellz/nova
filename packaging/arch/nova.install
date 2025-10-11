@@ -1,0 +1,68 @@
+post_install() {
+    echo ""
+    echo "==> Nova Virtualization Manager installed successfully!"
+    echo ""
+    echo "    Initial setup steps:"
+    echo ""
+    echo "    1. Add your user to required groups:"
+    echo "       sudo usermod -aG libvirt,kvm \$USER"
+    echo ""
+    echo "    2. Enable and start libvirt:"
+    echo "       sudo systemctl enable --now libvirtd"
+    echo ""
+    echo "    3. (Optional) For GPU passthrough, run diagnostics:"
+    echo "       nova gpu doctor"
+    echo ""
+    echo "    4. (Optional) Enable Nova systemd service:"
+    echo "       sudo systemctl enable --now nova"
+    echo ""
+    echo "    5. Verify installation:"
+    echo "       nova version"
+    echo ""
+    echo "    For GPU passthrough support:"
+    echo "    - Install NVIDIA drivers: sudo pacman -S nvidia-open nvidia-open-dkms"
+    echo "    - Enable IOMMU in your bootloader configuration"
+    echo "    - See: /usr/share/doc/nova/README.md"
+    echo ""
+    echo "    Quick start:"
+    echo "    - List VM templates: nova template list"
+    echo "    - Create ML VM: nova wizard vm my-ml-vm --template ml-pytorch"
+    echo "    - Launch GUI: nova-gui"
+    echo ""
+    echo "    Documentation: /usr/share/doc/nova/"
+    echo "    Report issues: https://github.com/nova-project/nova/issues"
+    echo ""
+}
+
+post_upgrade() {
+    echo ""
+    echo "==> Nova has been upgraded to $2"
+    echo ""
+    echo "    Check release notes for breaking changes:"
+    echo "    https://github.com/nova-project/nova/releases"
+    echo ""
+    echo "    Restart Nova service if running:"
+    echo "    sudo systemctl restart nova"
+    echo ""
+}
+
+pre_remove() {
+    # Stop services before removal
+    systemctl is-active --quiet nova && systemctl stop nova
+    systemctl is-active --quiet nova-metrics && systemctl stop nova-metrics
+}
+
+post_remove() {
+    echo ""
+    echo "==> Nova has been removed"
+    echo ""
+    echo "    The following directories were preserved:"
+    echo "    - /var/lib/nova (VM images and data)"
+    echo "    - /etc/nova (configuration files)"
+    echo ""
+    echo "    To completely remove Nova data:"
+    echo "    sudo rm -rf /var/lib/nova /etc/nova /var/log/nova"
+    echo ""
+}
+
+# vim:set ts=4 sw=4 et:

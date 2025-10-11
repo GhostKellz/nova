@@ -1,0 +1,11 @@
+# Nova VFIO udev rules
+# Automatically bind GPU devices to vfio-pci when managed by Nova
+
+# NVIDIA GPUs - Uncomment and add your GPU's vendor:device IDs
+# ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{device}=="0x2684", DRIVER=="", RUN+="/usr/bin/nova gpu bind %k"
+
+# AMD GPUs - Uncomment and add your GPU's vendor:device IDs
+# ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x1002", ATTR{device}=="0x73bf", DRIVER=="", RUN+="/usr/bin/nova gpu bind %k"
+
+# Set VFIO device permissions
+SUBSYSTEM=="vfio", OWNER="root", GROUP="kvm", MODE="0660"
