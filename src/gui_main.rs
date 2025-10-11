@@ -229,6 +229,7 @@ enum SessionEvent {
 enum MainView {
     Dashboard,
     VirtualMachines,
+    Containers,
     Networking,
     Tools,
 }
@@ -2167,6 +2168,21 @@ impl NovaApp {
                         self.log_console("Switched to Virtual Machines view");
                     }
 
+                    // Containers tab
+                    let containers_selected = self.main_view == MainView::Containers;
+                    let containers_button = if containers_selected {
+                        egui::Button::new("📦 Containers")
+                            .fill(theme::BG_ELEVATED)
+                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
+                    } else {
+                        egui::Button::new("📦 Containers")
+                            .fill(theme::BG_PANEL)
+                    };
+                    if ui.add_sized([130.0, 32.0], containers_button).clicked() {
+                        self.main_view = MainView::Containers;
+                        self.log_console("Switched to Containers view");
+                    }
+
                     // Networking tab
                     let networking_selected = self.main_view == MainView::Networking;
                     let networking_button = if networking_selected {
@@ -2397,6 +2413,127 @@ impl NovaApp {
                                 });
                             });
                         }
+                    }
+                });
+        });
+    }
+
+    fn draw_containers_view(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(16.0);
+        ui.heading("📦 Container Management");
+        ui.add_space(8.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Container Runtime Summary Card
+            egui::Frame::default()
+                .fill(theme::BG_ELEVATED)
+                .rounding(8.0)
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.heading("Runtime Information");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Active Runtime:");
+                        ui.colored_label(theme::TN_NIGHT_BLUE, self.container_manager.get_runtime_name());
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Bolt Available:");
+                        let bolt_available = self.container_manager.check_bolt_available();
+                        if bolt_available {
+                            ui.colored_label(theme::STATUS_RUNNING, "✓ Yes");
+                        } else {
+                            ui.colored_label(theme::STATUS_STOPPED, "✗ No");
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Docker Available:");
+                        let docker_available = self.container_manager.check_docker_available();
+                        if docker_available {
+                            ui.colored_label(theme::STATUS_RUNNING, "✓ Yes");
+                        } else {
+                            ui.colored_label(theme::STATUS_STOPPED, "✗ No");
+                        }
+                    });
+                });
+
+            ui.add_space(16.0);
+
+            // Running Containers Card
+            egui::Frame::default()
+                .fill(theme::BG_ELEVATED)
+                .rounding(8.0)
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Running Containers");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("🔄 Refresh").clicked() {
+                                self.refresh_instances(true);
+                            }
+                        });
+                    });
+                    ui.add_space(8.0);
+
+                    let containers: Vec<_> = self.instances_cache
+                        .iter()
+                        .filter(|inst| inst.instance_type == InstanceType::Container)
+                        .cloned()
+                        .collect();
+
+                    if containers.is_empty() {
+                        ui.label("No containers running.");
+                    } else {
+                        for container in containers {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    let status_color = match container.status {
+                                        InstanceStatus::Running => theme::STATUS_RUNNING,
+                                        InstanceStatus::Stopped => theme::STATUS_STOPPED,
+                                        InstanceStatus::Suspended => theme::STATUS_SUSPENDED,
+                                        _ => theme::STATUS_STOPPED,
+                                    };
+                                    ui.colored_label(status_color, "●");
+                                    ui.strong(&container.name);
+                                    ui.label(format!("({:?})", container.status));
+
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if container.status == InstanceStatus::Running {
+                                            if ui.small_button("⏹ Stop").clicked() {
+                                                // TODO: Implement stop
+                                                self.log_console(&format!("Stopping container: {}", container.name));
+                                            }
+                                        } else {
+                                            if ui.small_button("▶ Start").clicked() {
+                                                // TODO: Implement start
+                                                self.log_console(&format!("Starting container: {}", container.name));
+                                            }
+                                        }
+                                    });
+                                });
+                            });
+                        }
+                    }
+                });
+
+            ui.add_space(16.0);
+
+            // Container Templates Card
+            egui::Frame::default()
+                .fill(theme::BG_ELEVATED)
+                .rounding(8.0)
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.heading("Available Templates");
+                    ui.add_space(8.0);
+
+                    ui.label("Container templates provide pre-configured environments for common use cases.");
+                    ui.add_space(8.0);
+
+                    if ui.button("📄 Browse Templates").clicked() {
+                        self.log_console("Opening container templates...");
                     }
                 });
         });
@@ -3251,6 +3388,9 @@ impl eframe::App for NovaApp {
                                 });
                             }
                         });
+                    }
+                    MainView::Containers => {
+                        self.draw_containers_view(ui);
                     }
                     MainView::Networking => {
                         self.draw_networking_view(ui);
