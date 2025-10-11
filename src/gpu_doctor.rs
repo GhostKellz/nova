@@ -1,4 +1,4 @@
-use crate::{gpu_passthrough::*, NovaError, Result, log_error, log_info, log_warn};
+use crate::{gpu_passthrough::*, log_info};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -211,8 +211,7 @@ impl GpuDoctor {
 
     /// Check NVIDIA driver status
     fn check_nvidia_drivers(&self) -> DiagnosticCheck {
-        // Check for nvidia-open kernel module
-        let nvidia_open_loaded = Path::new("/sys/module/nvidia").exists();
+        // Check for nvidia-open kernel module (used for version detection)
         let nvidia_open_version = self.get_nvidia_open_version();
 
         // Check for proprietary driver

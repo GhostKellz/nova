@@ -43,6 +43,12 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 base64 = "0.21"
+async-trait = "0.1"
+thiserror = "1.0"
+
+# Container runtimes (optional via git)
+# bolt = { git = "https://github.com/CK-Technology/bolt", optional = true }
+# nvbind = { git = "https://github.com/ghostkellz/nvbind", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

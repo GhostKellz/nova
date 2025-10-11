@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,7 +459,7 @@ impl SpiceManager {
         // This would normally query libvirt for SPICE channel statistics
         // For now, return basic stats
 
-        let info = self.active_connections.get(vm_name)
+        let _info = self.active_connections.get(vm_name)
             .ok_or_else(|| format!("No active SPICE connection for VM '{}'", vm_name))?;
 
         Ok(SpiceStats {
