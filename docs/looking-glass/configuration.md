@@ -1,12 +1,24 @@
 # Looking Glass Configuration Guide
 
-This guide covers configuration options for both the Looking Glass client (Linux host) and host application (Windows guest).
+This guide covers configuration options for both the Looking Glass client and the Windows guest application.
+
+## Terminology Clarification
+
+**IMPORTANT**: The Looking Glass project uses confusing terminology:
+- **Linux HOST** = Your main OS (Arch/Fedora/PopOS) where Nova runs
+- **Windows GUEST** = The Windows VM running inside Linux
+- **Looking Glass Client** = Application that runs on your **Linux HOST**
+- **Looking Glass Host Application** = Application that runs in your **Windows GUEST** (confusing name!)
+
+Throughout this guide:
+- "Linux host" or "client" = **Your Linux system** (Arch/Fedora/PopOS)
+- "Windows guest" or "guest application" = **The Windows VM**
 
 ## Table of Contents
 
 1. [Nova Configuration Profiles](#nova-configuration-profiles)
-2. [Client Configuration (Linux)](#client-configuration-linux)
-3. [Host Configuration (Windows)](#host-configuration-windows)
+2. [Client Configuration (Linux Host)](#client-configuration-linux-host)
+3. [Windows Guest Application Configuration](#windows-guest-application-configuration)
 4. [Resolution and Display Settings](#resolution-and-display-settings)
 5. [Input Configuration](#input-configuration)
 6. [Audio Configuration](#audio-configuration)
@@ -76,7 +88,7 @@ nova vm create custom-vm --looking-glass-profile custom
 nova looking-glass configure custom-vm --resolution 3840x2160 --vsync off
 ```
 
-## Client Configuration (Linux)
+## Client Configuration (Linux Host)
 
 ### Configuration File Location
 
@@ -207,11 +219,13 @@ grabKeyboard=yes
 escapeKey=KEY_ESC
 ```
 
-## Host Configuration (Windows)
+## Windows Guest Application Configuration
+
+**Note**: Despite the confusing name "Looking Glass Host Application", this runs **inside your Windows GUEST VM**, not on your Linux host!
 
 ### Configuration File Location
 
-Create: `C:\Program Files\Looking Glass (host)\looking-glass-host.ini`
+Inside the Windows VM, create: `C:\Program Files\Looking Glass (host)\looking-glass-host.ini`
 
 ### Basic Configuration
 
@@ -417,14 +431,14 @@ audioBitrate=128
 
 Looking Glass B6+ supports audio directly:
 
-**Windows Host**:
+**Windows Guest** (inside the VM):
 ```ini
 [audio]
 enabled=yes
 periodSize=1024
 ```
 
-**Linux Client**:
+**Linux Host** (your main system):
 ```ini
 [audio]
 # PipeWire or PulseAudio
@@ -446,7 +460,7 @@ Alternative: Use Scream for lower latency:
 
 ### Latency Optimization
 
-**Client**:
+**Linux Host** (your main system):
 ```ini
 [app]
 # JIT rendering
@@ -461,7 +475,7 @@ vsync=no
 damage=auto
 ```
 
-**Host**:
+**Windows Guest** (inside the VM):
 ```ini
 [dxgi]
 dwmFlush=yes
@@ -559,20 +573,20 @@ tryAllInterfaces=yes
 
 ### Debug Mode
 
-**Client**:
+**Linux Host** (your main system):
 ```bash
 looking-glass-client --opengl-debug
 ```
 
-**Host**:
+**Windows Guest** (inside the VM):
 ```ini
 [app]
 debugMode=yes
 ```
 
 Check logs:
-- Windows: Event Viewer
-- Linux: `~/.local/share/looking-glass/client.log`
+- **Windows Guest**: Event Viewer (inside the VM)
+- **Linux Host**: `~/.local/share/looking-glass/client.log` (on your main system)
 
 ## Next Steps
 

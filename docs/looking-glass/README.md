@@ -1,8 +1,19 @@
 # Looking Glass Integration for Nova
 
+## Terminology Clarification
+
+**IMPORTANT**: Before we begin, let's clarify the confusing terminology used by the Looking Glass project:
+
+- **Linux HOST** = Your main operating system (Arch Linux, Fedora, PopOS/Debian) where Nova runs
+- **Windows GUEST** = The Windows VM running **inside** your Linux host
+- **Looking Glass Client** = Application that runs on your **Linux HOST** (your main desktop)
+- **Looking Glass Host Application** = Application that runs **inside your Windows GUEST VM** (confusing name from the LG project!)
+
+**Summary**: You run Linux (Arch/Fedora/PopOS) as your main OS. Windows runs inside a VM. Looking Glass lets you view the Windows VM's display with near-zero latency.
+
 ## What is Looking Glass?
 
-Looking Glass is an open-source application that allows you to use your main computer with a full performance VM seamlessly. It provides near-native performance by sharing the GPU framebuffer directly between the host and guest via shared memory (IVSHMEM), eliminating the overhead of traditional remote desktop protocols.
+Looking Glass is an open-source application that allows you to use your main Linux computer with a full-performance Windows VM seamlessly. It provides near-native performance by sharing the GPU framebuffer directly between the Linux host and Windows guest via shared memory (IVSHMEM), eliminating the overhead of traditional remote desktop protocols.
 
 ## Why Use Looking Glass?
 
@@ -33,13 +44,15 @@ Looking Glass is an open-source application that allows you to use your main com
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                      Host System                        │
+│              Linux HOST System (Arch/Fedora)            │
+│                    (Your main desktop)                  │
 │  ┌────────────────┐          ┌─────────────────────┐   │
 │  │  Looking Glass │          │   /dev/shm/lg       │   │
 │  │     Client     │◄────────►│   (Shared Memory)   │   │
-│  └────────────────┘          └─────────────────────┘   │
-│         │                             ▲                 │
+│  │ (Linux binary) │          └─────────────────────┘   │
+│  └────────────────┘                   ▲                 │
 │         │                             │                 │
+│         │  Displays on your monitor   │                 │
 │         ▼                             │                 │
 │  ┌────────────────────────────────────┼─────────────┐  │
 │  │            IVSHMEM Device          │             │  │
@@ -47,16 +60,16 @@ Looking Glass is an open-source application that allows you to use your main com
 │  └────────────────────────────────────┼─────────────┘  │
 │                                        │                 │
 │  ┌─────────────────────────────────────────────────┐   │
-│  │              Windows Guest VM                   │   │
+│  │        Windows GUEST VM (runs inside Linux)     │   │
 │  │  ┌───────────────────────────────────────────┐  │   │
-│  │  │      Looking Glass Host Application       │  │   │
-│  │  │  (Captures GPU framebuffer)               │  │   │
+│  │  │  Looking Glass Host Application (.exe)   │  │   │
+│  │  │  (Runs inside Windows - captures frames) │  │   │
 │  │  └───────────────────────────────────────────┘  │   │
 │  │                      │                           │   │
 │  │                      ▼                           │   │
 │  │  ┌───────────────────────────────────────────┐  │   │
-│  │  │       Dedicated GPU (Passthrough)         │  │   │
-│  │  │   Renders frames → IVSHMEM → Host         │  │   │
+│  │  │   Dedicated GPU (Passthrough to VM)       │  │   │
+│  │  │   Renders Windows display → IVSHMEM       │  │   │
 │  │  └───────────────────────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
@@ -66,14 +79,14 @@ Looking Glass is an open-source application that allows you to use your main com
 
 ### Components
 
-1. **Host Client (Linux)**: `looking-glass-client`
+1. **Looking Glass Client** - Runs on your **Linux HOST** (your main system): `looking-glass-client`
    - Reads framebuffer from shared memory
-   - Renders on host display
-   - Handles input capture and forwarding
+   - Renders the Windows VM display on your Linux desktop
+   - Handles input capture and forwarding to the VM
 
-2. **Guest Application (Windows)**: `looking-glass-host.exe`
-   - Captures GPU framebuffer
-   - Writes to shared memory
+2. **Looking Glass Host Application** - Runs **inside your Windows GUEST VM**: `looking-glass-host.exe`
+   - Captures GPU framebuffer inside the Windows VM
+   - Writes to shared memory that the Linux host can read
    - Manages IVSHMEM device
 
 3. **IVSHMEM Device**: Inter-VM Shared Memory
