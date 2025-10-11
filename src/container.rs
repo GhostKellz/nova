@@ -1,302 +1,249 @@
 use crate::{
-    NovaError, Result, config::ContainerConfig, instance::Instance, log_debug, log_error, log_info,
-    log_warn,
+    NovaError, Result, config::ContainerConfig as NovaContainerConfig, instance::Instance,
+    log_error, log_info, log_warn,
+    bolt_runtime::BoltRuntime,
+    docker_runtime::DockerRuntime,
+    container_runtime::{ContainerRuntime as Runtime, ContainerConfig, RestartPolicy},
 };
-use std::collections::HashMap;
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use tokio::time::{Duration, sleep};
+use std::sync::Arc;
 
-// TODO: Replace with Bolt runtime integration once available
-// See BOLT_INT.md for integration requirements
-
+/// Container manager with runtime selection (Bolt > Docker > Fallback)
 pub struct ContainerManager {
-    instances: Arc<Mutex<HashMap<String, Instance>>>,
-    // TODO: Replace with bolt_runtime::BoltRuntime
-    // bolt_runtime: Arc<Mutex<BoltRuntime>>,
+    runtime: Arc<dyn Runtime>,
+    runtime_name: String,
 }
 
 impl ContainerManager {
     pub fn new() -> Self {
-        Self {
-            instances: Arc::new(Mutex::new(HashMap::new())),
-        }
+        // Auto-select runtime: Bolt > Docker
+        let (runtime, runtime_name): (Arc<dyn Runtime>, String) = {
+            let bolt = BoltRuntime::new();
+            if bolt.is_available() {
+                log_info!("Using Bolt container runtime (ultra-fast GPU passthrough)");
+                (Arc::new(bolt), "Bolt".to_string())
+            } else {
+                let docker = DockerRuntime::new();
+                if docker.is_available() {
+                    log_info!("Using Docker container runtime (fallback)");
+                    (Arc::new(docker), "Docker".to_string())
+                } else {
+                    log_warn!("No container runtime available, functionality will be limited");
+                    // Return a dummy runtime - we could implement a "no-op" runtime here
+                    (Arc::new(BoltRuntime::new()), "None".to_string())
+                }
+            }
+        };
+
+        Self { runtime, runtime_name }
+    }
+
+    /// Get the active runtime name
+    pub fn get_runtime_name(&self) -> &str {
+        &self.runtime_name
     }
 
     pub async fn start_container(
         &self,
         name: &str,
-        config: Option<&ContainerConfig>,
+        config: Option<&NovaContainerConfig>,
     ) -> Result<()> {
         log_info!("Starting container: {}", name);
 
-        // Check if container is already running
-        {
-            let instances = self.instances.lock().unwrap();
-            if let Some(instance) = instances.get(name) {
-                if instance.is_running() {
-                    log_warn!("Container '{}' is already running", name);
-                    return Ok(());
-                }
-            }
-        }
+        let nova_config = config.cloned().unwrap_or_default();
 
-        let container_config = config.cloned().unwrap_or_default();
+        // Convert Nova config to runtime config
+        let runtime_config = ContainerConfig {
+            capsule: nova_config.capsule.unwrap_or_else(|| "ubuntu:latest".to_string()),
+            ports: Vec::new(),
+            volumes: nova_config.volumes,
+            env: nova_config.env,
+            network: nova_config.network,
+            gpu_passthrough: nova_config.bolt.gpu_access,
+            memory_mb: None,
+            cpus: None,
+            restart_policy: RestartPolicy::No,
+            detach: true,
+        };
 
-        // Create container using unshare for namespace isolation
-        // This is a simplified implementation - production would use proper container runtime
-        let script_content = self.generate_container_script(name, &container_config)?;
-        let script_path = format!("/tmp/nova_container_{}.sh", name);
-
-        // Write the container script
-        tokio::fs::write(&script_path, script_content).await?;
-
-        // Make script executable
-        Command::new("chmod")
-            .args(&["+x", &script_path])
-            .status()
-            .map_err(|_| NovaError::SystemCommandFailed)?;
-
-        // Start the container
-        let mut cmd = Command::new("bash");
-        cmd.arg(&script_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        log_debug!("Container command: {:?}", cmd);
-
-        let child = cmd.spawn().map_err(|e| {
-            log_error!("Failed to start container '{}': {}", name, e);
+        // Use runtime to start container
+        let container_id = self.runtime.run_container(
+            &runtime_config.capsule,
+            Some(name),
+            &runtime_config
+        ).await.map_err(|e| {
+            log_error!("Failed to start container '{}': {:?}", name, e);
             NovaError::SystemCommandFailed
         })?;
 
-        let pid = child.id();
-        log_info!("Container '{}' started with PID: {}", name, pid);
-
-        // Note: In a full implementation, we would store the process handle
-        // For now, we just track the PID in the instance
-
-        // Create or update instance
-        let mut instance =
-            Instance::new(name.to_string(), crate::instance::InstanceType::Container);
-        instance.set_pid(Some(pid));
-        instance.update_status(crate::instance::InstanceStatus::Starting);
-        instance.cpu_cores = 1; // Containers typically share CPU
-        instance.memory_mb = 512; // Default container memory
-        instance.network = container_config.network.clone();
-
-        {
-            let mut instances = self.instances.lock().unwrap();
-            instances.insert(name.to_string(), instance);
-        }
-
-        // Monitor container startup
-        tokio::spawn({
-            let instances = self.instances.clone();
-            let name = name.to_string();
-            async move {
-                sleep(Duration::from_secs(2)).await;
-                let mut instances = instances.lock().unwrap();
-                if let Some(instance) = instances.get_mut(&name) {
-                    instance.update_status(crate::instance::InstanceStatus::Running);
-                    log_info!("Container '{}' is now running", name);
-                }
-            }
-        });
-
+        log_info!("Container '{}' started with ID: {}", name, container_id);
         Ok(())
     }
 
     pub async fn stop_container(&self, name: &str) -> Result<()> {
         log_info!("Stopping container: {}", name);
 
-        // Update instance status
-        {
-            let mut instances = self.instances.lock().unwrap();
-            if let Some(instance) = instances.get_mut(name) {
-                instance.update_status(crate::instance::InstanceStatus::Stopping);
-            } else {
-                return Err(NovaError::ContainerNotFound(name.to_string()));
-            }
-        }
+        self.runtime.stop_container(name).await.map_err(|e| {
+            log_error!("Failed to stop container '{}': {:?}", name, e);
+            NovaError::SystemCommandFailed
+        })?;
 
-        // Note: In a full implementation, we would kill the stored process handle
-        // For now, we rely on pkill to terminate the container
+        log_info!("Container '{}' stopped successfully", name);
+        Ok(())
+    }
 
-        // Alternative: use pkill to find and kill container process
-        let output = Command::new("pkill")
-            .arg("-f")
-            .arg(&format!("nova-container-{}", name))
-            .output()
-            .map_err(|_| NovaError::SystemCommandFailed)?;
+    pub async fn remove_container(&self, name: &str, force: bool) -> Result<()> {
+        log_info!("Removing container: {}", name);
 
-        if output.status.success() {
-            log_info!("Container '{}' stopped successfully", name);
-        } else {
-            log_warn!("Container '{}' may not have been running", name);
-        }
+        self.runtime.remove_container(name, force).await.map_err(|e| {
+            log_error!("Failed to remove container '{}': {:?}", name, e);
+            NovaError::SystemCommandFailed
+        })?;
 
-        // Clean up script file
-        let script_path = format!("/tmp/nova_container_{}.sh", name);
-        let _ = tokio::fs::remove_file(script_path).await;
-
-        // Update instance status
-        {
-            let mut instances = self.instances.lock().unwrap();
-            if let Some(instance) = instances.get_mut(name) {
-                instance.update_status(crate::instance::InstanceStatus::Stopped);
-                instance.set_pid(None);
-            }
-        }
-
+        log_info!("Container '{}' removed successfully", name);
         Ok(())
     }
 
     pub fn list_containers(&self) -> Vec<Instance> {
-        let instances = self.instances.lock().unwrap();
-        instances.values().cloned().collect()
+        // Use tokio runtime to block on async call
+        let runtime = tokio::runtime::Handle::try_current()
+            .or_else(|_| {
+                // If no runtime is available, create a new one
+                tokio::runtime::Runtime::new().map(|rt| rt.handle().clone())
+            });
+
+        match runtime {
+            Ok(handle) => {
+                match handle.block_on(async {
+                    self.runtime.list_containers(true).await
+                }) {
+                    Ok(containers) => {
+                        // Convert ContainerInfo to Instance
+                        containers.iter().map(|c| {
+                            let mut instance = Instance::new(c.name.clone(), crate::instance::InstanceType::Container);
+                            instance.update_status(match c.status {
+                                crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
+                                crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
+                                crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
+                                crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
+                                crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+                                _ => crate::instance::InstanceStatus::Error,
+                            });
+                            if let Some(pid) = c.pid {
+                                instance.set_pid(Some(pid));
+                            }
+                            instance.network = c.network.clone();
+                            instance
+                        }).collect()
+                    }
+                    Err(e) => {
+                        log_warn!("Failed to list containers: {:?}", e);
+                        Vec::new()
+                    }
+                }
+            }
+            Err(_) => {
+                log_warn!("No tokio runtime available for list_containers");
+                Vec::new()
+            }
+        }
     }
 
     pub fn get_container(&self, name: &str) -> Option<Instance> {
-        let instances = self.instances.lock().unwrap();
-        instances.get(name).cloned()
+        // Use tokio runtime to block on async call
+        let runtime = tokio::runtime::Handle::try_current()
+            .or_else(|_| {
+                tokio::runtime::Runtime::new().map(|rt| rt.handle().clone())
+            });
+
+        match runtime {
+            Ok(handle) => {
+                match handle.block_on(async {
+                    self.runtime.inspect_container(name).await
+                }) {
+                    Ok(container) => {
+                        let mut instance = Instance::new(container.name.clone(), crate::instance::InstanceType::Container);
+                        instance.update_status(match container.status {
+                            crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
+                            crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
+                            crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
+                            crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
+                            crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+                            _ => crate::instance::InstanceStatus::Error,
+                        });
+                        if let Some(pid) = container.pid {
+                            instance.set_pid(Some(pid));
+                        }
+                        instance.network = container.network.clone();
+                        Some(instance)
+                    }
+                    Err(_) => None
+                }
+            }
+            Err(_) => None
+        }
     }
 
     pub async fn get_container_status(
         &self,
         name: &str,
     ) -> Result<crate::instance::InstanceStatus> {
-        let instances = self.instances.lock().unwrap();
-        if let Some(instance) = instances.get(name) {
-            Ok(instance.status)
-        } else {
-            Err(NovaError::ContainerNotFound(name.to_string()))
-        }
+        let container = self.runtime.inspect_container(name).await.map_err(|e| {
+            log_error!("Failed to get container status for '{}': {:?}", name, e);
+            NovaError::ContainerNotFound(name.to_string())
+        })?;
+
+        Ok(match container.status {
+            crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
+            crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
+            crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
+            crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
+            crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+            _ => crate::instance::InstanceStatus::Error,
+        })
     }
 
-    fn generate_container_script(&self, name: &str, config: &ContainerConfig) -> Result<String> {
-        let mut script = String::new();
-
-        script.push_str(
-            "#!/bin/bash
-",
-        );
-        script.push_str(
-            "set -e
-
-",
-        );
-
-        script.push_str(&format!(
-            "# Nova container script for '{}'
-",
-            name
-        ));
-        script.push_str(&format!(
-            "echo \"Starting Nova container: {}\"
-
-",
-            name
-        ));
-
-        // Set process name for easy identification
-        script.push_str(&format!("exec -a nova-container-{} ", name));
-
-        // Use unshare for basic namespace isolation
-        script.push_str("unshare ");
-        script.push_str("--pid --fork --mount-proc ");
-        script.push_str("--net --uts --ipc ");
-
-        // If we have a capsule (base image), try to use it
-        if let Some(capsule) = &config.capsule {
-            log_debug!("Using capsule '{}' for container '{}'", capsule, name);
-
-            // For now, just run a simple command
-            // In production, this would integrate with a proper container runtime
-            if capsule.contains("ubuntu") {
-                script.push_str("bash -c \"");
-                script.push_str("echo 'Container running with Ubuntu base'; ");
-
-                // Set environment variables
-                for (key, value) in &config.env {
-                    script.push_str(&format!("export {}='{}'; ", key, value));
-                }
-
-                script.push_str("sleep infinity\"");
-            } else {
-                // Generic capsule
-                script.push_str("bash -c \"");
-                script.push_str(&format!("echo 'Container running with {} base'; ", capsule));
-
-                // Set environment variables
-                for (key, value) in &config.env {
-                    script.push_str(&format!("export {}='{}'; ", key, value));
-                }
-
-                script.push_str("sleep infinity\"");
-            }
-        } else {
-            // Default container without specific capsule
-            script.push_str("bash -c \"");
-            script.push_str("echo 'Nova container started'; ");
-
-            // Set environment variables
-            for (key, value) in &config.env {
-                script.push_str(&format!("export {}='{}'; ", key, value));
-            }
-
-            script.push_str("sleep infinity\"");
-        }
-
-        Ok(script)
+    pub async fn get_container_logs(&self, name: &str, lines: usize) -> Result<Vec<String>> {
+        self.runtime.get_logs(name, lines).await.map_err(|e| {
+            log_error!("Failed to get logs for container '{}': {:?}", name, e);
+            NovaError::SystemCommandFailed
+        })
     }
 
-    // Check available container runtimes (priority order: Bolt > Docker > Podman)
-    pub fn check_container_runtime(&self) -> ContainerRuntime {
-        if self.check_bolt_available() {
-            ContainerRuntime::Bolt
-        } else if self.check_docker_available() {
-            ContainerRuntime::Docker
-        } else if self.check_podman_available() {
-            ContainerRuntime::Podman
-        } else {
-            ContainerRuntime::None
-        }
+    pub async fn pull_image(&self, image: &str) -> Result<()> {
+        log_info!("Pulling image: {}", image);
+
+        self.runtime.pull_image(image).await.map_err(|e| {
+            log_error!("Failed to pull image '{}': {:?}", image, e);
+            NovaError::SystemCommandFailed
+        })?;
+
+        log_info!("Image '{}' pulled successfully", image);
+        Ok(())
+    }
+
+    // Runtime availability checks
+    pub fn check_container_runtime(&self) -> &str {
+        &self.runtime_name
     }
 
     pub fn check_bolt_available(&self) -> bool {
-        // Check if Bolt is installed and available
-        Command::new("bolt")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        BoltRuntime::new().is_available()
     }
 
     pub fn check_docker_available(&self) -> bool {
-        Command::new("docker")
-            .arg("--version")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+        DockerRuntime::new().is_available()
     }
 
     pub fn check_podman_available(&self) -> bool {
-        Command::new("podman")
+        // Podman check: would need to implement Podman runtime
+        // For now, just check if podman binary exists
+        std::process::Command::new("podman")
             .arg("--version")
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContainerRuntime {
-    Bolt,   // Primary: High-performance Rust container runtime
-    Docker, // Fallback: Industry standard
-    Podman, // Fallback: Daemonless alternative
-    None,
 }
 
 impl Default for ContainerManager {

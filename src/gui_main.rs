@@ -175,6 +175,8 @@ fn apply_wayland_optimizations(ctx: &egui::Context) {
 }
 
 /// Check if running on Wayland
+// Helper function for future use
+#[allow(dead_code)]
 fn is_wayland() -> bool {
     std::env::var("WAYLAND_DISPLAY").is_ok()
         || std::env::var("XDG_SESSION_TYPE")

@@ -1,4 +1,4 @@
-use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
+use crate::{NovaError, Result, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -599,7 +599,7 @@ impl StoragePoolManager {
             .output();
 
         // Undefine the pool
-        let mut args = vec!["pool-undefine", name];
+        let args = vec!["pool-undefine", name];
         if delete_volumes {
             // Note: virsh doesn't have --delete-volumes, we handle it manually
             if let Some(pool) = self.pools.get(name) {

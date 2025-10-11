@@ -462,7 +462,7 @@ impl TemplateManager {
         log_info!("Reverting VM '{}' to snapshot '{}'", vm_name, snapshot_name);
 
         // Find snapshot by name
-        let snapshot = self
+        let _snapshot = self
             .snapshots
             .get(vm_name)
             .and_then(|snapshots| {
@@ -635,7 +635,7 @@ impl TemplateManager {
         );
 
         // Check if snapshot exists
-        let snapshot = self
+        let _snapshot = self
             .snapshots
             .get(source_vm)
             .and_then(|snapshots| snapshots.values().find(|s| s.name == snapshot_name))
@@ -720,7 +720,7 @@ impl TemplateManager {
         let mut cmd = Command::new("virt-clone");
         cmd.args(&["--original", source_vm, "--name", new_vm_name]);
 
-        for (i, disk_path) in disk_paths.iter().enumerate() {
+        for (_i, disk_path) in disk_paths.iter().enumerate() {
             cmd.arg("--file").arg(disk_path);
         }
 

@@ -296,9 +296,9 @@ The application will minimize to system tray
 
     /// Setup shared memory file
     pub async fn setup_shmem(&self, config: &LookingGlassConfig,
-                              vm_name: &str) -> Result<(), String> {
+                              _vm_name: &str) -> Result<(), String> {
         let shmem_path = &config.shmem_path;
-        let size_bytes = config.framebuffer_size * 1024 * 1024;
+        let _size_bytes = config.framebuffer_size * 1024 * 1024;
 
         // Create shared memory file
         let output = Command::new("dd")

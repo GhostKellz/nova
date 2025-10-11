@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+// Removed unused import: use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PciDevice {
@@ -223,7 +223,7 @@ impl PciPassthroughManager {
 
     /// Generate libvirt XML for PCI passthrough
     pub fn generate_libvirt_xml(&self, pci_address: &str) -> Result<String, String> {
-        let device = self.devices.get(pci_address)
+        let _device = self.devices.get(pci_address)
             .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
         // Parse PCI address components

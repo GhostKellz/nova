@@ -444,7 +444,7 @@ impl PerformanceCollector {
 
 // Mock virt module for compilation (replace with actual virt crate)
 mod virt {
-    use std::fmt;
+    // Removed unused import: use std::fmt;
 
     pub struct Connect;
     pub struct Domain;

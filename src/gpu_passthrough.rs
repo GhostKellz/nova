@@ -351,7 +351,7 @@ impl GpuManager {
         log_info!("Configuring GPU {} for passthrough to VM '{}'", device_address, vm_name);
 
         // Find the GPU
-        let gpu = self.gpus.iter()
+        let _gpu = self.gpus.iter()
             .find(|g| g.address == device_address)
             .ok_or_else(|| NovaError::ConfigError(format!("GPU {} not found", device_address)))?;
 
@@ -450,7 +450,7 @@ impl GpuManager {
         xml.push_str("    </hostdev>\n");
 
         // Add audio device if specified
-        if let Some(audio_address) = &config.audio_device {
+        if let Some(_audio_address) = &config.audio_device {
             xml.push_str("    <hostdev mode='subsystem' type='pci' managed='yes'>\n");
             xml.push_str("      <source>\n");
             xml.push_str(&format!("        <address domain='0x0000' bus='0x{}' slot='0x{}' function='0x{}'/>\n",
