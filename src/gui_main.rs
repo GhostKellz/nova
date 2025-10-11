@@ -5,14 +5,21 @@ use nova::{
         ActiveProtocol, EnhancedConsoleConfig, EnhancedConsoleManager, UnifiedConsoleSession,
     },
     container::ContainerManager,
+    gpu_passthrough::GpuManager,
+    gui_gpu::GpuManagerGui,
     instance::{Instance, InstanceStatus, InstanceType},
     logger,
+    migration::{MigrationConfig, MigrationManager},
     network::{
         InterfaceState, NetworkInterface, NetworkManager, NetworkSummary, SwitchOrigin,
         SwitchProfile, SwitchStatus, SwitchType, VirtualSwitch,
     },
+    pci_passthrough::PciPassthroughManager,
+    spice_console::{SpiceConfig, SpiceManager},
+    sriov::SriovManager,
     templates_snapshots::TemplateManager,
     theme,
+    usb_passthrough::UsbManager,
     vm::VmManager,
 };
 
@@ -97,6 +104,17 @@ enum DetailTab {
     Snapshots,
     Networking,
     Sessions,
+    Performance,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolWindow {
+    None,
+    GpuManager,
+    UsbPassthrough,
+    PciPassthrough,
+    SriovManager,
+    MigrationManager,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -113,6 +131,12 @@ struct NovaApp {
     enhanced_console: Arc<AsyncMutex<EnhancedConsoleManager>>,
     template_manager: Arc<AsyncMutex<TemplateManager>>,
     session_events: Arc<Mutex<Vec<SessionEvent>>>,
+    gpu_manager: Arc<Mutex<GpuManager>>,
+    usb_manager: Arc<Mutex<UsbManager>>,
+    pci_manager: Arc<Mutex<PciPassthroughManager>>,
+    sriov_manager: Arc<Mutex<SriovManager>>,
+    spice_manager: Arc<Mutex<SpiceManager>>,
+    migration_manager: Option<Arc<Mutex<MigrationManager>>>,
     _config: NovaConfig,
     runtime: Runtime,
 
@@ -129,6 +153,10 @@ struct NovaApp {
 
     show_insights: bool,
     detail_tab: DetailTab,
+    open_tool_window: ToolWindow,
+
+    // Tool window GUI instances
+    gpu_manager_gui: Option<GpuManagerGui>,
 
     last_refresh: Option<Instant>,
     last_refresh_at: Option<DateTime<Utc>>,
@@ -190,6 +218,19 @@ impl NovaApp {
 
         let runtime = Runtime::new().expect("failed to initialize Tokio runtime");
 
+        // Initialize new managers
+        let gpu_manager = Arc::new(Mutex::new(GpuManager::new()));
+        let usb_manager = Arc::new(Mutex::new(UsbManager::new()));
+        let pci_manager = Arc::new(Mutex::new(PciPassthroughManager::new()));
+        let sriov_manager = Arc::new(Mutex::new(SriovManager::new()));
+        let spice_manager = Arc::new(Mutex::new(SpiceManager::new()));
+
+        // Initialize migration manager with default config
+        let migration_config = MigrationConfig::default();
+        let migration_manager = Some(Arc::new(Mutex::new(
+            MigrationManager::new(migration_config, None)
+        )));
+
         let mut app = Self {
             vm_manager,
             container_manager,
@@ -197,6 +238,12 @@ impl NovaApp {
             enhanced_console,
             template_manager,
             session_events,
+            gpu_manager,
+            usb_manager,
+            pci_manager,
+            sriov_manager,
+            spice_manager,
+            migration_manager,
             _config: config,
             runtime,
             selected_instance: None,
@@ -210,6 +257,8 @@ impl NovaApp {
             only_running: false,
             show_insights: true,
             detail_tab: DetailTab::Overview,
+            open_tool_window: ToolWindow::None,
+            gpu_manager_gui: None,
             last_refresh: None,
             last_refresh_at: None,
             refresh_interval: Duration::from_secs(INSTANCE_REFRESH_SECONDS),
@@ -2036,6 +2085,7 @@ impl NovaApp {
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Snapshots, "Snapshots");
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Networking, "Networking");
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions");
+                ui.selectable_value(&mut self.detail_tab, DetailTab::Performance, "Performance");
             });
 
             ui.separator();
@@ -2045,8 +2095,267 @@ impl NovaApp {
                 DetailTab::Snapshots => self.draw_snapshots(ui),
                 DetailTab::Networking => self.draw_networking(ui, instance),
                 DetailTab::Sessions => self.draw_sessions(ui, instance),
+                DetailTab::Performance => self.draw_performance(ui, instance),
             }
         });
+    }
+
+    fn draw_performance(&self, ui: &mut egui::Ui, instance: &Instance) {
+        ui.heading("Performance metrics");
+        ui.separator();
+        ui.label("Performance monitoring and graphs are on the roadmap.");
+        ui.label("Planned capabilities:");
+        ui.small("• CPU utilization graphs over time");
+        ui.small("• Memory usage and pressure metrics");
+        ui.small("• Disk I/O throughput and latency");
+        ui.small("• Network bandwidth utilization");
+
+        ui.add_space(8.0);
+        ui.group(|ui| {
+            ui.label(egui::RichText::new(&instance.name).strong());
+            ui.separator();
+            ui.label(format!("vCPUs: {}", instance.cpu_cores));
+            ui.label(format!("Memory: {} MB", instance.memory_mb));
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.label("Performance graphs will appear here.");
+                ui.small("Chart rendering with egui_plot is coming soon.");
+            });
+        });
+    }
+
+    fn draw_usb_passthrough_window(&mut self, ui: &mut egui::Ui) {
+        ui.heading("USB Device Passthrough");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button("🔄 Refresh Devices").clicked() {
+                let result = if let Ok(mut manager) = self.usb_manager.lock() {
+                    manager.discover_devices().map(|_| ())
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = result {
+                    self.log_console(format!("Failed to refresh USB devices: {:?}", e));
+                } else {
+                    self.log_console("USB devices refreshed");
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        if let Ok(manager) = self.usb_manager.lock() {
+            let devices = manager.list_devices();
+
+            if devices.is_empty() {
+                ui.group(|ui| {
+                    ui.label("No USB devices detected");
+                    ui.small("Click 'Refresh Devices' to scan for USB devices");
+                });
+            } else {
+                ui.label(format!("Found {} USB device(s)", devices.len()));
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for device in devices.iter() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&device.product_name).strong());
+                                    ui.label(format!("by {}", device.vendor_name));
+                                });
+                                ui.label(format!("Vendor:Product = {}:{}", device.vendor_id, device.product_id));
+                                ui.label(format!("Bus {} Device {}", device.bus, device.device));
+                                if let Some(serial) = &device.serial {
+                                    ui.small(format!("Serial: {}", serial));
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            }
+        } else {
+            ui.label("USB manager is currently busy");
+        }
+    }
+
+    fn draw_pci_passthrough_window(&mut self, ui: &mut egui::Ui) {
+        ui.heading("PCI Device Passthrough");
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            if ui.button("🔄 Refresh Devices").clicked() {
+                let result = if let Ok(mut manager) = self.pci_manager.lock() {
+                    manager.discover_devices().map(|_| ())
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = result {
+                    self.log_console(format!("Failed to discover PCI devices: {:?}", e));
+                } else {
+                    self.log_console("PCI devices discovered");
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        if let Ok(manager) = self.pci_manager.lock() {
+            let devices = manager.list_devices();
+
+            if devices.is_empty() {
+                ui.group(|ui| {
+                    ui.label("No PCI devices detected");
+                    ui.small("Click 'Refresh Devices' to scan for PCI devices");
+                });
+            } else {
+                ui.label(format!("Found {} PCI device(s)", devices.len()));
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for device in devices.iter() {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(&device.device_name).strong());
+                                    ui.label(&device.vendor_name);
+                                });
+                                ui.monospace(format!("PCI Address: {}", device.address));
+                                ui.label(format!("Vendor:Device = {}:{}", device.vendor_id, device.device_id));
+                                if let Some(driver) = &device.driver {
+                                    ui.label(format!("Driver: {}", driver));
+                                }
+                                if let Some(iommu) = device.iommu_group {
+                                    ui.label(format!("IOMMU Group: {}", iommu));
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            }
+        } else {
+            ui.label("PCI manager is currently busy");
+        }
+    }
+
+    fn draw_sriov_manager_window(&mut self, ui: &mut egui::Ui) {
+        ui.heading("SR-IOV Virtual Function Manager");
+        ui.separator();
+
+        ui.label("SR-IOV allows creating virtual functions (VFs) from physical network adapters.");
+        ui.small("Virtual functions can be assigned directly to VMs for near-native performance.");
+
+        ui.add_space(8.0);
+
+        ui.horizontal(|ui| {
+            if ui.button("🔄 Refresh Devices").clicked() {
+                let result = if let Ok(mut manager) = self.sriov_manager.lock() {
+                    manager.discover_sriov_devices().map(|_| ())
+                } else {
+                    Ok(())
+                };
+
+                if let Err(e) = result {
+                    self.log_console(format!("Failed to discover SR-IOV devices: {:?}", e));
+                } else {
+                    self.log_console("SR-IOV capable devices discovered");
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+
+        if let Ok(manager) = self.sriov_manager.lock() {
+            let devices = manager.list_devices();
+
+            if devices.is_empty() {
+                ui.group(|ui| {
+                    ui.label("No SR-IOV capable devices detected");
+                    ui.small("SR-IOV requires compatible hardware and may need to be enabled in BIOS/UEFI");
+                });
+            } else {
+                ui.label(format!("Found {} SR-IOV capable device(s)", devices.len()));
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        for device in devices.iter() {
+                            ui.group(|ui| {
+                                ui.label(egui::RichText::new(&device.device_name).strong());
+                                ui.monospace(format!("PCI: {}", device.pf_address));
+                                ui.label(format!("Current VFs: {} / Max VFs: {}", device.current_vfs, device.max_vfs));
+
+                                if device.current_vfs > 0 {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(102, 220, 144),
+                                        format!("{} virtual functions active", device.current_vfs)
+                                    );
+                                }
+                            });
+                            ui.add_space(4.0);
+                        }
+                    });
+            }
+        } else {
+            ui.label("SR-IOV manager is currently busy");
+        }
+    }
+
+    fn draw_migration_manager_window(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Virtual Machine Migration");
+        ui.separator();
+
+        ui.label("Live migration allows moving running VMs between hosts with minimal downtime.");
+        ui.small("Supports offline, live, and hybrid migration modes.");
+
+        ui.add_space(8.0);
+
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Migration Options").strong());
+            ui.separator();
+            ui.label("• Live Migration: Move running VMs with minimal downtime");
+            ui.label("• Offline Migration: Migrate stopped VMs");
+            ui.label("• Hybrid Migration: Combine live and offline approaches");
+        });
+
+        ui.add_space(8.0);
+
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Recent Migrations").strong());
+            ui.separator();
+
+            if let Some(ref manager_arc) = self.migration_manager {
+                if let Ok(manager) = manager_arc.lock() {
+                    let active = manager.list_active_migrations();
+
+                    if active.is_empty() {
+                        ui.label("No active migrations");
+                    } else {
+                        for migration in active.iter() {
+                            ui.horizontal(|ui| {
+                                ui.label(&migration.vm_name);
+                                ui.label(format!("→ {}", migration.destination_host));
+                                ui.label(format!("{:?}", migration.status));
+                            });
+                        }
+                    }
+                } else {
+                    ui.label("Migration manager is currently busy");
+                }
+            } else {
+                ui.label("Migration manager not initialized");
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.small("Use the CLI for initiating VM migrations");
+        ui.small("GUI-based migration workflow coming soon");
     }
 }
 
@@ -2057,6 +2366,23 @@ impl eframe::App for NovaApp {
         self.refresh_instances(false);
         self.refresh_network_summary(false);
         self.drain_session_events();
+
+        // Handle keyboard shortcuts
+        ctx.input(|i| {
+            if i.modifiers.ctrl {
+                if i.key_pressed(egui::Key::G) {
+                    self.open_tool_window = ToolWindow::GpuManager;
+                } else if i.key_pressed(egui::Key::U) {
+                    self.open_tool_window = ToolWindow::UsbPassthrough;
+                } else if i.key_pressed(egui::Key::P) {
+                    self.open_tool_window = ToolWindow::PciPassthrough;
+                } else if i.key_pressed(egui::Key::R) {
+                    self.open_tool_window = ToolWindow::SriovManager;
+                } else if i.key_pressed(egui::Key::M) {
+                    self.open_tool_window = ToolWindow::MigrationManager;
+                }
+            }
+        });
 
         let filter = self.filter_text.trim().to_lowercase();
         let (can_start, can_stop, can_restart) = self.compute_action_state();
@@ -2111,6 +2437,31 @@ impl eframe::App for NovaApp {
                         "Networking tab",
                     );
                     ui.radio_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions tab");
+                    ui.radio_value(&mut self.detail_tab, DetailTab::Performance, "Performance tab");
+                });
+
+                ui.menu_button("Tools", |ui| {
+                    if ui.button("GPU Manager [Ctrl+G]").clicked() {
+                        self.open_tool_window = ToolWindow::GpuManager;
+                        ui.close_menu();
+                    }
+                    if ui.button("USB Passthrough [Ctrl+U]").clicked() {
+                        self.open_tool_window = ToolWindow::UsbPassthrough;
+                        ui.close_menu();
+                    }
+                    if ui.button("PCI Passthrough [Ctrl+P]").clicked() {
+                        self.open_tool_window = ToolWindow::PciPassthrough;
+                        ui.close_menu();
+                    }
+                    if ui.button("SR-IOV Manager [Ctrl+R]").clicked() {
+                        self.open_tool_window = ToolWindow::SriovManager;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Migration Manager [Ctrl+M]").clicked() {
+                        self.open_tool_window = ToolWindow::MigrationManager;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Help", |ui| if ui.button("About Nova").clicked() {});
@@ -2177,6 +2528,91 @@ impl eframe::App for NovaApp {
                     }
                 });
             });
+
+        // Render tool windows
+        match self.open_tool_window {
+            ToolWindow::None => {}
+            ToolWindow::GpuManager => {
+                // Lazy-initialize GPU Manager GUI
+                if self.gpu_manager_gui.is_none() {
+                    let mut gui = GpuManagerGui::new(Arc::clone(&self.gpu_manager));
+                    gui.refresh();
+                    self.gpu_manager_gui = Some(gui);
+                }
+
+                let mut open = true;
+                egui::Window::new("GPU Passthrough Manager")
+                    .open(&mut open)
+                    .default_size([900.0, 600.0])
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        if let Some(gui) = &mut self.gpu_manager_gui {
+                            gui.draw(ui);
+                        }
+                    });
+
+                if !open {
+                    self.open_tool_window = ToolWindow::None;
+                    self.gpu_manager_gui = None;
+                }
+            }
+            ToolWindow::UsbPassthrough => {
+                let mut open = true;
+                egui::Window::new("USB Passthrough Manager")
+                    .open(&mut open)
+                    .default_size([800.0, 500.0])
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        self.draw_usb_passthrough_window(ui);
+                    });
+
+                if !open {
+                    self.open_tool_window = ToolWindow::None;
+                }
+            }
+            ToolWindow::PciPassthrough => {
+                let mut open = true;
+                egui::Window::new("PCI Passthrough Manager")
+                    .open(&mut open)
+                    .default_size([800.0, 500.0])
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        self.draw_pci_passthrough_window(ui);
+                    });
+
+                if !open {
+                    self.open_tool_window = ToolWindow::None;
+                }
+            }
+            ToolWindow::SriovManager => {
+                let mut open = true;
+                egui::Window::new("SR-IOV Manager")
+                    .open(&mut open)
+                    .default_size([800.0, 500.0])
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        self.draw_sriov_manager_window(ui);
+                    });
+
+                if !open {
+                    self.open_tool_window = ToolWindow::None;
+                }
+            }
+            ToolWindow::MigrationManager => {
+                let mut open = true;
+                egui::Window::new("VM Migration Manager")
+                    .open(&mut open)
+                    .default_size([800.0, 500.0])
+                    .resizable(true)
+                    .show(ctx, |ui| {
+                        self.draw_migration_manager_window(ui);
+                    });
+
+                if !open {
+                    self.open_tool_window = ToolWindow::None;
+                }
+            }
+        }
 
         ctx.request_repaint_after(self.refresh_interval.min(self.network_refresh_interval));
     }

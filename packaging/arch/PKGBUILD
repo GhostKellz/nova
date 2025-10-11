@@ -1,0 +1,160 @@
+# Maintainer: Nova Team <nova@example.com>
+pkgname=nova-virtualization
+pkgver=0.1.0
+pkgrel=1
+epoch=
+pkgdesc="Wayland-Native Virtualization & Container Manager - Modern KVM/QEMU management for Arch Linux"
+arch=('x86_64' 'aarch64')
+url="https://github.com/nova-project/nova"
+license=('MIT')
+groups=()
+
+depends=(
+    # Core dependencies
+    'rust'
+    'cargo'
+    'libvirt'
+    'qemu-desktop'
+    'qemu-system-x86'
+    'edk2-ovmf'
+
+    # Networking
+    'bridge-utils'
+    'dnsmasq'
+    'iptables'
+    'openvswitch'
+
+    # GUI dependencies
+    'wayland'
+    'gtk4'
+
+    # Utilities
+    'sysfsutils'
+    'numactl'
+)
+
+makedepends=(
+    'git'
+    'rust'
+    'cargo'
+    'clang'
+    'cmake'
+)
+
+optdepends=(
+    'nvidia-open: NVIDIA GPU passthrough support (recommended)'
+    'nvidia: Proprietary NVIDIA drivers'
+    'looking-glass: Low-latency GPU passthrough display'
+    'nvbind: Container GPU passthrough runtime'
+    'docker: Container runtime support'
+    'podman: Alternative container runtime'
+    'virt-viewer: VM console access'
+    'spice-gtk: SPICE protocol support'
+    'ovmf: UEFI firmware for VMs'
+    'btrfs-progs: Btrfs storage pool support'
+    'zfs-utils: ZFS storage pool support'
+    'nfs-utils: NFS storage pool support'
+    'ceph: Ceph storage backend'
+    'lvm2: LVM storage pool support'
+)
+
+provides=('nova' 'nova-gui')
+conflicts=('nova-git')
+replaces=()
+backup=(
+    'etc/nova/nova.conf'
+)
+options=()
+install=nova.install
+changelog=
+source=(
+    "nova-$pkgver.tar.gz::https://github.com/nova-project/nova/archive/v$pkgver.tar.gz"
+)
+noextract=()
+sha256sums=('SKIP')  # Update with actual checksum
+validpgpkeys=()
+
+prepare() {
+    cd "$srcdir/nova-$pkgver"
+
+    # Update Cargo.lock
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$srcdir/nova-$pkgver"
+
+    # Set build flags
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+
+    # Build release binaries
+    cargo build --release --locked \
+        --bin nova \
+        --bin nova-gui \
+        --features "gpu-passthrough,btrfs,prometheus"
+}
+
+check() {
+    cd "$srcdir/nova-$pkgver"
+
+    # Run tests (skip network tests in build environment)
+    cargo test --release --locked --features "gpu-passthrough,btrfs" -- \
+        --skip network \
+        --skip integration
+}
+
+package() {
+    cd "$srcdir/nova-$pkgver"
+
+    # Install binaries
+    install -Dm755 "target/release/nova" "$pkgdir/usr/bin/nova"
+    install -Dm755 "target/release/nova-gui" "$pkgdir/usr/bin/nova-gui"
+
+    # Install systemd service
+    install -Dm644 "packaging/systemd/nova.service" "$pkgdir/usr/lib/systemd/system/nova.service"
+    install -Dm644 "packaging/systemd/nova-metrics.service" "$pkgdir/usr/lib/systemd/system/nova-metrics.service"
+
+    # Install configuration files
+    install -Dm644 "packaging/config/nova.conf" "$pkgdir/etc/nova/nova.conf"
+
+    # Install udev rules for GPU passthrough
+    install -Dm644 "packaging/udev/99-nova-vfio.rules" "$pkgdir/usr/lib/udev/rules.d/99-nova-vfio.rules"
+
+    # Install desktop file
+    install -Dm644 "nova.desktop" "$pkgdir/usr/share/applications/nova.desktop"
+
+    # Install icon
+    install -Dm644 "assets/nova-logo.png" "$pkgdir/usr/share/pixmaps/nova.png"
+
+    # Install VM templates
+    install -dm755 "$pkgdir/usr/share/nova/templates"
+    install -Dm644 examples/vm-templates/*.toml "$pkgdir/usr/share/nova/templates/"
+
+    # Install bash completion
+    install -Dm644 "packaging/completion/nova.bash" "$pkgdir/usr/share/bash-completion/completions/nova"
+
+    # Install zsh completion
+    install -Dm644 "packaging/completion/nova.zsh" "$pkgdir/usr/share/zsh/site-functions/_nova"
+
+    # Install fish completion
+    install -Dm644 "packaging/completion/nova.fish" "$pkgdir/usr/share/fish/vendor_completions.d/nova.fish"
+
+    # Install documentation
+    install -Dm644 "README.md" "$pkgdir/usr/share/doc/nova/README.md"
+    install -Dm644 "COMMANDS.md" "$pkgdir/usr/share/doc/nova/COMMANDS.md"
+    install -Dm644 "NETWORKING.md" "$pkgdir/usr/share/doc/nova/NETWORKING.md"
+    install -Dm644 "docs/migrating-from-virt-manager.md" "$pkgdir/usr/share/doc/nova/migrating-from-virt-manager.md"
+
+    # Install license
+    install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+    # Create required directories
+    install -dm755 "$pkgdir/var/lib/nova"
+    install -dm755 "$pkgdir/var/lib/nova/images"
+    install -dm755 "$pkgdir/var/lib/nova/snapshots"
+    install -dm755 "$pkgdir/var/lib/nova/networks"
+    install -dm755 "$pkgdir/var/log/nova"
+}
+
+# vim:set ts=4 sw=4 et:

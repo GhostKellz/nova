@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Create nova group if it doesn't exist
+        if ! getent group nova >/dev/null; then
+            addgroup --system nova
+        fi
+
+        # Create required directories
+        mkdir -p /var/lib/nova/images
+        mkdir -p /var/lib/nova/snapshots
+        mkdir -p /var/lib/nova/networks
+        mkdir -p /var/log/nova
+
+        # Set permissions
+        chown -R root:kvm /var/lib/nova
+        chmod 755 /var/lib/nova
+
+        # Enable and start libvirt if not running
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable libvirtd >/dev/null 2>&1 || true
+            systemctl start libvirtd >/dev/null 2>&1 || true
+        fi
+
+        echo ""
+        echo "Nova Virtualization Manager has been installed!"
+        echo ""
+        echo "Quick start:"
+        echo "  1. Add your user to required groups:"
+        echo "     sudo usermod -aG libvirt,kvm \$USER"
+        echo ""
+        echo "  2. For GPU passthrough, run diagnostics:"
+        echo "     nova gpu doctor"
+        echo ""
+        echo "  3. Create your first VM:"
+        echo "     nova wizard vm my-vm --apply"
+        echo ""
+        echo "Documentation: /usr/share/doc/nova-virtualization/"
+        echo "Report issues: https://github.com/nova-project/nova/issues"
+        echo ""
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

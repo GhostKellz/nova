@@ -1,0 +1,195 @@
+# Nova VM Template: Arch Linux + KDE + NVIDIA Development Environment
+# Perfect for: Arch Linux development with GPU acceleration, KDE Plasma testing, NVIDIA driver development
+
+project = "arch-nvidia-dev"
+
+[vm.arch-kde-dev]
+# Base Arch Linux with KDE Plasma
+image = "/var/lib/nova/images/arch-kde-latest.qcow2"
+cpu = 8
+memory = "16Gi"
+
+# GPU Passthrough - NVIDIA focus
+gpu_passthrough = true
+gpu_device = "auto"  # Auto-select NVIDIA GPU
+gpu_audio = true     # Pass through GPU HDMI audio
+
+# Display configuration
+display = "looking-glass"  # Best performance for desktop environments
+# Alternative: display = "spice" for initial setup
+
+# Multiple displays support
+monitors = 2
+vga_memory = "256M"
+
+# Network
+network = "bridge0"
+
+# Storage with Btrfs for snapshots
+[vm.arch-kde-dev.storage]
+pool = "nova-btrfs"
+system_disk = { size = "80G", format = "qcow2" }
+data_disk = { size = "200G", format = "raw" }
+shared_folder = "/home/user/Projects"  # Host folder to share
+
+# Performance optimizations for desktop workload
+cpu_mode = "host-passthrough"
+cpu_topology = { sockets = 1, cores = 8, threads = 1 }
+hugepages = true
+io_threads = 4
+
+# NVIDIA configuration
+[vm.arch-kde-dev.nvidia]
+driver = "nvidia-open"  # Use nvidia-open (https://github.com/NVIDIA/open-gpu-kernel-modules)
+dkms = true
+vulkan = true
+opencl = true
+cuda = true
+optimus = false  # Set true for laptop with hybrid graphics
+
+# Arch-specific packages to pre-install
+[vm.arch-kde-dev.packages]
+base = [
+    "base-devel",
+    "git",
+    "vim",
+    "neovim",
+    "tmux",
+    "htop",
+    "btop",
+    "fish",
+    "zsh",
+]
+
+nvidia = [
+    "nvidia-open",
+    "nvidia-open-dkms",
+    "nvidia-utils",
+    "lib32-nvidia-utils",
+    "nvidia-settings",
+    "cuda",
+    "cudnn",
+    "opencl-nvidia",
+    "vulkan-tools",
+]
+
+kde = [
+    "plasma-meta",
+    "kde-applications-meta",
+    "sddm",
+    "dolphin",
+    "konsole",
+    "kate",
+    "spectacle",
+]
+
+development = [
+    "rust",
+    "cargo",
+    "rustup",
+    "clang",
+    "cmake",
+    "ninja",
+    "meson",
+    "docker",
+    "podman",
+    "code",  # VS Code
+    "qt6-base",
+    "qt6-wayland",
+]
+
+# AUR packages to install
+aur = [
+    "yay",
+    "paru",
+    "nvtop",
+    "nvbind-git",
+    "looking-glass",
+]
+
+# Wayland configuration
+[vm.arch-kde-dev.wayland]
+enabled = true
+compositor = "kwin_wayland"
+nvidia_drm_modeset = true  # Enable nvidia-drm.modeset=1
+nvidia_preserve_memory = true
+
+# Development environment setup
+[vm.arch-kde-dev.dev_environment]
+# Install Rust toolchains
+rust_toolchains = ["stable", "nightly"]
+
+# Configure git
+git_user = "Developer"
+git_email = "dev@example.com"
+
+# Shell configuration
+default_shell = "fish"
+
+# Container runtime preference
+container_runtime = "podman"  # or "docker"
+
+# IDE/Editor configurations
+editors = ["nvim", "code", "kate"]
+
+# Post-installation script
+[vm.arch-kde-dev.post_install]
+script = """
+#!/bin/bash
+set -e
+
+# Enable multilib repository
+sed -i '/\\[multilib\\]/,/Include/s/^#//' /etc/pacman.conf
+pacman -Sy
+
+# Install yay AUR helper
+cd /tmp
+git clone https://aur.archlinux.org/yay.git
+cd yay
+makepkg -si --noconfirm
+cd ~
+
+# Configure NVIDIA
+echo "options nvidia-drm modeset=1" > /etc/modprobe.d/nvidia.conf
+echo "options nvidia NVreg_PreserveVideoMemoryAllocations=1" >> /etc/modprobe.d/nvidia.conf
+
+# Enable SDDM
+systemctl enable sddm
+
+# Enable Docker/Podman
+systemctl enable docker
+usermod -aG docker $SUDO_USER
+
+# Rust setup
+rustup default stable
+rustup component add rust-analyzer clippy rustfmt
+
+# Configure Wayland
+echo "WaylandEnable=true" >> /etc/sddm.conf.d/wayland.conf
+echo "export QT_QPA_PLATFORM=wayland" >> /etc/environment
+echo "export MOZ_ENABLE_WAYLAND=1" >> /etc/environment
+
+# Install Looking Glass
+yay -S --noconfirm looking-glass
+
+# Install nvbind for container GPU passthrough
+yay -S --noconfirm nvbind-git
+
+echo "Arch + KDE + NVIDIA environment setup complete!"
+"""
+
+# VM snapshots for safe testing
+[vm.arch-kde-dev.snapshots]
+enabled = true
+auto_snapshot = true
+schedule = "before_update"
+retention = 5
+
+# Quick snapshot before pacman updates
+pre_update_snapshot = true
+
+# Network configuration
+[network.dev-bridge]
+type = "bridge"
+interfaces = ["enp6s0"]
+"""

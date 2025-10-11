@@ -1,0 +1,26 @@
+[Unit]
+Description=Nova Virtualization Manager Service
+Documentation=https://github.com/nova-project/nova
+Requires=libvirtd.service
+After=network.target libvirtd.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/nova daemon
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nova /var/log/nova /run/nova
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

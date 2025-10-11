@@ -1,0 +1,59 @@
+#!/usr/bin/make -f
+
+# Debian package build rules for Nova
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked \
+		--bin nova \
+		--bin nova-gui \
+		--features "gpu-passthrough,btrfs,prometheus"
+
+override_dh_auto_test:
+	# Run non-network tests only
+	cargo test --release --locked --features "gpu-passthrough,btrfs" -- \
+		--skip network \
+		--skip integration || true
+
+override_dh_auto_install:
+	# Install binaries
+	install -Dm755 target/release/nova $(CURDIR)/debian/nova-virtualization/usr/bin/nova
+	install -Dm755 target/release/nova-gui $(CURDIR)/debian/nova-virtualization-gui/usr/bin/nova-gui
+
+	# Install systemd services
+	install -Dm644 packaging/systemd/nova.service \
+		$(CURDIR)/debian/nova-virtualization/lib/systemd/system/nova.service
+	install -Dm644 packaging/systemd/nova-metrics.service \
+		$(CURDIR)/debian/nova-virtualization/lib/systemd/system/nova-metrics.service
+
+	# Install configuration
+	install -Dm644 packaging/config/nova.conf \
+		$(CURDIR)/debian/nova-virtualization/etc/nova/nova.conf
+
+	# Install udev rules
+	install -Dm644 packaging/udev/99-nova-vfio.rules \
+		$(CURDIR)/debian/nova-virtualization/lib/udev/rules.d/99-nova-vfio.rules
+
+	# Install desktop file
+	install -Dm644 nova.desktop \
+		$(CURDIR)/debian/nova-virtualization-gui/usr/share/applications/nova.desktop
+
+	# Install templates
+	install -dm755 $(CURDIR)/debian/nova-virtualization/usr/share/nova/templates
+	install -Dm644 examples/vm-templates/*.toml \
+		$(CURDIR)/debian/nova-virtualization/usr/share/nova/templates/
+
+	# Install documentation
+	install -Dm644 README.md \
+		$(CURDIR)/debian/nova-virtualization/usr/share/doc/nova-virtualization/README.md
+	install -Dm644 docs/migrating-from-virt-manager.md \
+		$(CURDIR)/debian/nova-virtualization/usr/share/doc/nova-virtualization/migrating-from-virt-manager.md
+
+override_dh_auto_clean:
+	cargo clean || true
+	rm -rf $(CARGO_HOME)

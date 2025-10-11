@@ -1,0 +1,18 @@
+[Unit]
+Description=Nova Metrics Exporter (Prometheus)
+Documentation=https://github.com/nova-project/nova
+Requires=nova.service
+After=nova.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nova metrics --port 9090
+Restart=on-failure
+RestartSec=5s
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
