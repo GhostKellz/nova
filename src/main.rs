@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use nova::{
     NovaError, Result,
-    config::NovaConfig,
+    config::{DiskFormat, NovaConfig, StoragePoolConfig, StoragePoolType},
     container::ContainerManager,
     gpu_doctor::GpuDoctor,
     gpu_passthrough::GpuManager,
@@ -13,9 +13,12 @@ use nova::{
         SwitchType,
     },
     pci_passthrough::PciPassthroughManager,
+    prometheus::PrometheusExporter,
     spice_console::{SpiceConfig, SpiceManager},
     sriov::SriovManager,
-    storage_pool::{PoolType, StoragePoolManager, VolumeFormat},
+    storage::StorageManager,
+    storage_pool::{StoragePoolManager, VolumeFormat},
+    support::{self, SupportBundleOptions},
     templates::TemplateManager,
     templates_snapshots::TemplateManager as SnapshotManager,
     usb_passthrough::UsbManager,
@@ -143,6 +146,16 @@ enum Commands {
     Spice {
         #[command(subcommand)]
         spice_command: SpiceCommands,
+    },
+    /// Observability and metrics tooling
+    Metrics {
+        #[command(subcommand)]
+        metrics_command: MetricsCommands,
+    },
+    /// Support bundles and diagnostics
+    Support {
+        #[command(subcommand)]
+        support_command: SupportCommands,
     },
 }
 
@@ -410,23 +423,35 @@ enum StorageCommands {
         /// Pool name
         name: String,
         /// Pool type
-        #[arg(value_enum, long)]
+        #[arg(value_enum, long, default_value = "dir")]
         pool_type: StoragePoolTypeArg,
-        /// Path for the pool
+        /// Directory backing the pool
         #[arg(long)]
-        path: PathBuf,
-        /// Enable compression (btrfs only)
+        directory: PathBuf,
+        /// Optional description shown in the UI
         #[arg(long)]
-        compression: bool,
+        description: Option<String>,
+        /// Optional capacity hint (e.g. "500Gi")
+        #[arg(long)]
+        capacity: Option<String>,
+        /// Default disk format for new volumes
+        #[arg(value_enum, long, default_value = "qcow2")]
+        format: DiskFormatArg,
+        /// Create the directory if it does not exist
+        #[arg(long)]
+        auto_create: bool,
+        /// Labels applied to the pool (repeat flag)
+        #[arg(long = "label")]
+        labels: Vec<String>,
     },
     /// Delete a storage pool
     #[command(name = "delete-pool")]
     DeletePool {
         /// Pool name
         name: String,
-        /// Delete all volumes in the pool
+        /// Keep the backing directory on disk
         #[arg(long)]
-        delete_volumes: bool,
+        keep_directory: bool,
     },
     /// List volumes in a pool
     #[command(name = "list-volumes")]
@@ -456,12 +481,27 @@ enum StoragePoolTypeArg {
     Nfs,
 }
 
-impl From<StoragePoolTypeArg> for PoolType {
+impl From<StoragePoolTypeArg> for StoragePoolType {
     fn from(value: StoragePoolTypeArg) -> Self {
         match value {
-            StoragePoolTypeArg::Dir => PoolType::Directory,
-            StoragePoolTypeArg::Btrfs => PoolType::Btrfs,
-            StoragePoolTypeArg::Nfs => PoolType::Nfs,
+            StoragePoolTypeArg::Dir => StoragePoolType::Directory,
+            StoragePoolTypeArg::Btrfs => StoragePoolType::Btrfs,
+            StoragePoolTypeArg::Nfs => StoragePoolType::Nfs,
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone)]
+enum DiskFormatArg {
+    Qcow2,
+    Raw,
+}
+
+impl From<DiskFormatArg> for DiskFormat {
+    fn from(value: DiskFormatArg) -> Self {
+        match value {
+            DiskFormatArg::Qcow2 => DiskFormat::Qcow2,
+            DiskFormatArg::Raw => DiskFormat::Raw,
         }
     }
 }
@@ -644,6 +684,45 @@ enum SpiceCommands {
         #[arg(long)]
         monitors: Option<u32>,
     },
+}
+
+#[derive(Subcommand)]
+enum MetricsCommands {
+    /// Run the Prometheus exporter until interrupted
+    Serve {
+        /// TCP port to bind the exporter to
+        #[arg(long, default_value_t = 9100)]
+        port: u16,
+        /// Metrics collection interval in seconds
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+    },
+    /// Print a one-off metrics snapshot to stdout
+    Snapshot,
+}
+
+#[derive(Subcommand)]
+enum SupportCommands {
+    /// Generate a compressed support bundle for troubleshooting
+    Bundle {
+        /// Directory to write the bundle into (defaults to system temp dir)
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Skip journal/syslog collection
+        #[arg(long)]
+        no_logs: bool,
+        /// Skip operating system probes
+        #[arg(long)]
+        no_system: bool,
+        /// Skip Prometheus snapshot capture
+        #[arg(long)]
+        no_metrics: bool,
+        /// Redact IP and MAC addresses from collected files
+        #[arg(long)]
+        redact: bool,
+    },
+    /// Run environment diagnostics and print a readiness summary
+    Diagnose,
 }
 
 fn parse_cli_dhcp_range(range: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
@@ -1251,19 +1330,41 @@ Volumes:"
                     return Ok(());
                 }
 
-                println!("{:<18} {:<30} {:<12} {:<15}", "PCI ADDRESS", "GPU MODEL", "IOMMU GROUP", "DRIVER");
-                println!("{}", "=".repeat(80));
+                println!(
+                    "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8}",
+                    "PCI ADDRESS",
+                    "GPU MODEL",
+                    "IOMMU GROUP",
+                    "DRIVER",
+                    "GENERATION",
+                    "MIN DRIVER",
+                    "TCC"
+                );
+                println!("{}", "=".repeat(112));
 
                 for gpu in gpus {
-                    let iommu = gpu.iommu_group.map(|g| g.to_string()).unwrap_or_else(|| "-".to_string());
+                    let iommu = gpu
+                        .iommu_group
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "-".to_string());
                     let driver = gpu.driver.as_deref().unwrap_or("-");
+                    let caps = gpu_manager.capabilities_for(&gpu.address);
+                    let generation = caps
+                        .and_then(|c| c.generation.as_ref())
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let min_driver = caps
+                        .and_then(|c| c.minimum_driver.as_deref())
+                        .unwrap_or("-");
+                    let tcc = if caps.map(|c| c.tcc_supported).unwrap_or(false) {
+                        "yes"
+                    } else {
+                        "no"
+                    };
 
                     println!(
-                        "{:<18} {:<30} {:<12} {:<15}",
-                        gpu.address,
-                        gpu.device_name,
-                        iommu,
-                        driver
+                        "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8}",
+                        gpu.address, gpu.device_name, iommu, driver, generation, min_driver, tcc
                     );
                 }
 
@@ -1275,6 +1376,11 @@ Volumes:"
                         println!("  {} → {}", device, vm);
                     }
                 }
+                if gpu_manager.any_blackwell_gpus() {
+                    println!(
+                        "\nRTX 50-series GPU detected — install NVIDIA driver 560+, kernel 6.9+, and enable TCC for Looking Glass workflows (see docs/rtx50-series.md)."
+                    );
+                }
             }
             GpuCommands::Info { device } => {
                 let mut gpu_manager = GpuManager::new();
@@ -1282,12 +1388,15 @@ Volumes:"
 
                 if device == "all" {
                     for gpu in gpu_manager.list_gpus() {
-                        print_gpu_info(gpu);
+                        let caps = gpu_manager.capabilities_for(&gpu.address);
+                        print_gpu_info(gpu, caps);
                         println!();
                     }
                 } else {
-                    if let Some(gpu) = gpu_manager.list_gpus().iter().find(|g| g.address == device) {
-                        print_gpu_info(gpu);
+                    if let Some(gpu) = gpu_manager.list_gpus().iter().find(|g| g.address == device)
+                    {
+                        let caps = gpu_manager.capabilities_for(&gpu.address);
+                        print_gpu_info(gpu, caps);
                     } else {
                         println!("GPU '{}' not found", device);
                     }
@@ -1314,78 +1423,95 @@ Volumes:"
         },
         Commands::Storage { storage_command } => match storage_command {
             StorageCommands::ListPools => {
-                let mut storage_manager = StoragePoolManager::new();
-                storage_manager.discover_pools().await?;
-
+                let storage_manager = StorageManager::load(&config_path)?;
                 let pools = storage_manager.list_pools();
 
                 if pools.is_empty() {
-                    println!("No storage pools found");
+                    println!("No storage pools defined in {}", config_path.display());
                     return Ok(());
                 }
 
-                println!("{:<20} {:<12} {:<12} {:<15} {:<15}", "NAME", "TYPE", "STATE", "CAPACITY", "USAGE");
-                println!("{}", "=".repeat(80));
+                println!(
+                    "{:<20} {:<10} {:<40} {:<8} {:<5} {:<20}",
+                    "NAME", "TYPE", "DIRECTORY", "FORMAT", "AUTO", "LABELS"
+                );
+                println!("{}", "=".repeat(110));
 
-                for pool in pools {
-                    let pool_type = format!("{:?}", pool.pool_type);
-                    let state = format!("{:?}", pool.state);
-
-                    let (capacity, usage) = if let Some(cap) = &pool.capacity {
-                        let total_gb = cap.total_bytes as f64 / 1_073_741_824.0;
-                        let usage_pct = cap.usage_percent();
-                        (format!("{:.1} GB", total_gb), format!("{:.1}%", usage_pct))
-                    } else {
-                        ("-".to_string(), "-".to_string())
-                    };
-
-                    println!(
-                        "{:<20} {:<12} {:<12} {:<15} {:<15}",
-                        pool.name,
+                for (name, cfg) in pools {
+                    let StoragePoolConfig {
                         pool_type,
-                        state,
-                        capacity,
-                        usage
+                        directory,
+                        default_format,
+                        auto_create,
+                        labels,
+                        ..
+                    } = cfg;
+
+                    let labels = if labels.is_empty() {
+                        "-".to_string()
+                    } else {
+                        labels.join(",")
+                    };
+                    println!(
+                        "{:<20} {:<10} {:<40} {:<8} {:<5} {:<20}",
+                        name,
+                        pool_type.as_str(),
+                        directory,
+                        default_format.as_str(),
+                        if auto_create { "yes" } else { "no" },
+                        labels
                     );
                 }
             }
-            StorageCommands::CreatePool { name, pool_type, path, compression } => {
-                use nova::storage_pool::{BtrfsCompression, PoolConfig, StoragePool};
+            StorageCommands::CreatePool {
+                name,
+                pool_type,
+                directory,
+                description,
+                capacity,
+                format,
+                auto_create,
+                labels,
+            } => {
+                let mut manager = StorageManager::load(&config_path)?;
+                let directory_str = directory.to_string_lossy().into_owned();
 
-                let pool_type: PoolType = pool_type.into();
-
-                let config = if pool_type == PoolType::Btrfs && compression {
-                    PoolConfig::Btrfs {
-                        mount_point: path.clone(),
-                        subvolume: Some(name.clone()),
-                        compression: BtrfsCompression::Zstd { level: 3 },
-                        quota_enabled: false,
-                    }
-                } else {
-                    PoolConfig::Directory { permissions: 0o755 }
+                let pool_cfg = StoragePoolConfig {
+                    pool_type: pool_type.into(),
+                    directory: directory_str.clone(),
+                    description,
+                    capacity,
+                    default_format: format.into(),
+                    auto_create,
+                    labels,
                 };
 
-                let pool = StoragePool {
-                    name: name.clone(),
-                    pool_type,
-                    path,
-                    state: nova::storage_pool::PoolState::Building,
-                    capacity: None,
-                    autostart: true,
-                    config,
-                    uuid: uuid::Uuid::new_v4().to_string(),
-                    created_at: chrono::Utc::now(),
-                };
+                manager.create_pool(&name, pool_cfg)?;
 
-                let mut storage_manager = StoragePoolManager::new();
-                storage_manager.create_pool(pool).await?;
-
-                println!("✅ Storage pool '{}' created successfully", name);
+                println!(
+                    "✅ Storage pool '{}' saved to {} (dir: {})",
+                    name,
+                    config_path.display(),
+                    directory_str
+                );
             }
-            StorageCommands::DeletePool { name, delete_volumes } => {
-                let mut storage_manager = StoragePoolManager::new();
-                storage_manager.delete_pool(&name, delete_volumes).await?;
-                println!("✅ Storage pool '{}' deleted", name);
+            StorageCommands::DeletePool {
+                name,
+                keep_directory,
+            } => {
+                let mut manager = StorageManager::load(&config_path)?;
+                let removed = manager.delete_pool(&name, !keep_directory)?;
+                if keep_directory {
+                    println!(
+                        "✅ Storage pool '{}' removed from config (directory preserved)",
+                        name
+                    );
+                } else {
+                    println!(
+                        "✅ Storage pool '{}' removed and directory '{}' deleted",
+                        name, removed.directory
+                    );
+                }
             }
             StorageCommands::ListVolumes { pool } => {
                 let storage_manager = StoragePoolManager::new();
@@ -1396,7 +1522,10 @@ Volumes:"
                     return Ok(());
                 }
 
-                println!("{:<20} {:<12} {:<15} {:<15}", "NAME", "FORMAT", "CAPACITY", "ALLOCATION");
+                println!(
+                    "{:<20} {:<12} {:<15} {:<15}",
+                    "NAME", "FORMAT", "CAPACITY", "ALLOCATION"
+                );
                 println!("{}", "=".repeat(70));
 
                 for volume in volumes {
@@ -1412,12 +1541,19 @@ Volumes:"
                     );
                 }
             }
-            StorageCommands::CreateVolume { pool, name, size, format } => {
+            StorageCommands::CreateVolume {
+                pool,
+                name,
+                size,
+                format,
+            } => {
                 let size_bytes = parse_size(&size)?;
                 let format: VolumeFormat = format.into();
 
                 let mut storage_manager = StoragePoolManager::new();
-                storage_manager.create_volume(&pool, &name, size_bytes, format).await?;
+                storage_manager
+                    .create_volume(&pool, &name, size_bytes, format)
+                    .await?;
 
                 println!("✅ Volume '{}' created in pool '{}'", name, pool);
             }
@@ -1427,8 +1563,15 @@ Volumes:"
             let mut snapshot_manager = SnapshotManager::new(templates_dir)?;
 
             match snapshot_command {
-                SnapshotCommands::Create { vm, name, description, memory } => {
-                    let snapshot_id = snapshot_manager.create_snapshot(&vm, &name, &description, memory).await?;
+                SnapshotCommands::Create {
+                    vm,
+                    name,
+                    description,
+                    memory,
+                } => {
+                    let snapshot_id = snapshot_manager
+                        .create_snapshot(&vm, &name, &description, memory)
+                        .await?;
                     println!("✅ Snapshot '{}' created with ID: {}", name, snapshot_id);
                 }
                 SnapshotCommands::List { vm } => {
@@ -1439,7 +1582,10 @@ Volumes:"
                         return Ok(());
                     }
 
-                    println!("{:<20} {:<30} {:<12} {:<10}", "NAME", "CREATED", "SIZE", "CURRENT");
+                    println!(
+                        "{:<20} {:<30} {:<12} {:<10}",
+                        "NAME", "CREATED", "SIZE", "CURRENT"
+                    );
                     println!("{}", "=".repeat(80));
 
                     for snapshot in snapshots {
@@ -1456,31 +1602,50 @@ Volumes:"
                     }
 
                     let total_size = snapshot_manager.get_total_snapshot_size(&vm);
-                    println!("\nTotal snapshot storage: {:.1} MB", total_size as f64 / 1_048_576.0);
+                    println!(
+                        "\nTotal snapshot storage: {:.1} MB",
+                        total_size as f64 / 1_048_576.0
+                    );
                 }
                 SnapshotCommands::Revert { vm, snapshot } => {
                     snapshot_manager.revert_to_snapshot(&vm, &snapshot).await?;
                     println!("✅ VM '{}' reverted to snapshot '{}'", vm, snapshot);
                 }
-                SnapshotCommands::Delete { vm, snapshot, children } => {
-                    snapshot_manager.delete_snapshot(&vm, &snapshot, children).await?;
+                SnapshotCommands::Delete {
+                    vm,
+                    snapshot,
+                    children,
+                } => {
+                    snapshot_manager
+                        .delete_snapshot(&vm, &snapshot, children)
+                        .await?;
                     println!("✅ Snapshot '{}' deleted", snapshot);
                 }
             }
-        },
-        Commands::Clone { source, target, linked } => {
+        }
+        Commands::Clone {
+            source,
+            target,
+            linked,
+        } => {
             let templates_dir = PathBuf::from("/var/lib/nova/templates");
             let mut snapshot_manager = SnapshotManager::new(templates_dir)?;
 
             if linked {
-                snapshot_manager.create_linked_clone(&source, &target).await?;
+                snapshot_manager
+                    .create_linked_clone(&source, &target)
+                    .await?;
                 println!("✅ Linked clone '{}' created from '{}'", target, source);
             } else {
                 snapshot_manager.clone_vm(&source, &target, true).await?;
                 println!("✅ VM '{}' cloned to '{}'", source, target);
             }
-        },
-        Commands::Migrate { vm, destination, offline } => {
+        }
+        Commands::Migrate {
+            vm,
+            destination,
+            offline,
+        } => {
             let config = MigrationConfig::default();
             let mut migration_manager = MigrationManager::new(config, None);
 
@@ -1490,23 +1655,30 @@ Volumes:"
                 None
             };
 
-            let job_id = migration_manager.migrate_vm(&vm, &destination, migration_type).await?;
+            let job_id = migration_manager
+                .migrate_vm(&vm, &destination, migration_type)
+                .await?;
             println!("✅ Migration started (Job ID: {})", job_id);
             println!("Monitor progress with: nova migration status {}", job_id);
-        },
+        }
         Commands::Usb { usb_command } => {
             let mut usb_manager = UsbManager::new();
 
             match usb_command {
                 UsbCommands::List => {
-                    let devices = usb_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
+                    let devices = usb_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if devices.is_empty() {
                         println!("No USB devices detected");
                         return Ok(());
                     }
 
-                    println!("{:<10} {:<20} {:<30} {:<10}", "BUS:DEV", "VENDOR:PRODUCT", "DEVICE", "STATUS");
+                    println!(
+                        "{:<10} {:<20} {:<30} {:<10}",
+                        "BUS:DEV", "VENDOR:PRODUCT", "DEVICE", "STATUS"
+                    );
                     println!("{}", "=".repeat(75));
 
                     for device in devices {
@@ -1516,48 +1688,68 @@ Volumes:"
 
                         println!(
                             "{:<10} {:<20} {:<30} {:<10}",
-                            id,
-                            ids,
-                            device.product_name,
-                            status
+                            id, ids, device.product_name, status
                         );
                     }
                 }
-                UsbCommands::Attach { vm, vendor, product } => {
-                    usb_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
+                UsbCommands::Attach {
+                    vm,
+                    vendor,
+                    product,
+                } => {
+                    usb_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if let Some(device) = usb_manager.find_device(&vendor, &product).cloned() {
-                        usb_manager.attach_device(&vm, &device).await.map_err(|e| NovaError::LibvirtError(e))?;
+                        usb_manager
+                            .attach_device(&vm, &device)
+                            .await
+                            .map_err(|e| NovaError::LibvirtError(e))?;
                         println!("✅ USB device attached to VM '{}'", vm);
                     } else {
                         println!("❌ USB device {}:{} not found", vendor, product);
                     }
                 }
-                UsbCommands::Detach { vm, vendor, product } => {
-                    usb_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
+                UsbCommands::Detach {
+                    vm,
+                    vendor,
+                    product,
+                } => {
+                    usb_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if let Some(device) = usb_manager.find_device(&vendor, &product).cloned() {
-                        usb_manager.detach_device(&vm, &device).await.map_err(|e| NovaError::LibvirtError(e))?;
+                        usb_manager
+                            .detach_device(&vm, &device)
+                            .await
+                            .map_err(|e| NovaError::LibvirtError(e))?;
                         println!("✅ USB device detached from VM '{}'", vm);
                     } else {
                         println!("❌ USB device {}:{} not found", vendor, product);
                     }
                 }
             }
-        },
+        }
         Commands::Pci { pci_command } => {
             let mut pci_manager = PciPassthroughManager::new();
 
             match pci_command {
                 PciCommands::List { class: _ } => {
-                    let devices = pci_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
+                    let devices = pci_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if devices.is_empty() {
                         println!("No PCI devices detected");
                         return Ok(());
                     }
 
-                    println!("{:<18} {:<30} {:<15} {:<12}", "PCI ADDRESS", "DEVICE", "CLASS", "DRIVER");
+                    println!(
+                        "{:<18} {:<30} {:<15} {:<12}",
+                        "PCI ADDRESS", "DEVICE", "CLASS", "DRIVER"
+                    );
                     println!("{}", "=".repeat(80));
 
                     for device in devices {
@@ -1573,7 +1765,9 @@ Volumes:"
                     }
                 }
                 PciCommands::Info { device } => {
-                    pci_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
+                    pci_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if let Some(dev) = pci_manager.get_device(&device) {
                         nova::pci_passthrough::PciPassthroughManager::print_device_info(dev);
@@ -1582,35 +1776,52 @@ Volumes:"
                     }
                 }
                 PciCommands::Attach { vm, device } => {
-                    pci_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
-                    pci_manager.assign_to_vm(&device, &vm).map_err(|e| NovaError::LibvirtError(e))?;
+                    pci_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
+                    pci_manager
+                        .assign_to_vm(&device, &vm)
+                        .map_err(|e| NovaError::LibvirtError(e))?;
                     println!("✅ PCI device {} assigned to VM '{}'", device, vm);
                 }
                 PciCommands::Detach { device } => {
-                    pci_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
-                    pci_manager.release_from_vm(&device).map_err(|e| NovaError::ConfigError(e))?;
+                    pci_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
+                    pci_manager
+                        .release_from_vm(&device)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     println!("✅ PCI device {} released", device);
                 }
                 PciCommands::Check { device } => {
-                    pci_manager.discover_devices().map_err(|e| NovaError::ConfigError(e))?;
-                    let viability = pci_manager.check_passthrough_viability(&device).map_err(|e| NovaError::ConfigError(e))?;
+                    pci_manager
+                        .discover_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
+                    let viability = pci_manager
+                        .check_passthrough_viability(&device)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     viability.print();
                 }
             }
-        },
+        }
         Commands::Sriov { sriov_command } => {
             let mut sriov_manager = SriovManager::new();
 
             match sriov_command {
                 SriovCommands::List => {
-                    let devices = sriov_manager.discover_sriov_devices().map_err(|e| NovaError::ConfigError(e))?;
+                    let devices = sriov_manager
+                        .discover_sriov_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
 
                     if devices.is_empty() {
                         println!("No SR-IOV capable devices found");
                         return Ok(());
                     }
 
-                    println!("{:<18} {:<30} {:<8} {:<8}", "PCI ADDRESS", "DEVICE", "MAX VFs", "ACTIVE VFs");
+                    println!(
+                        "{:<18} {:<30} {:<8} {:<8}",
+                        "PCI ADDRESS", "DEVICE", "MAX VFs", "ACTIVE VFs"
+                    );
                     println!("{}", "=".repeat(70));
 
                     for device in devices {
@@ -1624,36 +1835,57 @@ Volumes:"
                     }
                 }
                 SriovCommands::Enable { pf, num_vfs } => {
-                    sriov_manager.discover_sriov_devices().map_err(|e| NovaError::ConfigError(e))?;
-                    sriov_manager.enable_sriov(&pf, num_vfs).map_err(|e| NovaError::ConfigError(e))?;
+                    sriov_manager
+                        .discover_sriov_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
+                    sriov_manager
+                        .enable_sriov(&pf, num_vfs)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     println!("✅ SR-IOV enabled on {} with {} VFs", pf, num_vfs);
                 }
                 SriovCommands::Disable { pf } => {
-                    sriov_manager.disable_sriov(&pf).map_err(|e| NovaError::ConfigError(e))?;
+                    sriov_manager
+                        .disable_sriov(&pf)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     println!("✅ SR-IOV disabled on {}", pf);
                 }
                 SriovCommands::Assign { pf, vf, vm } => {
-                    sriov_manager.discover_sriov_devices().map_err(|e| NovaError::ConfigError(e))?;
-                    let vf_address = sriov_manager.assign_vf_to_vm(&pf, vf, &vm).map_err(|e| NovaError::ConfigError(e))?;
+                    sriov_manager
+                        .discover_sriov_devices()
+                        .map_err(|e| NovaError::ConfigError(e))?;
+                    let vf_address = sriov_manager
+                        .assign_vf_to_vm(&pf, vf, &vm)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     println!("✅ VF {} assigned to VM '{}'", vf_address, vm);
                 }
                 SriovCommands::Release { vf_address } => {
-                    sriov_manager.release_vf(&vf_address).map_err(|e| NovaError::ConfigError(e))?;
+                    sriov_manager
+                        .release_vf(&vf_address)
+                        .map_err(|e| NovaError::ConfigError(e))?;
                     println!("✅ VF {} released", vf_address);
                 }
             }
-        },
+        }
         Commands::Spice { spice_command } => {
             let mut spice_manager = SpiceManager::new();
 
             match spice_command {
                 SpiceCommands::Connect { vm } => {
-                    let _info = spice_manager.get_connection_info(&vm).await.map_err(|e| NovaError::LibvirtError(e))?;
-                    spice_manager.launch_client(&vm).await.map_err(|e| NovaError::LibvirtError(e))?;
+                    let _info = spice_manager
+                        .get_connection_info(&vm)
+                        .await
+                        .map_err(|e| NovaError::LibvirtError(e))?;
+                    spice_manager
+                        .launch_client(&vm)
+                        .await
+                        .map_err(|e| NovaError::LibvirtError(e))?;
                     println!("✅ SPICE client launched for VM '{}'", vm);
                 }
                 SpiceCommands::Info { vm } => {
-                    let info = spice_manager.get_connection_info(&vm).await.map_err(|e| NovaError::LibvirtError(e))?;
+                    let info = spice_manager
+                        .get_connection_info(&vm)
+                        .await
+                        .map_err(|e| NovaError::LibvirtError(e))?;
 
                     println!("SPICE Connection Info for VM '{}':", vm);
                     println!("  URI: {}", info.uri);
@@ -1666,8 +1898,15 @@ Volumes:"
                         println!("  Password: Set");
                     }
                 }
-                SpiceCommands::Config { vm, audio, clipboard, usb, monitors } => {
-                    let mut config = spice_manager.get_config(&vm)
+                SpiceCommands::Config {
+                    vm,
+                    audio,
+                    clipboard,
+                    usb,
+                    monitors,
+                } => {
+                    let mut config = spice_manager
+                        .get_config(&vm)
                         .cloned()
                         .unwrap_or_else(|| SpiceConfig::default());
 
@@ -1685,8 +1924,55 @@ Volumes:"
                     }
 
                     spice_manager.set_config(&vm, config);
-                    spice_manager.apply_config(&vm).await.map_err(|e| NovaError::LibvirtError(e))?;
+                    spice_manager
+                        .apply_config(&vm)
+                        .await
+                        .map_err(|e| NovaError::LibvirtError(e))?;
                     println!("✅ SPICE configuration updated for VM '{}'", vm);
+                }
+            }
+        }
+        Commands::Metrics { metrics_command } => match metrics_command {
+            MetricsCommands::Serve { port, interval } => {
+                println!(
+                    "Starting Prometheus exporter on port {} (interval {}s). Press Ctrl+C to exit.",
+                    port, interval
+                );
+                let exporter = PrometheusExporter::new(port).with_collection_interval(interval);
+                exporter.start().await?;
+            }
+            MetricsCommands::Snapshot => {
+                let exporter = PrometheusExporter::new(0);
+                let snapshot = exporter.collect_once().await?;
+                println!("{}", snapshot);
+            }
+        },
+        Commands::Support { support_command } => match support_command {
+            SupportCommands::Bundle {
+                output,
+                no_logs,
+                no_system,
+                no_metrics,
+                redact,
+            } => {
+                let mut options = SupportBundleOptions::default();
+                options.output_dir = output;
+                options.config_path = Some(config_path.clone());
+                options.include_logs = !no_logs;
+                options.include_system = !no_system;
+                options.include_metrics = !no_metrics;
+                options.redact = redact;
+
+                let bundle_path = support::generate_support_bundle(options).await?;
+                println!("Support bundle archived at {}", bundle_path.display());
+            }
+            SupportCommands::Diagnose => {
+                let report = support::run_diagnostics().await?;
+                println!("{}", report);
+                if !report.is_healthy() {
+                    println!(
+                        "Detected issues above. Consider running 'nova support bundle --redact' and sharing with maintainers."
+                    );
                 }
             }
         },
@@ -1695,7 +1981,10 @@ Volumes:"
     Ok(())
 }
 
-fn print_gpu_info(gpu: &nova::gpu_passthrough::PciDevice) {
+fn print_gpu_info(
+    gpu: &nova::gpu_passthrough::PciDevice,
+    caps: Option<&nova::gpu_passthrough::GpuCapabilities>,
+) {
     println!("GPU: {}", gpu.device_name);
     println!("  PCI Address: {}", gpu.address);
     println!("  Vendor ID: {}", gpu.vendor_id);
@@ -1715,6 +2004,32 @@ fn print_gpu_info(gpu: &nova::gpu_passthrough::PciDevice) {
     }
 
     println!("  In Use: {}", if gpu.in_use { "Yes" } else { "No" });
+
+    if let Some(caps) = caps {
+        if let Some(generation) = caps.generation.as_ref() {
+            println!("  Generation: {}", generation);
+        }
+
+        if let Some(vram_mb) = caps.vram_mb {
+            println!("  VRAM: {:.1} GiB", vram_mb as f64 / 1024.0);
+        }
+
+        if let Some(ref compute) = caps.compute_capability {
+            println!("  Compute Capability: {}", compute);
+        }
+
+        if let Some(ref min_driver) = caps.minimum_driver {
+            println!("  Minimum NVIDIA Driver: {}", min_driver);
+        }
+
+        if let Some(ref kernel) = caps.recommended_kernel {
+            println!("  Recommended Kernel: {}", kernel);
+        }
+
+        if caps.tcc_supported {
+            println!("  TCC Mode: Supported (recommended for Looking Glass)");
+        }
+    }
 }
 
 fn parse_size(size_str: &str) -> Result<u64> {
@@ -1722,11 +2037,20 @@ fn parse_size(size_str: &str) -> Result<u64> {
 
     // Extract number and unit
     let (num_str, unit) = if size_str.ends_with("TB") || size_str.ends_with("TIB") {
-        (&size_str[..size_str.len() - if size_str.ends_with("TB") { 2 } else { 3 }], 1_099_511_627_776u64)
+        (
+            &size_str[..size_str.len() - if size_str.ends_with("TB") { 2 } else { 3 }],
+            1_099_511_627_776u64,
+        )
     } else if size_str.ends_with("GB") || size_str.ends_with("GIB") {
-        (&size_str[..size_str.len() - if size_str.ends_with("GB") { 2 } else { 3 }], 1_073_741_824u64)
+        (
+            &size_str[..size_str.len() - if size_str.ends_with("GB") { 2 } else { 3 }],
+            1_073_741_824u64,
+        )
     } else if size_str.ends_with("MB") || size_str.ends_with("MIB") {
-        (&size_str[..size_str.len() - if size_str.ends_with("MB") { 2 } else { 3 }], 1_048_576u64)
+        (
+            &size_str[..size_str.len() - if size_str.ends_with("MB") { 2 } else { 3 }],
+            1_048_576u64,
+        )
     } else if size_str.ends_with('T') {
         (&size_str[..size_str.len() - 1], 1_099_511_627_776u64)
     } else if size_str.ends_with('G') {
@@ -1737,7 +2061,9 @@ fn parse_size(size_str: &str) -> Result<u64> {
         (size_str.as_str(), 1u64)
     };
 
-    let num: f64 = num_str.parse().map_err(|_| NovaError::ConfigError(format!("Invalid size: {}", size_str)))?;
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| NovaError::ConfigError(format!("Invalid size: {}", size_str)))?;
 
     Ok((num * unit as f64) as u64)
 }

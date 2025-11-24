@@ -11,8 +11,8 @@ use std::process::Command;
 pub struct UsbDevice {
     pub bus: u8,
     pub device: u8,
-    pub vendor_id: String,       // e.g., "046d"
-    pub product_id: String,      // e.g., "c52b"
+    pub vendor_id: String,  // e.g., "046d"
+    pub product_id: String, // e.g., "c52b"
     pub vendor_name: String,
     pub product_name: String,
     pub device_class: UsbDeviceClass,
@@ -24,23 +24,23 @@ pub struct UsbDevice {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UsbDeviceClass {
-    HID,            // Keyboard, Mouse, Gamepad
-    Storage,        // USB drives, external HDDs
-    Audio,          // USB audio devices
-    Video,          // Webcams
+    HID,     // Keyboard, Mouse, Gamepad
+    Storage, // USB drives, external HDDs
+    Audio,   // USB audio devices
+    Video,   // Webcams
     Printer,
     Hub,
-    Wireless,       // WiFi/Bluetooth adapters
+    Wireless, // WiFi/Bluetooth adapters
     SmartCard,
     Other(u8),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UsbSpeed {
-    Low,      // 1.5 Mbps (USB 1.0)
-    Full,     // 12 Mbps (USB 1.1)
-    High,     // 480 Mbps (USB 2.0)
-    Super,    // 5 Gbps (USB 3.0)
+    Low,       // 1.5 Mbps (USB 1.0)
+    Full,      // 12 Mbps (USB 1.1)
+    High,      // 480 Mbps (USB 2.0)
+    Super,     // 5 Gbps (USB 3.0)
     SuperPlus, // 10 Gbps (USB 3.1+)
 }
 
@@ -67,7 +67,8 @@ impl UsbManager {
         }
 
         for entry in fs::read_dir(usb_devices_path)
-            .map_err(|e| format!("Failed to read USB devices: {}", e))? {
+            .map_err(|e| format!("Failed to read USB devices: {}", e))?
+        {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let device_path = entry.path();
 
@@ -148,20 +149,20 @@ impl UsbManager {
     }
 
     /// Attach USB device to VM
-    pub async fn attach_device(&mut self, vm_name: &str, device: &UsbDevice)
-        -> Result<(), String> {
-        println!("Attaching USB device {:04x}:{:04x} to VM '{}'",
-                 u16::from_str_radix(&device.vendor_id, 16).unwrap_or(0),
-                 u16::from_str_radix(&device.product_id, 16).unwrap_or(0),
-                 vm_name);
+    pub async fn attach_device(&mut self, vm_name: &str, device: &UsbDevice) -> Result<(), String> {
+        println!(
+            "Attaching USB device {:04x}:{:04x} to VM '{}'",
+            u16::from_str_radix(&device.vendor_id, 16).unwrap_or(0),
+            u16::from_str_radix(&device.product_id, 16).unwrap_or(0),
+            vm_name
+        );
 
         // Generate libvirt XML
         let xml = self.generate_usb_xml(device);
 
         // Attach device using virsh
         let temp_xml = format!("/tmp/nova-usb-{}-{}.xml", device.bus, device.device);
-        fs::write(&temp_xml, &xml)
-            .map_err(|e| format!("Failed to write temp XML: {}", e))?;
+        fs::write(&temp_xml, &xml).map_err(|e| format!("Failed to write temp XML: {}", e))?;
 
         let output = Command::new("virsh")
             .args(&["attach-device", vm_name, &temp_xml, "--live"])
@@ -188,16 +189,14 @@ impl UsbManager {
     }
 
     /// Detach USB device from VM
-    pub async fn detach_device(&mut self, vm_name: &str, device: &UsbDevice)
-        -> Result<(), String> {
+    pub async fn detach_device(&mut self, vm_name: &str, device: &UsbDevice) -> Result<(), String> {
         println!("Detaching USB device from VM '{}'", vm_name);
 
         // Generate libvirt XML (same as attach)
         let xml = self.generate_usb_xml(device);
 
         let temp_xml = format!("/tmp/nova-usb-{}-{}.xml", device.bus, device.device);
-        fs::write(&temp_xml, &xml)
-            .map_err(|e| format!("Failed to write temp XML: {}", e))?;
+        fs::write(&temp_xml, &xml).map_err(|e| format!("Failed to write temp XML: {}", e))?;
 
         let output = Command::new("virsh")
             .args(&["detach-device", vm_name, &temp_xml, "--live"])
@@ -224,23 +223,20 @@ impl UsbManager {
 
     /// Generate libvirt XML for USB passthrough
     pub fn generate_usb_xml(&self, device: &UsbDevice) -> String {
-        format!(r#"<hostdev mode='subsystem' type='usb' managed='yes'>
+        format!(
+            r#"<hostdev mode='subsystem' type='usb' managed='yes'>
   <source>
     <vendor id='0x{}'/>
     <product id='0x{}'/>
     <address bus='{}' device='{}'/>
   </source>
 </hostdev>"#,
-            device.vendor_id,
-            device.product_id,
-            device.bus,
-            device.device
+            device.vendor_id, device.product_id, device.bus, device.device
         )
     }
 
     /// Pass entire USB controller to VM
-    pub fn pass_usb_controller(&self, vm_name: &str, pci_address: &str)
-        -> Result<(), String> {
+    pub fn pass_usb_controller(&self, vm_name: &str, pci_address: &str) -> Result<(), String> {
         println!("Passing USB controller {} to VM '{}'", pci_address, vm_name);
 
         // Parse PCI address
@@ -249,7 +245,8 @@ impl UsbManager {
             return Err("Invalid PCI address format".to_string());
         }
 
-        let xml = format!(r#"<hostdev mode='subsystem' type='pci' managed='yes'>
+        let xml = format!(
+            r#"<hostdev mode='subsystem' type='pci' managed='yes'>
   <source>
     <address domain='0x{}' bus='0x{}' slot='0x{}' function='0x{}'/>
   </source>
@@ -259,8 +256,7 @@ impl UsbManager {
 
         // Attach controller
         let temp_xml = "/tmp/nova-usb-controller.xml";
-        fs::write(temp_xml, &xml)
-            .map_err(|e| format!("Failed to write XML: {}", e))?;
+        fs::write(temp_xml, &xml).map_err(|e| format!("Failed to write XML: {}", e))?;
 
         let output = Command::new("virsh")
             .args(&["attach-device", vm_name, temp_xml, "--config"])
@@ -285,14 +281,16 @@ impl UsbManager {
 
     /// List available (unassigned) USB devices
     pub fn list_available_devices(&self) -> Vec<&UsbDevice> {
-        self.devices.values()
+        self.devices
+            .values()
             .filter(|d| d.attached_to_vm.is_none())
             .collect()
     }
 
     /// Get device by vendor and product ID
     pub fn find_device(&self, vendor_id: &str, product_id: &str) -> Option<&UsbDevice> {
-        self.devices.values()
+        self.devices
+            .values()
             .find(|d| d.vendor_id == vendor_id && d.product_id == product_id)
     }
 
@@ -303,14 +301,13 @@ impl UsbManager {
 
     // Helper methods
     fn read_sysfs_file(path: &Path) -> Result<String, String> {
-        fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {:?}: {}", path, e))
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {:?}: {}", path, e))
     }
 
     fn classify_device(class_code: u8) -> UsbDeviceClass {
         match class_code {
             0x01 => UsbDeviceClass::Audio,
-            0x02 => UsbDeviceClass::Wireless,  // Communications
+            0x02 => UsbDeviceClass::Wireless, // Communications
             0x03 => UsbDeviceClass::HID,
             0x06 => UsbDeviceClass::Video,
             0x07 => UsbDeviceClass::Printer,
@@ -343,14 +340,18 @@ impl UsbManager {
             "04f2" => "Chicony Electronics",
             "2109" => "VIA Labs",
             _ => "Unknown Vendor",
-        }.to_string()
+        }
+        .to_string()
     }
 
     /// Print device information in human-readable format
     pub fn print_device_info(device: &UsbDevice) {
         println!("USB Device:");
         println!("  Bus:Device    {:#03}:{:#03}", device.bus, device.device);
-        println!("  Vendor:Product  {}:{}", device.vendor_id, device.product_id);
+        println!(
+            "  Vendor:Product  {}:{}",
+            device.vendor_id, device.product_id
+        );
         println!("  Vendor        {}", device.vendor_name);
         println!("  Product       {}", device.product_name);
         println!("  Class         {:?}", device.device_class);
@@ -416,7 +417,7 @@ mod tests {
         assert!(xml.contains("<hostdev"));
         assert!(xml.contains("type='usb'"));
         assert!(xml.contains("vendor id='0x046d'"));
-        assert!(xml.contains("product id='0x0c52b'"));
+        assert!(xml.contains("product id='0xc52b'"));
     }
 
     #[test]

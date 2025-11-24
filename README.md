@@ -89,6 +89,12 @@ nova snapshot vm win11
 nova logs container api
 ``` 
 
+## Documentation & Playbooks
+
+- [`docs/rtx50-series.md`](docs/rtx50-series.md) — RTX 50-series passthrough checklist (driver/kernel requirements, TCC guidance, validation matrix)
+- `COMMANDS.md` → Diagnostics & Support — details on `nova gpu list/info` output and the enriched support bundles (now capture GPU capabilities, metrics, and redacted system snapshots)
+- `nova support bundle --redact` — quickest way to gather logs, metrics, and per-GPU requirements for bug reports
+
 ## Networking Persistence & Recovery
 
 Nova now keeps track of managed switches so they survive daemon or host restarts. Key points:

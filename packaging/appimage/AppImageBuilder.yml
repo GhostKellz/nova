@@ -1,0 +1,50 @@
+version: 1
+AppDir:
+  path: AppDir
+  app_info:
+    id: com.nova.Virtualization
+    name: Nova
+    icon: nova
+    version: 0.1.0
+    exec: usr/bin/nova-gui
+    exec_args: $@
+  runtime:
+    env:
+      NOVA_CONFIG_DIR: $APPDIR/etc/nova
+      NOVA_ASSETS_DIR: $APPDIR/usr/share/nova
+  package:
+    id: com.nova.Virtualization
+    name: Nova
+    version: 0.1.0
+    icon: nova
+  files:
+    include:
+      - usr/bin/nova
+      - usr/bin/nova-gui
+      - usr/share/applications/com.nova.Virtualization.desktop
+      - usr/share/icons/hicolor/*/apps/nova.png
+      - etc/nova/nova.conf
+script:
+  - rm -rf AppDir
+  - mkdir -p AppDir/usr/bin
+  - mkdir -p AppDir/usr/share/applications
+  - mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/128x128/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/64x64/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/32x32/apps
+  - mkdir -p AppDir/etc/nova
+  - cargo fetch --locked
+  - cargo build --release --locked --bins
+  - install -Dm755 target/release/nova AppDir/usr/bin/nova
+  - install -Dm755 target/release/nova-gui AppDir/usr/bin/nova-gui
+  - install -Dm644 packaging/config/nova.conf AppDir/etc/nova/nova.conf
+  - install -Dm644 nova.desktop AppDir/usr/share/applications/com.nova.Virtualization.desktop
+  - install -Dm644 assets/icons/nova-256.png AppDir/usr/share/icons/hicolor/256x256/apps/nova.png
+  - install -Dm644 assets/icons/nova-128.png AppDir/usr/share/icons/hicolor/128x128/apps/nova.png
+  - install -Dm644 assets/icons/nova-64.png AppDir/usr/share/icons/hicolor/64x64/apps/nova.png
+  - install -Dm644 assets/icons/nova-32.png AppDir/usr/share/icons/hicolor/32x32/apps/nova.png
+  - install -Dm755 packaging/appimage/AppRun AppDir/AppRun
+  - desktop-file-edit --set-key=Exec --set-value="nova-gui" AppDir/usr/share/applications/com.nova.Virtualization.desktop
+AppImage:
+  arch: x86_64
+  update-information: 'gh-releases-zsync|ghostkellz|nova|latest|Nova-x86_64.AppImage.zsync'

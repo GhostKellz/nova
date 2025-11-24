@@ -1,0 +1,14 @@
+project = "nova-container-test"
+
+[container.test-alpine]
+capsule = "alpine:latest"
+
+[container.test-nginx]
+capsule = "nginx:alpine"
+
+[container.test-ubuntu]
+capsule = "ubuntu:22.04"
+volumes = ["/tmp/test:/data"]
+
+[container.test-ubuntu.env]
+TEST_VAR = "hello"

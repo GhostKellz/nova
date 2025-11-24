@@ -11,6 +11,7 @@ Nova provides both GUI and CLI interfaces for comprehensive VM management on Arc
 - [Migration](#migration)
 - [Storage](#storage)
 - [System](#system)
+- [Diagnostics & Support](#diagnostics--support)
 
 ## VM Management
 
@@ -464,6 +465,53 @@ nova storage list-volumes pool1
 ```
 
 ## System
+- `nova metrics snapshot` – emit one-shot Prometheus metrics (saved to stdout)
+- `nova metrics serve --port 9100` – run long-lived exporter for Prometheus scraping
+- `nova support diagnostics` – run system checks and print a condensed report
+- `nova support bundle --redact --output ./support` – collect logs, config, metrics, and GPU capabilities into a tarball (redacts IP/MAC addresses)
+
+Generated bundles now add `nova/gpu-capabilities.json`, capturing detected GPU generation, VRAM, minimum driver, kernel recommendations, and TCC support flags — perfect for RTX 50-series troubleshooting.
+
+## Diagnostics & Support
+
+### GPU Insights
+
+```bash
+# Overview table with driver/kernel guidance
+nova gpu list
+
+# Detailed capabilities (generation, VRAM, compute, TCC)
+nova gpu info 0000:01:00.0
+nova gpu info all  # dump every device
+
+# Passthrough readiness report (flags driver/kernel issues, TCC requirement)
+nova gpu doctor
+```
+
+When a Blackwell/RTX 50-series GPU is detected, the CLI surfaces the minimum NVIDIA driver (`560+`), recommended kernel (`6.9+`), and encourages enabling TCC for low-latency Looking Glass workflows. See `docs/rtx50-series.md` for the full playbook.
+
+### Support Tooling
+
+```bash
+# Generate support bundle with optional redaction (default includes metrics, logs, system info)
+nova support bundle --output ./support --redact
+
+# On-demand diagnostics (same engine Nova support uses)
+nova support diagnostics
+
+# Collect only system data and GPU capabilities (skip logs/metrics)
+nova support bundle --no-logs --no-metrics
+```
+
+Support bundles now include:
+- `system/` snapshots of `uname`, kernel modules, `cpuinfo`, `meminfo`
+- `nova/virsh_list.txt`, `nova/docker_ps.txt`
+- `nova/gpu-capabilities.json` capturing per-GPU requirements (driver/kernel/TCC)
+- `nova/observability/prometheus-metrics.txt` when metrics capture is enabled
+- Optional logs (`logs/`) from `journalctl` and `dmesg`
+
+Bundles are written as `nova-support-<timestamp>.tar.gz` in the requested output directory (defaults to `/tmp`).
+
 
 ### Host Management
 
@@ -525,7 +573,7 @@ nova system setup-systemd-networkd
 ### Launch GUI Applications
 
 ```bash
-# Main Nova GUI (automatically optimized for Wayland)
+# Main Nova GUI
 nova gui
 
 # Network manager GUI
@@ -556,40 +604,6 @@ nova notifications --enable
 # KDE integration
 nova kde-integrate
 ```
-
-### Wayland Optimization
-
-Nova automatically detects and optimizes for Wayland-based desktop environments:
-
-```bash
-# Verify Wayland is being used
-echo $XDG_SESSION_TYPE  # Should show: wayland
-
-# Force Wayland backend (if needed)
-export WINIT_UNIX_BACKEND=wayland
-nova gui
-
-# Check desktop environment detection
-nova gui  # Will log detected DE in console output
-```
-
-**Supported Desktop Environments:**
-- **KDE Plasma (Wayland)** - Arch Linux, Fedora, openSUSE
-- **GNOME (Wayland)** - Fedora, Ubuntu 22.04+, Pop!_OS
-- **Cosmic Desktop** - Pop!_OS 24.04+ (beta)
-
-**Automatic Optimizations:**
-- Hardware GPU acceleration (wgpu backend)
-- High DPI / fractional scaling support
-- Native window decorations (KDE server-side, GNOME client-side)
-- Smooth rendering (60 FPS target with compositor sync)
-- Multi-monitor improvements
-- Reduced input latency
-
-**Documentation:**
-- Full Guide: `docs/WAYLAND_INTEGRATION.md`
-- Quick Start: `docs/WAYLAND_QUICKSTART.md`
-- Implementation Details: `docs/WAYLAND_IMPLEMENTATION_SUMMARY.md`
 
 ## Environment Variables
 

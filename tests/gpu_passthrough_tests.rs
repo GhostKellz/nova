@@ -5,7 +5,10 @@ use nova::gpu_passthrough::*;
 #[test]
 fn test_gpu_manager_creation() {
     let manager = GpuManager::new();
-    assert!(manager.list_gpus().is_empty(), "New manager should have no GPUs initially");
+    assert!(
+        manager.list_gpus().is_empty(),
+        "New manager should have no GPUs initially"
+    );
 }
 
 #[test]
@@ -41,12 +44,17 @@ fn test_iommu_group_detection() {
     println!("Found {} IOMMU groups", groups.len());
 
     for group in groups {
-        println!("  Group {}: {} devices, viable={}",
-                 group.id,
-                 group.devices.len(),
-                 group.viable_for_passthrough);
+        println!(
+            "  Group {}: {} devices, viable={}",
+            group.id,
+            group.devices.len(),
+            group.viable_for_passthrough
+        );
 
-        assert!(group.devices.len() > 0, "IOMMU group should have at least one device");
+        assert!(
+            group.devices.len() > 0,
+            "IOMMU group should have at least one device"
+        );
     }
 }
 
@@ -70,8 +78,10 @@ fn test_system_requirements_check() {
     }
 
     // These tests should pass even in CI
-    assert!(status.kernel_modules_loaded || !status.vfio_available,
-            "If VFIO is available, modules should be loaded");
+    assert!(
+        status.kernel_modules_loaded || !status.vfio_available,
+        "If VFIO is available, modules should be loaded"
+    );
 }
 
 #[test]
@@ -86,16 +96,31 @@ fn test_gpu_doctor_diagnostics() {
     println!("Errors: {}", report.errors.len());
 
     // Verify all checks ran
-    assert!(!report.checks.is_empty(), "Diagnostic checks should not be empty");
+    assert!(
+        !report.checks.is_empty(),
+        "Diagnostic checks should not be empty"
+    );
 
     // Check for expected diagnostics
     let check_names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
 
     assert!(check_names.contains(&"IOMMU"), "Should check IOMMU");
-    assert!(check_names.contains(&"Virtualization"), "Should check virtualization");
-    assert!(check_names.contains(&"VFIO Modules"), "Should check VFIO modules");
-    assert!(check_names.contains(&"NVIDIA Driver"), "Should check NVIDIA driver");
-    assert!(check_names.contains(&"GPU Detection"), "Should check GPU detection");
+    assert!(
+        check_names.contains(&"Virtualization"),
+        "Should check virtualization"
+    );
+    assert!(
+        check_names.contains(&"VFIO Modules"),
+        "Should check VFIO modules"
+    );
+    assert!(
+        check_names.contains(&"NVIDIA Driver"),
+        "Should check NVIDIA driver"
+    );
+    assert!(
+        check_names.contains(&"GPU Detection"),
+        "Should check GPU detection"
+    );
 }
 
 #[test]
@@ -120,28 +145,34 @@ fn test_vfio_config_detection() {
 
     // Basic assertions
     if config.vfio_enabled {
-        assert!(!config.kernel_modules.is_empty(),
-                "If VFIO is enabled, kernel modules list should not be empty");
+        assert!(
+            !config.kernel_modules.is_empty(),
+            "If VFIO is enabled, kernel modules list should not be empty"
+        );
     }
 
     if config.iommu_mode.is_some() {
-        assert!(config.iommu_enabled,
-                "If IOMMU mode is detected, IOMMU should be enabled");
+        assert!(
+            config.iommu_enabled,
+            "If IOMMU mode is detected, IOMMU should be enabled"
+        );
     }
 }
 
 #[test]
 fn test_pci_address_validation() {
     // Test PCI address format
-    let valid_addresses = vec![
-        "0000:01:00.0",
-        "0000:02:00.0",
-        "0000:0a:00.0",
-    ];
+    let valid_addresses = vec!["0000:01:00.0", "0000:02:00.0", "0000:0a:00.0"];
 
     for addr in valid_addresses {
-        assert!(addr.matches(':').count() == 2, "PCI address should have 2 colons");
-        assert!(addr.matches('.').count() == 1, "PCI address should have 1 dot");
+        assert!(
+            addr.matches(':').count() == 2,
+            "PCI address should have 2 colons"
+        );
+        assert!(
+            addr.matches('.').count() == 1,
+            "PCI address should have 1 dot"
+        );
         assert!(addr.len() >= 12, "PCI address should be at least 12 chars");
     }
 }
@@ -161,8 +192,10 @@ fn test_iommu_group_viability() {
             }
 
             // Viable groups should have devices
-            assert!(!group.devices.is_empty(),
-                    "Viable IOMMU group should have devices");
+            assert!(
+                !group.devices.is_empty(),
+                "Viable IOMMU group should have devices"
+            );
         }
     }
 }
@@ -178,7 +211,10 @@ fn test_gpu_reservation_management() {
     assert_eq!(initial_reservations, 0, "Should start with no reservations");
 
     // Note: We can't actually reserve GPUs in CI, but we test the API exists
-    assert!(manager.get_reservations().is_empty(), "Initial reservations should be empty");
+    assert!(
+        manager.get_reservations().is_empty(),
+        "Initial reservations should be empty"
+    );
 }
 
 #[test]
@@ -203,7 +239,10 @@ fn test_libvirt_xml_generation() {
             println!("{}", xml);
 
             // Verify XML contains expected elements
-            assert!(xml.contains("<hostdev"), "XML should contain hostdev element");
+            assert!(
+                xml.contains("<hostdev"),
+                "XML should contain hostdev element"
+            );
             assert!(xml.contains("type='pci'"), "XML should specify PCI type");
             assert!(xml.contains("managed='yes'"), "XML should have managed=yes");
             assert!(xml.contains("domain='0x0000'"), "XML should contain domain");

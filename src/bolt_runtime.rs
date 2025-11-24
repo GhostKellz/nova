@@ -6,7 +6,6 @@
 
 use crate::container_runtime::*;
 use crate::{log_debug, log_error, log_info};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
@@ -26,7 +25,10 @@ impl BoltRuntime {
         };
 
         if available {
-            log_info!("Bolt runtime initialized (version: {})", version.as_deref().unwrap_or("unknown"));
+            log_info!(
+                "Bolt runtime initialized (version: {})",
+                version.as_deref().unwrap_or("unknown")
+            );
         } else {
             log_debug!("Bolt runtime not available");
         }
@@ -49,7 +51,9 @@ impl BoltRuntime {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
                 } else {
                     None
                 }
@@ -155,7 +159,7 @@ impl BoltRuntime {
             image: parts.get(2).unwrap_or(&"").to_string(),
             status,
             created: chrono::Utc::now(), // Bolt doesn't provide this in ps
-            ports: Vec::new(),             // Would need to parse port info
+            ports: Vec::new(),           // Would need to parse port info
             network: None,
             pid: None,
             ip_address: None,
@@ -182,7 +186,6 @@ impl BoltRuntime {
     }
 }
 
-#[async_trait]
 impl ContainerRuntime for BoltRuntime {
     fn is_available(&self) -> bool {
         self.available
@@ -192,206 +195,239 @@ impl ContainerRuntime for BoltRuntime {
         "Bolt"
     }
 
-    async fn version(&self) -> Result<String> {
-        self.version.clone().ok_or_else(|| {
-            ContainerRuntimeError::RuntimeNotAvailable("Bolt version unknown".to_string())
+    fn version<'a>(&'a self) -> RuntimeFuture<'a, String> {
+        Box::pin(async move {
+            self.version.clone().ok_or_else(|| {
+                ContainerRuntimeError::RuntimeNotAvailable("Bolt version unknown".to_string())
+            })
         })
     }
 
-    async fn run_container(
-        &self,
-        image: &str,
-        name: Option<&str>,
-        config: &ContainerConfig,
-    ) -> Result<String> {
-        if !self.available {
-            return Err(ContainerRuntimeError::RuntimeNotAvailable(
-                "Bolt is not installed".to_string(),
-            ));
-        }
+    fn run_container<'a>(
+        &'a self,
+        image: &'a str,
+        name: Option<&'a str>,
+        config: &'a ContainerConfig,
+    ) -> RuntimeFuture<'a, String> {
+        Box::pin(async move {
+            if !self.available {
+                return Err(ContainerRuntimeError::RuntimeNotAvailable(
+                    "Bolt is not installed".to_string(),
+                ));
+            }
 
-        log_info!("Starting Bolt container: {} from image {}", name.unwrap_or("<unnamed>"), image);
+            log_info!(
+                "Starting Bolt container: {} from image {}",
+                name.unwrap_or("<unnamed>"),
+                image
+            );
 
-        // Build command arguments
-        let mut bolt_config = config.clone();
-        bolt_config.capsule = image.to_string();
-        let args = self.build_bolt_args(name, &bolt_config);
+            // Build command arguments
+            let mut bolt_config = config.clone();
+            bolt_config.capsule = image.to_string();
+            let args = self.build_bolt_args(name, &bolt_config);
 
-        // Execute bolt run command
-        let output = Command::new("bolt")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::StartFailed(format!("Failed to execute bolt: {}", e)))?;
+            // Execute bolt run command
+            let output = Command::new("bolt").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::StartFailed(format!("Failed to execute bolt: {}", e))
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log_error!("Bolt run failed: {}", stderr);
-            return Err(ContainerRuntimeError::StartFailed(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log_error!("Bolt run failed: {}", stderr);
+                return Err(ContainerRuntimeError::StartFailed(stderr.to_string()));
+            }
 
-        // Get container ID/name from output
-        let container_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+            // Get container ID/name from output
+            let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        log_info!("Bolt container started: {}", container_id);
-        Ok(container_id)
-    }
-
-    async fn stop_container(&self, id_or_name: &str) -> Result<()> {
-        log_info!("Stopping Bolt container: {}", id_or_name);
-
-        let output = Command::new("bolt")
-            .args(&["stop", id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::StopFailed(format!("Failed to execute bolt stop: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::StopFailed(stderr.to_string()));
-        }
-
-        Ok(())
-    }
-
-    async fn remove_container(&self, id_or_name: &str, force: bool) -> Result<()> {
-        log_info!("Removing Bolt container: {}", id_or_name);
-
-        let mut args = vec!["rm"];
-        if force {
-            args.push("-f");
-        }
-        args.push(id_or_name);
-
-        let output = Command::new("bolt")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt rm: {}", e)))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::Other(stderr.to_string()));
-        }
-
-        Ok(())
-    }
-
-    async fn list_containers(&self, all: bool) -> Result<Vec<ContainerInfo>> {
-        let mut args = vec!["ps"];
-        if all {
-            args.push("-a");
-        }
-
-        let output = Command::new("bolt")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt ps: {}", e)))?;
-
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let containers: Vec<ContainerInfo> = stdout
-            .lines()
-            .skip(1) // Skip header
-            .filter_map(|line| self.parse_bolt_ps_line(line))
-            .collect();
-
-        Ok(containers)
-    }
-
-    async fn inspect_container(&self, id_or_name: &str) -> Result<ContainerInfo> {
-        let output = Command::new("bolt")
-            .args(&["inspect", id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt inspect: {}", e)))?;
-
-        if !output.status.success() {
-            return Err(ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()));
-        }
-
-        // Parse JSON output from bolt inspect
-        let json_str = String::from_utf8_lossy(&output.stdout);
-        let inspect_data: BoltInspectData = serde_json::from_str(&json_str)?;
-
-        Ok(ContainerInfo {
-            id: inspect_data.id,
-            name: inspect_data.name,
-            image: inspect_data.image,
-            status: Self::parse_status(&inspect_data.status),
-            created: inspect_data.created.unwrap_or_else(chrono::Utc::now),
-            ports: Vec::new(),
-            network: inspect_data.network,
-            pid: inspect_data.pid,
-            ip_address: inspect_data.ip_address,
+            log_info!("Bolt container started: {}", container_id);
+            Ok(container_id)
         })
     }
 
-    async fn pull_image(&self, image: &str) -> Result<()> {
-        log_info!("Pulling Bolt image: {}", image);
+    fn stop_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Stopping Bolt container: {}", id_or_name);
 
-        let output = Command::new("bolt")
-            .args(&["pull", image])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt pull: {}", e)))?;
+            let output = Command::new("bolt")
+                .args(&["stop", id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::StopFailed(format!("Failed to execute bolt stop: {}", e))
+                })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::Other(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::StopFailed(stderr.to_string()));
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
-        let output = Command::new("bolt")
-            .args(&["images"])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt images: {}", e)))?;
+    fn remove_container<'a>(&'a self, id_or_name: &'a str, force: bool) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Removing Bolt container: {}", id_or_name);
 
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
+            let mut args = vec!["rm"];
+            if force {
+                args.push("-f");
+            }
+            args.push(id_or_name);
 
-        // Parse output
-        // This would need proper parsing of bolt images output
-        Ok(Vec::new())
+            let output = Command::new("bolt").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::Other(format!("Failed to execute bolt rm: {}", e))
+            })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::Other(stderr.to_string()));
+            }
+
+            Ok(())
+        })
     }
 
-    async fn get_logs(&self, id_or_name: &str, lines: usize) -> Result<Vec<String>> {
-        let output = Command::new("bolt")
-            .args(&["logs", "--tail", &lines.to_string(), id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt logs: {}", e)))?;
+    fn list_containers<'a>(&'a self, all: bool) -> RuntimeFuture<'a, Vec<ContainerInfo>> {
+        Box::pin(async move {
+            let mut args = vec!["ps"];
+            if all {
+                args.push("-a");
+            }
 
-        if !output.status.success() {
-            return Err(ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()));
-        }
+            let output = Command::new("bolt").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::Other(format!("Failed to execute bolt ps: {}", e))
+            })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.lines().map(|s| s.to_string()).collect())
+            if !output.status.success() {
+                return Ok(Vec::new());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let containers: Vec<ContainerInfo> = stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| self.parse_bolt_ps_line(line))
+                .collect();
+
+            Ok(containers)
+        })
     }
 
-    async fn get_stats(&self, id_or_name: &str) -> Result<ContainerStats> {
-        let output = Command::new("bolt")
-            .args(&["stats", "--no-stream", id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute bolt stats: {}", e)))?;
+    fn inspect_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerInfo> {
+        Box::pin(async move {
+            let output = Command::new("bolt")
+                .args(&["inspect", id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute bolt inspect: {}", e))
+                })?;
 
-        if !output.status.success() {
-            return Err(ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()));
-        }
+            if !output.status.success() {
+                return Err(ContainerRuntimeError::ContainerNotFound(
+                    id_or_name.to_string(),
+                ));
+            }
 
-        // Parse stats - this would need proper parsing of bolt stats output
-        Ok(ContainerStats {
-            cpu_usage_percent: 0.0,
-            memory_usage_mb: 0,
-            memory_limit_mb: 0,
-            network_rx_bytes: 0,
-            network_tx_bytes: 0,
-            disk_read_bytes: 0,
-            disk_write_bytes: 0,
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            let inspect_data: BoltInspectData = serde_json::from_str(&json_str)?;
+
+            Ok(ContainerInfo {
+                id: inspect_data.id,
+                name: inspect_data.name,
+                image: inspect_data.image,
+                status: Self::parse_status(&inspect_data.status),
+                created: inspect_data.created.unwrap_or_else(chrono::Utc::now),
+                ports: Vec::new(),
+                network: inspect_data.network,
+                pid: inspect_data.pid,
+                ip_address: inspect_data.ip_address,
+            })
+        })
+    }
+
+    fn pull_image<'a>(&'a self, image: &'a str) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Pulling Bolt image: {}", image);
+
+            let output = Command::new("bolt")
+                .args(&["pull", image])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute bolt pull: {}", e))
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::Other(stderr.to_string()));
+            }
+
+            Ok(())
+        })
+    }
+
+    fn list_images<'a>(&'a self) -> RuntimeFuture<'a, Vec<ImageInfo>> {
+        Box::pin(async move {
+            let output = Command::new("bolt")
+                .args(&["images"])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute bolt images: {}", e))
+                })?;
+
+            if !output.status.success() {
+                return Ok(Vec::new());
+            }
+
+            Ok(Vec::new())
+        })
+    }
+
+    fn get_logs<'a>(&'a self, id_or_name: &'a str, lines: usize) -> RuntimeFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let output = Command::new("bolt")
+                .args(&["logs", "--tail", &lines.to_string(), id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute bolt logs: {}", e))
+                })?;
+
+            if !output.status.success() {
+                return Err(ContainerRuntimeError::ContainerNotFound(
+                    id_or_name.to_string(),
+                ));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(stdout.lines().map(|s| s.to_string()).collect())
+        })
+    }
+
+    fn get_stats<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerStats> {
+        Box::pin(async move {
+            let output = Command::new("bolt")
+                .args(&["stats", "--no-stream", id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute bolt stats: {}", e))
+                })?;
+
+            if !output.status.success() {
+                return Err(ContainerRuntimeError::ContainerNotFound(
+                    id_or_name.to_string(),
+                ));
+            }
+
+            Ok(ContainerStats {
+                cpu_usage_percent: 0.0,
+                memory_usage_mb: 0,
+                memory_limit_mb: 0,
+                network_rx_bytes: 0,
+                network_tx_bytes: 0,
+                disk_read_bytes: 0,
+                disk_write_bytes: 0,
+            })
         })
     }
 }

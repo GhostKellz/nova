@@ -16,8 +16,8 @@ pub struct SpiceConfig {
     // Graphics features
     pub monitors: u32,
     pub opengl: bool,
-    pub qxl_vram_mb: u32,      // QXL video RAM (MB)
-    pub qxl_ram_mb: u32,       // QXL RAM (MB)
+    pub qxl_vram_mb: u32, // QXL video RAM (MB)
+    pub qxl_ram_mb: u32,  // QXL RAM (MB)
 
     // I/O features
     pub audio: bool,
@@ -146,7 +146,9 @@ impl SpiceManager {
 
     /// Generate libvirt XML for SPICE graphics
     pub fn generate_graphics_xml(&self, vm_name: &str) -> Result<String, String> {
-        let config = self.configs.get(vm_name)
+        let config = self
+            .configs
+            .get(vm_name)
             .ok_or_else(|| format!("No SPICE config for VM '{}'", vm_name))?;
 
         if !config.enabled {
@@ -176,7 +178,10 @@ impl SpiceManager {
         xml.push_str(">\n");
 
         // Listen element
-        xml.push_str(&format!("    <listen type='address' address='{}'/>\n", config.listen_address));
+        xml.push_str(&format!(
+            "    <listen type='address' address='{}'/>\n",
+            config.listen_address
+        ));
 
         // Image compression
         let compression_str = match config.image_compression {
@@ -216,12 +221,20 @@ impl SpiceManager {
         xml.push_str(&format!("    <streaming mode='{}'/>\n", streaming_str));
 
         // Clipboard sharing
-        xml.push_str(&format!("    <clipboard copypaste='{}'/>\n",
-            if config.clipboard_sharing { "yes" } else { "no" }));
+        xml.push_str(&format!(
+            "    <clipboard copypaste='{}'/>\n",
+            if config.clipboard_sharing {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
 
         // File transfer
-        xml.push_str(&format!("    <filetransfer enable='{}'/>\n",
-            if config.file_transfer { "yes" } else { "no" }));
+        xml.push_str(&format!(
+            "    <filetransfer enable='{}'/>\n",
+            if config.file_transfer { "yes" } else { "no" }
+        ));
 
         // OpenGL
         if config.opengl {
@@ -250,7 +263,10 @@ impl SpiceManager {
         if config.usb_redirection {
             for i in 0..config.usb_redirector_count {
                 xml.push_str(&format!("  <redirdev bus='usb' type='spicevmc'>\n"));
-                xml.push_str(&format!("    <address type='usb' bus='0' port='{}'/>\n", i + 1));
+                xml.push_str(&format!(
+                    "    <address type='usb' bus='0' port='{}'/>\n",
+                    i + 1
+                ));
                 xml.push_str("  </redirdev>\n");
             }
 
@@ -272,8 +288,7 @@ impl SpiceManager {
 
         // Write XML to temp file
         let temp_file = format!("/tmp/spice-{}.xml", vm_name);
-        std::fs::write(&temp_file, xml)
-            .map_err(|e| format!("Failed to write XML: {}", e))?;
+        std::fs::write(&temp_file, xml).map_err(|e| format!("Failed to write XML: {}", e))?;
 
         // Update VM definition
         let output = Command::new("virsh")
@@ -282,8 +297,10 @@ impl SpiceManager {
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("virsh define failed: {}",
-                String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "virsh define failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         // Clean up temp file
@@ -293,7 +310,10 @@ impl SpiceManager {
     }
 
     /// Get SPICE connection info for a running VM
-    pub async fn get_connection_info(&mut self, vm_name: &str) -> Result<SpiceConnectionInfo, String> {
+    pub async fn get_connection_info(
+        &mut self,
+        vm_name: &str,
+    ) -> Result<SpiceConnectionInfo, String> {
         // Get SPICE port from virsh
         let output = Command::new("virsh")
             .args(&["domdisplay", "--type", "spice", vm_name])
@@ -301,8 +321,10 @@ impl SpiceManager {
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("Failed to get SPICE info: {}",
-                String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "Failed to get SPICE info: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         let uri = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -320,7 +342,8 @@ impl SpiceManager {
         let host_port: Vec<&str> = parts[1].split(':').collect();
         let host = host_port[0].to_string();
         let port = if host_port.len() > 1 {
-            host_port[1].parse::<u16>()
+            host_port[1]
+                .parse::<u16>()
                 .map_err(|_| format!("Invalid port in URI: {}", uri))?
         } else {
             5900
@@ -337,14 +360,17 @@ impl SpiceManager {
             uri,
         };
 
-        self.active_connections.insert(vm_name.to_string(), info.clone());
+        self.active_connections
+            .insert(vm_name.to_string(), info.clone());
 
         Ok(info)
     }
 
     /// Launch SPICE client (remote-viewer)
     pub async fn launch_client(&self, vm_name: &str) -> Result<(), String> {
-        let info = self.active_connections.get(vm_name)
+        let info = self
+            .active_connections
+            .get(vm_name)
             .ok_or_else(|| format!("No active SPICE connection for VM '{}'", vm_name))?;
 
         // Check if remote-viewer is installed
@@ -413,8 +439,10 @@ impl SpiceManager {
             .map_err(|e| format!("Failed to install virt-viewer: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("Installation failed: {}",
-                String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "Installation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         Ok(())
@@ -426,7 +454,10 @@ impl SpiceManager {
 
         // Check for remote-viewer
         if !self.is_client_installed() {
-            issues.push("SPICE client (remote-viewer) not installed. Install: sudo pacman -S virt-viewer".to_string());
+            issues.push(
+                "SPICE client (remote-viewer) not installed. Install: sudo pacman -S virt-viewer"
+                    .to_string(),
+            );
         }
 
         // Check for spice-vdagent (guest agent)
@@ -437,7 +468,10 @@ impl SpiceManager {
             .unwrap_or(false);
 
         if !agent_check {
-            issues.push("Note: Install spice-vdagent in guest for clipboard/resolution features".to_string());
+            issues.push(
+                "Note: Install spice-vdagent in guest for clipboard/resolution features"
+                    .to_string(),
+            );
         }
 
         // Check for QXL driver availability
@@ -448,7 +482,10 @@ impl SpiceManager {
             .unwrap_or(false);
 
         if !qxl_check {
-            issues.push("Warning: QXL kernel module not available (may reduce graphics performance)".to_string());
+            issues.push(
+                "Warning: QXL kernel module not available (may reduce graphics performance)"
+                    .to_string(),
+            );
         }
 
         issues
@@ -459,7 +496,9 @@ impl SpiceManager {
         // This would normally query libvirt for SPICE channel statistics
         // For now, return basic stats
 
-        let _info = self.active_connections.get(vm_name)
+        let _info = self
+            .active_connections
+            .get(vm_name)
             .ok_or_else(|| format!("No active SPICE connection for VM '{}'", vm_name))?;
 
         Ok(SpiceStats {
@@ -472,8 +511,15 @@ impl SpiceManager {
     }
 
     /// Enable/disable SPICE features dynamically
-    pub async fn set_feature(&mut self, vm_name: &str, feature: SpiceFeature, enabled: bool) -> Result<(), String> {
-        let config = self.configs.get_mut(vm_name)
+    pub async fn set_feature(
+        &mut self,
+        vm_name: &str,
+        feature: SpiceFeature,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let config = self
+            .configs
+            .get_mut(vm_name)
             .ok_or_else(|| format!("No SPICE config for VM '{}'", vm_name))?;
 
         match feature {
@@ -494,7 +540,9 @@ impl SpiceManager {
             return Err("Monitor count must be between 1 and 16".to_string());
         }
 
-        let config = self.configs.get_mut(vm_name)
+        let config = self
+            .configs
+            .get_mut(vm_name)
             .ok_or_else(|| format!("No SPICE config for VM '{}'", vm_name))?;
 
         config.monitors = count;
@@ -514,7 +562,8 @@ impl SpiceManager {
 
     /// List all VMs with SPICE enabled
     pub fn list_spice_vms(&self) -> Vec<String> {
-        self.configs.iter()
+        self.configs
+            .iter()
             .filter(|(_, config)| config.enabled)
             .map(|(name, _)| name.clone())
             .collect()

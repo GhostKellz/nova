@@ -42,7 +42,8 @@ ls /tmp/nova-bundle
 Key directories:
 
 - `logs/` – Nova, exporter, libvirt, container runtimes.
-- `metrics/` – Snapshot of high-value gauges and counters.
+- `nova/` – Nova configuration snapshot plus `nova/gpu-capabilities.json` with per-GPU generation, minimum driver, kernel, and TCC requirements.
+- `nova/observability/` – Snapshot of high-value gauges and counters when `--include metrics` is used.
 - `network/` – Output of `nova network status`, bridge memberships, interface stats.
 - `metadata.json` – Manifest with Nova version, collectors, checksum, timestamp.
 

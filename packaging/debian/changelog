@@ -1,0 +1,5 @@
+nova-virtualization (0.1.0-1) unstable; urgency=medium
+
+  * Automated snapshot of the Nova source tree for packaging automation.
+
+ -- Nova Packaging Team <packaging@nova.example.com>  Mon, 06 Jan 2025 12:00:00 +0000

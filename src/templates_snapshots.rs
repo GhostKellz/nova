@@ -454,20 +454,14 @@ impl TemplateManager {
     }
 
     /// Revert VM to a specific snapshot
-    pub async fn revert_to_snapshot(
-        &mut self,
-        vm_name: &str,
-        snapshot_name: &str,
-    ) -> Result<()> {
+    pub async fn revert_to_snapshot(&mut self, vm_name: &str, snapshot_name: &str) -> Result<()> {
         log_info!("Reverting VM '{}' to snapshot '{}'", vm_name, snapshot_name);
 
         // Find snapshot by name
         let _snapshot = self
             .snapshots
             .get(vm_name)
-            .and_then(|snapshots| {
-                snapshots.values().find(|s| s.name == snapshot_name)
-            })
+            .and_then(|snapshots| snapshots.values().find(|s| s.name == snapshot_name))
             .ok_or_else(|| NovaError::SnapshotNotFound(snapshot_name.to_string()))?;
 
         // Stop VM if running
@@ -476,9 +470,7 @@ impl TemplateManager {
 
         if was_running {
             log_info!("Stopping VM before snapshot revert");
-            let output = Command::new("virsh")
-                .args(&["destroy", vm_name])
-                .output()?;
+            let output = Command::new("virsh").args(&["destroy", vm_name]).output()?;
 
             if !output.status.success() {
                 log_error!("Failed to stop VM");
@@ -508,9 +500,7 @@ impl TemplateManager {
         // Restart VM if it was running
         if was_running {
             log_info!("Restarting VM after snapshot revert");
-            let output = Command::new("virsh")
-                .args(&["start", vm_name])
-                .output()?;
+            let output = Command::new("virsh").args(&["start", vm_name]).output()?;
 
             if !output.status.success() {
                 log_error!("Failed to restart VM");
@@ -535,12 +525,13 @@ impl TemplateManager {
             let snapshot = self
                 .snapshots
                 .get(vm_name)
-                .and_then(|snapshots| {
-                    snapshots.values().find(|s| s.name == snapshot_name)
-                })
+                .and_then(|snapshots| snapshots.values().find(|s| s.name == snapshot_name))
                 .ok_or_else(|| NovaError::SnapshotNotFound(snapshot_name.to_string()))?;
 
-            (!snapshot.children.is_empty(), snapshot.parent_snapshot.clone())
+            (
+                !snapshot.children.is_empty(),
+                snapshot.parent_snapshot.clone(),
+            )
         };
 
         // Check for children
@@ -644,8 +635,10 @@ impl TemplateManager {
         // Create clone using virt-clone
         let output = Command::new("virt-clone")
             .args(&[
-                "--original", source_vm,
-                "--name", new_vm_name,
+                "--original",
+                source_vm,
+                "--name",
+                new_vm_name,
                 "--auto-clone",
             ])
             .output()?;
@@ -670,11 +663,7 @@ impl TemplateManager {
         new_vm_name: &str,
         clone_disks: bool,
     ) -> Result<()> {
-        log_info!(
-            "Cloning VM '{}' to new VM '{}'",
-            source_vm,
-            new_vm_name
-        );
+        log_info!("Cloning VM '{}' to new VM '{}'", source_vm, new_vm_name);
 
         // Ensure source VM is shut down
         self.ensure_vm_shutdown(source_vm).await?;
@@ -737,11 +726,7 @@ impl TemplateManager {
     }
 
     /// Create linked clone (uses backing store)
-    pub async fn create_linked_clone(
-        &mut self,
-        source_vm: &str,
-        new_vm_name: &str,
-    ) -> Result<()> {
+    pub async fn create_linked_clone(&mut self, source_vm: &str, new_vm_name: &str) -> Result<()> {
         log_info!(
             "Creating linked clone of VM '{}' as '{}'",
             source_vm,
@@ -752,10 +737,7 @@ impl TemplateManager {
         let source_disk = self.get_vm_disk_path(source_vm).await?;
 
         // Create qcow2 image with backing file
-        let new_disk = PathBuf::from(format!(
-            "/var/lib/libvirt/images/{}.qcow2",
-            new_vm_name
-        ));
+        let new_disk = PathBuf::from(format!("/var/lib/libvirt/images/{}.qcow2", new_vm_name));
 
         let output = Command::new("qemu-img")
             .args(&[

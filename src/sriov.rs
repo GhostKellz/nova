@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SriovDevice {
-    pub pf_address: String,          // Physical Function address (e.g., "0000:01:00.0")
+    pub pf_address: String, // Physical Function address (e.g., "0000:01:00.0")
     pub device_type: DeviceType,
     pub vendor_id: String,
     pub device_id: String,
     pub vendor_name: String,
     pub device_name: String,
-    pub max_vfs: u32,                // Maximum number of Virtual Functions
-    pub current_vfs: u32,            // Currently active VFs
+    pub max_vfs: u32,     // Maximum number of Virtual Functions
+    pub current_vfs: u32, // Currently active VFs
     pub vf_list: Vec<VirtualFunction>,
     pub driver: Option<String>,
     pub sriov_capable: bool,
@@ -34,7 +34,7 @@ pub enum DeviceType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualFunction {
     pub vf_index: u32,
-    pub vf_address: String,          // e.g., "0000:01:00.1"
+    pub vf_address: String, // e.g., "0000:01:00.1"
     pub assigned_to_vm: Option<String>,
     pub driver: Option<String>,
     pub mac_address: Option<String>, // For network VFs
@@ -65,7 +65,8 @@ impl SriovManager {
         }
 
         for entry in fs::read_dir(pci_devices_path)
-            .map_err(|e| format!("Failed to read PCI devices: {}", e))? {
+            .map_err(|e| format!("Failed to read PCI devices: {}", e))?
+        {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let device_path = entry.path();
             let address = entry.file_name().to_string_lossy().to_string();
@@ -77,7 +78,8 @@ impl SriovManager {
                     if let Ok(max_vfs) = max_vfs_str.trim().parse::<u32>() {
                         if max_vfs > 0 {
                             // This device supports SR-IOV
-                            let device = self.parse_sriov_device(&device_path, &address, max_vfs)?;
+                            let device =
+                                self.parse_sriov_device(&device_path, &address, max_vfs)?;
                             devices.push(device.clone());
                             self.devices.insert(address.clone(), device);
                         }
@@ -91,8 +93,12 @@ impl SriovManager {
     }
 
     /// Parse SR-IOV device information
-    fn parse_sriov_device(&self, device_path: &Path, address: &str, max_vfs: u32)
-        -> Result<SriovDevice, String> {
+    fn parse_sriov_device(
+        &self,
+        device_path: &Path,
+        address: &str,
+        max_vfs: u32,
+    ) -> Result<SriovDevice, String> {
         // Read vendor and device IDs
         let vendor_id = Self::read_sysfs_file(&device_path.join("vendor"))?
             .trim()
@@ -147,14 +153,17 @@ impl SriovManager {
     }
 
     /// Enable SR-IOV and create Virtual Functions
-    pub fn enable_sriov(&mut self, pf_address: &str, num_vfs: u32)
-        -> Result<(), String> {
-        let device = self.devices.get(pf_address)
+    pub fn enable_sriov(&mut self, pf_address: &str, num_vfs: u32) -> Result<(), String> {
+        let device = self
+            .devices
+            .get(pf_address)
             .ok_or_else(|| format!("Device {} not found", pf_address))?;
 
         if num_vfs > device.max_vfs {
-            return Err(format!("Requested {} VFs but device only supports {}",
-                              num_vfs, device.max_vfs));
+            return Err(format!(
+                "Requested {} VFs but device only supports {}",
+                num_vfs, device.max_vfs
+            ));
         }
 
         println!("Enabling SR-IOV on {} with {} VFs", pf_address, num_vfs);
@@ -186,8 +195,7 @@ impl SriovManager {
 
         let sysfs_path = format!("/sys/bus/pci/devices/{}/sriov_numvfs", pf_address);
 
-        fs::write(&sysfs_path, "0")
-            .map_err(|e| format!("Failed to disable VFs: {}", e))?;
+        fs::write(&sysfs_path, "0").map_err(|e| format!("Failed to disable VFs: {}", e))?;
 
         // Update device state
         if let Some(device) = self.devices.get_mut(pf_address) {
@@ -201,21 +209,26 @@ impl SriovManager {
     }
 
     /// Enumerate Virtual Functions
-    fn enumerate_virtual_functions(&self, pf_path: &Path, num_vfs: u32)
-        -> Result<Vec<VirtualFunction>, String> {
+    fn enumerate_virtual_functions(
+        &self,
+        pf_path: &Path,
+        num_vfs: u32,
+    ) -> Result<Vec<VirtualFunction>, String> {
         let mut vfs = Vec::new();
 
         for vf_index in 0..num_vfs {
             let virtfn_link = pf_path.join(format!("virtfn{}", vf_index));
 
             if let Ok(vf_path) = virtfn_link.read_link() {
-                let vf_address = vf_path.file_name()
+                let vf_address = vf_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_string())
                     .unwrap_or_default();
 
                 // Read VF driver
-                let driver = pf_path.join(format!("virtfn{}/driver", vf_index))
+                let driver = pf_path
+                    .join(format!("virtfn{}/driver", vf_index))
                     .read_link()
                     .ok()
                     .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()));
@@ -237,14 +250,22 @@ impl SriovManager {
     }
 
     /// Assign VF to a VM
-    pub fn assign_vf_to_vm(&mut self, pf_address: &str, vf_index: u32, vm_name: &str)
-        -> Result<String, String> {
+    pub fn assign_vf_to_vm(
+        &mut self,
+        pf_address: &str,
+        vf_index: u32,
+        vm_name: &str,
+    ) -> Result<String, String> {
         // Get VF address first
         let vf_address = {
-            let device = self.devices.get(pf_address)
+            let device = self
+                .devices
+                .get(pf_address)
                 .ok_or_else(|| format!("Device {} not found", pf_address))?;
 
-            let vf = device.vf_list.iter()
+            let vf = device
+                .vf_list
+                .iter()
                 .find(|vf| vf.vf_index == vf_index)
                 .ok_or_else(|| format!("VF {} not found", vf_index))?;
 
@@ -260,12 +281,15 @@ impl SriovManager {
 
         // Now update VF state
         let device = self.devices.get_mut(pf_address).unwrap();
-        let vf = device.vf_list.iter_mut()
+        let vf = device
+            .vf_list
+            .iter_mut()
             .find(|vf| vf.vf_index == vf_index)
             .unwrap();
 
         vf.assigned_to_vm = Some(vm_name.to_string());
-        self.vf_assignments.insert(vf_address.clone(), vm_name.to_string());
+        self.vf_assignments
+            .insert(vf_address.clone(), vm_name.to_string());
 
         println!("✅ VF {} assigned to VM '{}'", vf_address, vm_name);
         Ok(vf_address)
@@ -275,7 +299,11 @@ impl SriovManager {
     pub fn release_vf(&mut self, vf_address: &str) -> Result<(), String> {
         // Find the VF in our devices
         for device in self.devices.values_mut() {
-            if let Some(vf) = device.vf_list.iter_mut().find(|vf| vf.vf_address == vf_address) {
+            if let Some(vf) = device
+                .vf_list
+                .iter_mut()
+                .find(|vf| vf.vf_address == vf_address)
+            {
                 vf.assigned_to_vm = None;
                 self.vf_assignments.remove(vf_address);
 
@@ -335,13 +363,16 @@ impl SriovManager {
         let slot = parts.get(2).unwrap_or(&"00");
         let function = parts.get(3).unwrap_or(&"0");
 
-        format!(r#"
+        format!(
+            r#"
     <hostdev mode='subsystem' type='pci' managed='yes'>
       <source>
         <address domain='0x{}' bus='0x{}' slot='0x{}' function='0x{}'/>
       </source>
     </hostdev>
-"#, domain, bus, slot, function)
+"#,
+            domain, bus, slot, function
+        )
     }
 
     /// Refresh device state
@@ -376,8 +407,7 @@ impl SriovManager {
 
     // Helper methods
     fn read_sysfs_file(path: &Path) -> Result<String, String> {
-        fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {:?}: {}", path, e))
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {:?}: {}", path, e))
     }
 
     fn read_vf_mac_address(_pf_path: &Path, _vf_index: u32) -> Option<String> {
@@ -388,10 +418,10 @@ impl SriovManager {
 
     fn determine_device_type(vendor_id: &str, device_id: &str) -> DeviceType {
         match vendor_id {
-            "10de" => DeviceType::GPU,              // NVIDIA
-            "1002" => DeviceType::GPU,              // AMD
+            "10de" => DeviceType::GPU,                                        // NVIDIA
+            "1002" => DeviceType::GPU,                                        // AMD
             "8086" if device_id.starts_with("15") => DeviceType::NetworkCard, // Intel NICs
-            "14e4" => DeviceType::NetworkCard,      // Broadcom
+            "14e4" => DeviceType::NetworkCard,                                // Broadcom
             _ => DeviceType::Other,
         }
     }
@@ -410,7 +440,9 @@ impl SriovManager {
     fn lookup_device_name(vendor_id: &str, device_id: &str) -> String {
         // Simplified lookup - in production, use pci.ids database
         match (vendor_id, &device_id[0..2]) {
-            ("10de", "20" | "21" | "22" | "23" | "24" | "25") => "NVIDIA GPU (RTX Series)".to_string(),
+            ("10de", "20" | "21" | "22" | "23" | "24" | "25") => {
+                "NVIDIA GPU (RTX Series)".to_string()
+            }
             ("10de", _) => "NVIDIA GPU".to_string(),
             ("1002", _) => "AMD GPU".to_string(),
             ("8086", "15") => "Intel Network Adapter".to_string(),
@@ -464,7 +496,8 @@ nova sriov assign 0000:01:00.0 --vf 0 --vm myvm
 - Not all devices support SR-IOV
 - Requires hardware and driver support
 - Maximum VFs limited by device (typically 8-64)
-"#.to_string()
+"#
+        .to_string()
     }
 }
 

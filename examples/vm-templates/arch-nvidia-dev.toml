@@ -192,4 +192,3 @@ pre_update_snapshot = true
 [network.dev-bridge]
 type = "bridge"
 interfaces = ["enp6s0"]
-"""

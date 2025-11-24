@@ -1,8 +1,10 @@
 use crate::{
     NovaError, Result,
     config::{DiskFormat, VmConfig},
+    gpu_passthrough::{DisplayMode, GpuManager, GpuPassthroughConfig},
     instance::Instance,
     log_debug, log_error, log_info, log_warn,
+    looking_glass::{LookingGlassConfig, LookingGlassManager},
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +15,9 @@ use tokio::time::{Duration, sleep};
 pub struct VmManager {
     instances: Arc<Mutex<HashMap<String, Instance>>>,
     processes: Arc<Mutex<HashMap<String, Child>>>,
+    gpu_manager: Arc<Mutex<GpuManager>>,
+    gpu_allocations: Arc<Mutex<HashMap<String, GpuPassthroughConfig>>>,
+    looking_glass_configs: Arc<Mutex<HashMap<String, LookingGlassConfig>>>,
 }
 
 impl VmManager {
@@ -20,6 +25,9 @@ impl VmManager {
         Self {
             instances: Arc::new(Mutex::new(HashMap::new())),
             processes: Arc::new(Mutex::new(HashMap::new())),
+            gpu_manager: Arc::new(Mutex::new(GpuManager::new())),
+            gpu_allocations: Arc::new(Mutex::new(HashMap::new())),
+            looking_glass_configs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -65,14 +73,9 @@ impl VmManager {
             disk_format.as_str()
         ));
 
-        // GPU passthrough
-        if vm_config.gpu_passthrough {
-            log_info!("Enabling GPU passthrough for VM '{}'", name);
-            cmd.arg("-vga")
-                .arg("none")
-                .arg("-device")
-                .arg("vfio-pci,host=01:00.0"); // Example GPU device
-        }
+        // GPU passthrough and Looking Glass support
+        self.apply_gpu_passthrough(name, &vm_config, &mut cmd)
+            .await?;
 
         // Network configuration
         if let Some(network) = &vm_config.network {
@@ -90,15 +93,19 @@ impl VmManager {
         log_debug!("QEMU command: {:?}", cmd);
 
         // Start the VM process
-        let child = cmd
+        let child = match cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| {
+        {
+            Ok(child) => child,
+            Err(e) => {
                 log_error!("Failed to start QEMU for VM '{}': {}", name, e);
-                NovaError::SystemCommandFailed
-            })?;
+                self.cleanup_post_stop(name).await;
+                return Err(NovaError::SystemCommandFailed);
+            }
+        };
 
         let pid = child.id();
         log_info!("VM '{}' started with PID: {}", name, pid);
@@ -185,6 +192,8 @@ impl VmManager {
             }
         }
 
+        self.cleanup_post_stop(name).await;
+
         Ok(())
     }
 
@@ -204,6 +213,188 @@ impl VmManager {
             Ok(instance.status)
         } else {
             Err(NovaError::VmNotFound(name.to_string()))
+        }
+    }
+
+    async fn apply_gpu_passthrough(
+        &self,
+        name: &str,
+        vm_config: &VmConfig,
+        cmd: &mut Command,
+    ) -> Result<()> {
+        let needs_gpu = vm_config.gpu_passthrough || vm_config.gpu.is_some();
+
+        let gpu_config = if needs_gpu {
+            let mut manager = self.gpu_manager.lock().unwrap();
+            manager.ensure_discovered()?;
+
+            let mut config = if let Some(cfg) = &vm_config.gpu {
+                cfg.clone()
+            } else {
+                self.default_gpu_config(vm_config, &manager)?
+            };
+
+            if vm_config.looking_glass.enabled
+                && !matches!(config.display, DisplayMode::LookingGlass)
+            {
+                config.display = DisplayMode::LookingGlass;
+            }
+
+            if config.device_address.is_empty() {
+                return Err(NovaError::ConfigError(
+                    "GPU passthrough enabled but no device_address configured".to_string(),
+                ));
+            }
+
+            log_info!(
+                "Enabling GPU passthrough for VM '{}' using {}",
+                name,
+                config.device_address
+            );
+
+            manager.configure_passthrough(&config.device_address, name)?;
+
+            Some(config)
+        } else {
+            None
+        };
+
+        if let Some(config) = gpu_config.clone() {
+            cmd.arg("-vga").arg("none");
+            for arg in config.qemu_args() {
+                cmd.arg(arg);
+            }
+
+            if matches!(config.display, DisplayMode::LookingGlass) {
+                if let Err(err) = self
+                    .prepare_looking_glass(name, &vm_config.looking_glass, cmd)
+                    .await
+                {
+                    let mut manager = self.gpu_manager.lock().unwrap();
+                    if let Err(release_err) = manager.release_gpu(&config.device_address) {
+                        log_warn!(
+                            "Failed to release GPU {} after Looking Glass error: {}",
+                            config.device_address,
+                            release_err
+                        );
+                    }
+                    return Err(err);
+                }
+            }
+
+            let mut allocations = self.gpu_allocations.lock().unwrap();
+            allocations.insert(name.to_string(), config.clone());
+        } else if vm_config.looking_glass.enabled {
+            self.prepare_looking_glass(name, &vm_config.looking_glass, cmd)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    fn default_gpu_config(
+        &self,
+        vm_config: &VmConfig,
+        manager: &GpuManager,
+    ) -> Result<GpuPassthroughConfig> {
+        let gpu = manager
+            .list_gpus()
+            .iter()
+            .find(|gpu| gpu.iommu_group.is_some())
+            .or_else(|| manager.list_gpus().first())
+            .ok_or_else(|| NovaError::ConfigError("No GPUs available for passthrough".into()))?;
+
+        let mut config = GpuPassthroughConfig::default();
+        config.device_address = gpu.address.clone();
+        config.display = if vm_config.looking_glass.enabled {
+            DisplayMode::LookingGlass
+        } else {
+            DisplayMode::None
+        };
+
+        Ok(config)
+    }
+
+    async fn prepare_looking_glass(
+        &self,
+        name: &str,
+        requested_config: &LookingGlassConfig,
+        cmd: &mut Command,
+    ) -> Result<()> {
+        if !requested_config.enabled {
+            return Ok(());
+        }
+
+        if let Err(err) = requested_config.validate() {
+            return Err(NovaError::ConfigError(format!(
+                "Looking Glass configuration invalid: {}",
+                err
+            )));
+        }
+
+        let mut config = requested_config.clone();
+        if config.framebuffer_size == 0 {
+            config.framebuffer_size = config.calculate_framebuffer_size();
+        }
+
+        let manager = LookingGlassManager::new();
+        for arg in manager.generate_qemu_args(&config) {
+            cmd.arg(arg);
+        }
+
+        if let Err(err) = manager.setup_shmem(&config, name).await {
+            return Err(NovaError::ConfigError(format!(
+                "Failed to setup Looking Glass shared memory: {}",
+                err
+            )));
+        }
+
+        log_info!(
+            "Looking Glass enabled for VM '{}' (shmem: {})",
+            name,
+            config.shmem_path.display()
+        );
+
+        {
+            let mut configs = self.looking_glass_configs.lock().unwrap();
+            configs.insert(name.to_string(), config);
+        }
+
+        Ok(())
+    }
+
+    async fn cleanup_post_stop(&self, name: &str) {
+        let gpu_config = {
+            let mut allocations = self.gpu_allocations.lock().unwrap();
+            allocations.remove(name)
+        };
+
+        if let Some(config) = gpu_config {
+            let mut manager = self.gpu_manager.lock().unwrap();
+            if let Err(err) = manager.release_gpu(&config.device_address) {
+                log_warn!(
+                    "Failed to release GPU {} for VM '{}': {}",
+                    config.device_address,
+                    name,
+                    err
+                );
+            }
+        }
+
+        let looking_glass_config = {
+            let mut configs = self.looking_glass_configs.lock().unwrap();
+            configs.remove(name)
+        };
+
+        if let Some(config) = looking_glass_config {
+            let manager = LookingGlassManager::new();
+            if let Err(err) = manager.cleanup_shmem(&config).await {
+                log_warn!(
+                    "Failed to cleanup Looking Glass shared memory for VM '{}': {}",
+                    name,
+                    err
+                );
+            }
         }
     }
 

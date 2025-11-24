@@ -1,12 +1,12 @@
 // Real-time Performance Monitoring System
 // Collects VM metrics for display in GUI graphs and CLI output
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use chrono::{DateTime, Utc};
 
 const MAX_HISTORY_POINTS: usize = 300; // 5 minutes at 1-second intervals
 
@@ -54,10 +54,14 @@ impl MetricsHistory {
         // Add new data point
         self.cpu_history.push_back(metrics.cpu_percent);
         self.memory_history.push_back(metrics.memory_percent);
-        self.disk_read_history.push_back(metrics.disk_read_mb_per_sec);
-        self.disk_write_history.push_back(metrics.disk_write_mb_per_sec);
-        self.network_rx_history.push_back(metrics.network_rx_mb_per_sec);
-        self.network_tx_history.push_back(metrics.network_tx_mb_per_sec);
+        self.disk_read_history
+            .push_back(metrics.disk_read_mb_per_sec);
+        self.disk_write_history
+            .push_back(metrics.disk_write_mb_per_sec);
+        self.network_rx_history
+            .push_back(metrics.network_rx_mb_per_sec);
+        self.network_tx_history
+            .push_back(metrics.network_tx_mb_per_sec);
         self.timestamps.push_back(metrics.timestamp);
 
         // Remove old data if we exceed max history
@@ -170,13 +174,14 @@ impl PerformanceCollector {
                 if let Ok(domains) = connection.list_all_domains(0) {
                     for domain in domains {
                         if let Ok(name) = domain.get_name() {
-                            if let Ok(vm_metrics) = Self::collect_domain_metrics(
-                                &domain,
-                                &name,
-                                &previous_stats,
-                            ).await {
+                            if let Ok(vm_metrics) =
+                                Self::collect_domain_metrics(&domain, &name, &previous_stats).await
+                            {
                                 // Store current metrics
-                                metrics.write().await.insert(name.clone(), vm_metrics.clone());
+                                metrics
+                                    .write()
+                                    .await
+                                    .insert(name.clone(), vm_metrics.clone());
 
                                 // Add to history
                                 let mut history_map = history.write().await;
@@ -206,7 +211,8 @@ impl PerformanceCollector {
         vm_name: &str,
         previous_stats: &Arc<RwLock<HashMap<String, PreviousStats>>>,
     ) -> Result<VmMetrics, String> {
-        let info = domain.get_info()
+        let info = domain
+            .get_info()
             .map_err(|e| format!("Failed to get domain info: {}", e))?;
 
         let memory_total_mb = info.max_mem / 1024; // KiB to MiB
@@ -214,26 +220,27 @@ impl PerformanceCollector {
         let memory_percent = (memory_used_mb as f64 / memory_total_mb as f64) * 100.0;
 
         // Get CPU usage
-        let cpu_stats = domain.get_cpu_stats(0, 1, 0)
+        let cpu_stats = domain
+            .get_cpu_stats(0, 1, 0)
             .ok()
             .and_then(|stats| stats.into_iter().next());
 
-        let cpu_time_ns = cpu_stats
-            .and_then(|s| s.cpu_time)
-            .unwrap_or(0);
+        let cpu_time_ns = cpu_stats.and_then(|s| s.cpu_time).unwrap_or(0);
 
         // Calculate CPU percentage
         let now = Instant::now();
         let cpu_percent = {
             let mut prev_map = previous_stats.write().await;
-            let prev = prev_map.entry(vm_name.to_string()).or_insert(PreviousStats {
-                cpu_time_ns,
-                timestamp: now,
-                disk_read_bytes: 0,
-                disk_write_bytes: 0,
-                network_rx_bytes: 0,
-                network_tx_bytes: 0,
-            });
+            let prev = prev_map
+                .entry(vm_name.to_string())
+                .or_insert(PreviousStats {
+                    cpu_time_ns,
+                    timestamp: now,
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    network_rx_bytes: 0,
+                    network_tx_bytes: 0,
+                });
 
             let elapsed = now.duration_since(prev.timestamp).as_nanos() as u64;
             let cpu_diff = cpu_time_ns.saturating_sub(prev.cpu_time_ns);
@@ -281,8 +288,7 @@ impl PerformanceCollector {
         previous_stats: &Arc<RwLock<HashMap<String, PreviousStats>>>,
     ) -> (f64, f64, u64, u64) {
         // Get block device stats
-        let block_stats = domain.block_stats("vda")
-            .ok();
+        let block_stats = domain.block_stats("vda").ok();
 
         if let Some(stats) = block_stats {
             let read_bytes = stats.rd_bytes.unwrap_or(0) as u64;
@@ -292,9 +298,7 @@ impl PerformanceCollector {
 
             let mut prev_map = previous_stats.write().await;
             if let Some(prev) = prev_map.get_mut(vm_name) {
-                let elapsed_secs = Instant::now()
-                    .duration_since(prev.timestamp)
-                    .as_secs_f64();
+                let elapsed_secs = Instant::now().duration_since(prev.timestamp).as_secs_f64();
 
                 if elapsed_secs > 0.0 {
                     let read_diff = read_bytes.saturating_sub(prev.disk_read_bytes);
@@ -320,8 +324,7 @@ impl PerformanceCollector {
         previous_stats: &Arc<RwLock<HashMap<String, PreviousStats>>>,
     ) -> (f64, f64) {
         // Get network interface stats
-        let interface_stats = domain.interface_stats("vnet0")
-            .ok();
+        let interface_stats = domain.interface_stats("vnet0").ok();
 
         if let Some(stats) = interface_stats {
             let rx_bytes = stats.rx_bytes.unwrap_or(0) as u64;
@@ -329,9 +332,7 @@ impl PerformanceCollector {
 
             let mut prev_map = previous_stats.write().await;
             if let Some(prev) = prev_map.get_mut(vm_name) {
-                let elapsed_secs = Instant::now()
-                    .duration_since(prev.timestamp)
-                    .as_secs_f64();
+                let elapsed_secs = Instant::now().duration_since(prev.timestamp).as_secs_f64();
 
                 if elapsed_secs > 0.0 {
                     let rx_diff = rx_bytes.saturating_sub(prev.network_rx_bytes);
@@ -493,8 +494,15 @@ mod virt {
             })
         }
 
-        pub fn get_cpu_stats(&self, _start: u32, _count: u32, _flags: u32) -> Result<Vec<DomainCpuStats>, String> {
-            Ok(vec![DomainCpuStats { cpu_time: Some(1000000000) }])
+        pub fn get_cpu_stats(
+            &self,
+            _start: u32,
+            _count: u32,
+            _flags: u32,
+        ) -> Result<Vec<DomainCpuStats>, String> {
+            Ok(vec![DomainCpuStats {
+                cpu_time: Some(1000000000),
+            }])
         }
 
         pub fn block_stats(&self, _dev: &str) -> Result<DomainBlockStats, String> {
