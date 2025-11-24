@@ -1,4 +1,6 @@
-use crate::{NovaError, Result};
+use crate::{
+    NovaError, Result, gpu_passthrough::GpuPassthroughConfig, looking_glass::LookingGlassConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -13,6 +15,8 @@ pub struct NovaConfig {
     pub container: HashMap<String, ContainerConfig>,
     #[serde(default)]
     pub network: HashMap<String, NetworkConfig>,
+    #[serde(default)]
+    pub storage: HashMap<String, StoragePoolConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,11 +28,50 @@ pub struct VmConfig {
     pub memory: String,
     #[serde(default)]
     pub gpu_passthrough: bool,
+    #[serde(default)]
+    pub gpu: Option<GpuPassthroughConfig>,
     pub network: Option<String>,
     #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
     pub storage: VmStorageConfig,
+    #[serde(default)]
+    pub looking_glass: LookingGlassConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePoolConfig {
+    #[serde(default = "default_storage_pool_type")]
+    pub pool_type: StoragePoolType,
+    pub directory: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub capacity: Option<String>,
+    #[serde(default = "default_disk_format")]
+    pub default_format: DiskFormat,
+    #[serde(default = "default_create_if_missing")]
+    pub auto_create: bool,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StoragePoolType {
+    Directory,
+    Btrfs,
+    Nfs,
+}
+
+impl StoragePoolType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StoragePoolType::Directory => "directory",
+            StoragePoolType::Btrfs => "btrfs",
+            StoragePoolType::Nfs => "nfs",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +88,7 @@ pub struct VmStorageConfig {
     pub create_if_missing: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiskFormat {
     Qcow2,
@@ -117,6 +160,7 @@ impl Default for NovaConfig {
             vm: HashMap::new(),
             container: HashMap::new(),
             network: HashMap::new(),
+            storage: HashMap::new(),
         }
     }
 }
@@ -128,9 +172,25 @@ impl Default for VmConfig {
             cpu: default_cpu(),
             memory: default_memory(),
             gpu_passthrough: false,
+            gpu: None,
             network: None,
             autostart: false,
             storage: VmStorageConfig::default(),
+            looking_glass: LookingGlassConfig::default(),
+        }
+    }
+}
+
+impl Default for StoragePoolConfig {
+    fn default() -> Self {
+        Self {
+            pool_type: default_storage_pool_type(),
+            directory: "/var/lib/nova/disks".to_string(),
+            description: None,
+            capacity: None,
+            default_format: default_disk_format(),
+            auto_create: default_create_if_missing(),
+            labels: Vec::new(),
         }
     }
 }
@@ -217,6 +277,10 @@ fn default_create_if_missing() -> bool {
     true
 }
 
+fn default_storage_pool_type() -> StoragePoolType {
+    StoragePoolType::Directory
+}
+
 impl VmStorageConfig {
     const DEFAULT_DIRECTORY: &str = "/var/lib/nova/disks";
 
@@ -292,6 +356,14 @@ impl NovaConfig {
 
     pub fn list_networks(&self) -> Vec<&String> {
         self.network.keys().collect()
+    }
+
+    pub fn get_storage_pool(&self, name: &str) -> Option<&StoragePoolConfig> {
+        self.storage.get(name)
+    }
+
+    pub fn list_storage_pools(&self) -> Vec<&String> {
+        self.storage.keys().collect()
     }
 }
 
@@ -393,5 +465,14 @@ dns = true
         let path = storage.resolve_disk_path("demo-vm");
         assert_eq!(path, PathBuf::from("/var/lib/nova/disks/demo-vm.qcow2"));
         assert_eq!(storage.format.as_str(), "qcow2");
+    }
+
+    #[test]
+    fn storage_pool_defaults() {
+        let pool = StoragePoolConfig::default();
+        assert_eq!(pool.pool_type, StoragePoolType::Directory);
+        assert_eq!(pool.directory, "/var/lib/nova/disks");
+        assert_eq!(pool.default_format, DiskFormat::Qcow2);
+        assert!(pool.labels.is_empty());
     }
 }

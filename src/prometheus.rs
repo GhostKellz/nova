@@ -3,10 +3,14 @@ use crate::port_monitor::PortMonitor;
 use crate::{NovaError, Result, log_debug, log_error, log_info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone)]
 pub struct PrometheusExporter {
@@ -142,6 +146,12 @@ impl PrometheusExporter {
         }
     }
 
+    /// Override the default metrics collection interval in seconds (minimum 1 second).
+    pub fn with_collection_interval(mut self, interval_secs: u64) -> Self {
+        self.collection_interval_secs = interval_secs.max(1);
+        self
+    }
+
     pub async fn start(&self) -> Result<()> {
         if !self.enabled {
             log_info!("Prometheus exporter is disabled");
@@ -171,40 +181,46 @@ impl PrometheusExporter {
         self.start_metrics_server().await
     }
 
+    /// Collect a one-off metrics snapshot without starting the server.
+    pub async fn collect_once(&self) -> Result<String> {
+        {
+            let mut registry = self.metrics_registry.lock().unwrap();
+            registry.reset();
+        }
+
+        Self::collect_system_metrics(self.metrics_registry.clone()).await?;
+
+        let registry = self.metrics_registry.lock().unwrap();
+        Ok(registry.export_prometheus_format())
+    }
+
     async fn start_metrics_server(&self) -> Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))
             .await
             .map_err(|_| NovaError::NetworkError("Failed to bind Prometheus server".to_string()))?;
 
-        let registry = self.metrics_registry.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((mut stream, addr)) => {
-                        log_debug!("Prometheus metrics request from {}", addr);
-
-                        let registry = registry.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                Self::handle_metrics_request(&mut stream, registry).await
-                            {
-                                log_error!("Failed to handle metrics request: {:?}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        log_error!("Failed to accept connection: {}", e);
-                    }
-                }
-            }
-        });
-
         log_info!(
             "Prometheus metrics server started on http://0.0.0.0:{}/metrics",
             self.port
         );
-        Ok(())
+
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, addr)) => {
+                    log_debug!("Prometheus metrics request from {}", addr);
+
+                    let registry = self.metrics_registry.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_metrics_request(&mut stream, registry).await {
+                            log_error!("Failed to handle metrics request: {:?}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    log_error!("Failed to accept connection: {}", e);
+                }
+            }
+        }
     }
 
     async fn handle_metrics_request(
@@ -218,28 +234,32 @@ impl PrometheusExporter {
             .await
             .map_err(|_| NovaError::NetworkError("Failed to read request".to_string()))?;
 
+        let request_line_trimmed = request_line.trim();
+        if !request_line_trimmed.starts_with("GET /metrics") {
+            return Self::write_http_response(
+                stream,
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                "Endpoint not available",
+            )
+            .await;
+        }
+
         // Simple HTTP response with metrics
         let metrics_output = {
             let registry = registry.lock().unwrap();
             registry.export_prometheus_format()
         };
 
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n\
-             Content-Length: {}\r\n\
-             \r\n\
-             {}",
-            metrics_output.len(),
-            metrics_output
-        );
-
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .map_err(|_| NovaError::NetworkError("Failed to write response".to_string()))?;
-
-        Ok(())
+        Self::write_http_response(
+            stream,
+            200,
+            "OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            &metrics_output,
+        )
+        .await
     }
 
     async fn collect_system_metrics(registry: Arc<Mutex<MetricsRegistry>>) -> Result<()> {
@@ -665,27 +685,74 @@ impl PrometheusExporter {
 
     // System collection helpers
     async fn get_cpu_usage() -> Result<f64> {
-        // Read from /proc/stat or use other system APIs
-        // This is a simplified implementation
-        Ok(25.5) // Placeholder
+        let (idle1, total1) = Self::read_proc_stat().await?;
+        sleep(Duration::from_millis(200)).await;
+        let (idle2, total2) = Self::read_proc_stat().await?;
+
+        let idle_delta = idle2.saturating_sub(idle1) as f64;
+        let total_delta = total2.saturating_sub(total1) as f64;
+
+        if total_delta == 0.0 {
+            return Ok(0.0);
+        }
+
+        let usage = 100.0 * (1.0 - (idle_delta / total_delta));
+        Ok(usage.clamp(0.0, 100.0))
     }
 
     async fn get_memory_usage() -> Result<(u64, u64)> {
-        // Read from /proc/meminfo
-        // Returns (used, total) in bytes
-        Ok((8_589_934_592, 17_179_869_184)) // Placeholder: 8GB used, 16GB total
+        let contents = fs::read_to_string("/proc/meminfo").await?;
+        Self::parse_meminfo(&contents)
     }
 
     async fn get_disk_usage() -> Result<(u64, u64)> {
-        // Use statvfs or similar
-        // Returns (used, total) in bytes
-        Ok((107_374_182_400, 1_073_741_824_000)) // Placeholder: 100GB used, 1TB total
+        let stats = tokio::task::spawn_blocking(|| nix::sys::statfs::statfs(Path::new("/")))
+            .await
+            .map_err(|err| NovaError::IoError(std::io::Error::new(std::io::ErrorKind::Other, err)))?
+            .map_err(|err| {
+                NovaError::IoError(std::io::Error::new(std::io::ErrorKind::Other, err))
+            })?;
+
+        let block_size = stats.block_size() as u64;
+        let total = stats.blocks() as u64 * block_size;
+        let free = stats.blocks_available() as u64 * block_size;
+        let used = total.saturating_sub(free);
+
+        Ok((used, total))
     }
 
     async fn get_network_io() -> Result<(u64, u64)> {
-        // Read from /proc/net/dev
-        // Returns (rx_bytes, tx_bytes)
-        Ok((1_073_741_824, 536_870_912)) // Placeholder: 1GB rx, 512MB tx
+        let contents = fs::read_to_string("/proc/net/dev").await?;
+        Ok(Self::parse_network_devices(&contents))
+    }
+
+    async fn write_http_response(
+        stream: &mut tokio::net::TcpStream,
+        status: u16,
+        reason: &str,
+        content_type: &str,
+        body: &str,
+    ) -> Result<()> {
+        let response = format!(
+            "HTTP/1.1 {} {}\r\n\
+             Content-Type: {}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            status,
+            reason,
+            content_type,
+            body.len(),
+            body
+        );
+
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|_| NovaError::NetworkError("Failed to write response".to_string()))?;
+
+        Ok(())
     }
 
     fn check_kvm_available() -> bool {
@@ -709,6 +776,95 @@ impl PrometheusExporter {
     }
 }
 
+fn parse_meminfo_value(line: &str) -> u64 {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+impl PrometheusExporter {
+    async fn read_proc_stat() -> Result<(u64, u64)> {
+        let contents = fs::read_to_string("/proc/stat").await?;
+        Self::parse_proc_stat(&contents)
+    }
+
+    fn parse_proc_stat(contents: &str) -> Result<(u64, u64)> {
+        if let Some(first_line) = contents.lines().next() {
+            let mut fields = first_line
+                .split_whitespace()
+                .skip(1)
+                .filter_map(|value| value.parse::<u64>().ok());
+
+            let user = fields.next().unwrap_or(0);
+            let nice = fields.next().unwrap_or(0);
+            let system = fields.next().unwrap_or(0);
+            let idle = fields.next().unwrap_or(0);
+            let iowait = fields.next().unwrap_or(0);
+            let irq = fields.next().unwrap_or(0);
+            let softirq = fields.next().unwrap_or(0);
+            let steal = fields.next().unwrap_or(0);
+
+            let idle_all = idle + iowait;
+            let total = user + nice + system + idle + iowait + irq + softirq + steal;
+
+            return Ok((idle_all, total));
+        }
+
+        Err(NovaError::IoError(io::Error::new(
+            io::ErrorKind::Other,
+            "Unable to parse /proc/stat",
+        )))
+    }
+
+    fn parse_meminfo(contents: &str) -> Result<(u64, u64)> {
+        let mut total_kb = None;
+        let mut available_kb = None;
+
+        for line in contents.lines() {
+            if line.starts_with("MemTotal:") {
+                total_kb = Some(parse_meminfo_value(line));
+            } else if line.starts_with("MemAvailable:") {
+                available_kb = Some(parse_meminfo_value(line));
+            }
+        }
+
+        let total_kb = total_kb.ok_or_else(|| {
+            NovaError::IoError(io::Error::new(
+                io::ErrorKind::Other,
+                "Unable to parse MemTotal from /proc/meminfo",
+            ))
+        })?;
+
+        let total_bytes = total_kb * 1024;
+        let available_bytes = available_kb.unwrap_or(0) * 1024;
+        let used_bytes = total_bytes.saturating_sub(available_bytes);
+
+        Ok((used_bytes, total_bytes))
+    }
+
+    fn parse_network_devices(contents: &str) -> (u64, u64) {
+        let mut rx_total = 0u64;
+        let mut tx_total = 0u64;
+
+        for line in contents.lines().skip(2) {
+            let mut parts = line.split(':');
+            let _iface = parts.next();
+            if let Some(stats) = parts.next() {
+                let values: Vec<&str> =
+                    stats.split_whitespace().filter(|s| !s.is_empty()).collect();
+
+                if values.len() >= 16 {
+                    rx_total += values[0].parse::<u64>().unwrap_or(0);
+                    tx_total += values[8].parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+
+        (rx_total, tx_total)
+    }
+}
+
 impl MetricsRegistry {
     pub fn new() -> Self {
         Self {
@@ -717,6 +873,12 @@ impl MetricsRegistry {
             histograms: HashMap::new(),
             _summaries: HashMap::new(),
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.counters.clear();
+        self.gauges.clear();
+        self.histograms.clear();
     }
 
     pub fn increment_counter(
@@ -981,6 +1143,51 @@ impl MetricsRegistry {
         }
 
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PrometheusExporter;
+
+    #[test]
+    fn parse_meminfo_handles_available_memory() {
+        let sample = "MemTotal:       16351232 kB\nMemFree:         8351232 kB\nMemAvailable:    8123456 kB\n";
+        let (used, total) = PrometheusExporter::parse_meminfo(sample).unwrap();
+
+        assert_eq!(total, 16_351_232_u64 * 1024);
+        let expected_used = (16_351_232_u64 - 8_123_456_u64) * 1024;
+        assert_eq!(used, expected_used);
+    }
+
+    #[test]
+    fn parse_proc_stat_extracts_totals() {
+        let sample = "cpu  2255 34 2290 226255 6290 127 456 0 0 0\ncpu0  1132 17 1441 113117 3675 127 438 0 0 0\n";
+        let (idle, total) = PrometheusExporter::parse_proc_stat(sample).unwrap();
+
+        assert_eq!(idle, 226_255_u64 + 6_290_u64);
+        assert_eq!(
+            total,
+            2_255_u64 + 34_u64 + 2_290_u64 + 226_255_u64 + 6_290_u64 + 127_u64 + 456_u64
+        );
+    }
+
+    #[test]
+    fn parse_network_devices_sums_interfaces() {
+        let sample = "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n  eth0: 1000 0 0 0 0 0 0 0 2000 0 0 0 0 0 0 0\n    lo: 3000 0 0 0 0 0 0 0 4000 0 0 0 0 0 0 0\n";
+        let (rx, tx) = PrometheusExporter::parse_network_devices(sample);
+
+        assert_eq!(rx, 1_000_u64 + 3_000_u64);
+        assert_eq!(tx, 2_000_u64 + 4_000_u64);
+    }
+
+    #[tokio::test]
+    async fn collect_once_emits_metrics_snapshot() {
+        let exporter = PrometheusExporter::new(0).with_collection_interval(1);
+        let snapshot = exporter.collect_once().await.expect("metrics snapshot");
+
+        assert!(snapshot.contains("nova_host_cpu_usage_percent"));
+        assert!(snapshot.contains("nova_host_memory_usage_bytes"));
     }
 }
 

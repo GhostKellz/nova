@@ -5,21 +5,14 @@ use nova::{
         ActiveProtocol, EnhancedConsoleConfig, EnhancedConsoleManager, UnifiedConsoleSession,
     },
     container::ContainerManager,
-    gpu_passthrough::GpuManager,
-    gui_gpu::GpuManagerGui,
     instance::{Instance, InstanceStatus, InstanceType},
     logger,
-    migration::{MigrationConfig, MigrationManager},
     network::{
         InterfaceState, NetworkInterface, NetworkManager, NetworkSummary, SwitchOrigin,
         SwitchProfile, SwitchStatus, SwitchType, VirtualSwitch,
     },
-    pci_passthrough::PciPassthroughManager,
-    spice_console::SpiceManager,
-    sriov::SriovManager,
-    templates_snapshots::TemplateManager,
+    templates_snapshots::{OperatingSystem, TemplateManager, VmTemplate},
     theme,
-    usb_passthrough::UsbManager,
     vm::VmManager,
 };
 
@@ -42,146 +35,19 @@ const NETWORK_REFRESH_SECONDS: u64 = 15;
 fn main() -> Result<(), eframe::Error> {
     logger::init_logger();
 
-    // Detect desktop environment for optimizations
-    let desktop_env = detect_desktop_environment();
-    info!("Detected desktop environment: {:?}", desktop_env);
-
-    // Configure Wayland-optimized settings
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([840.0, 620.0])
-            .with_title("Nova Manager")
-            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default())
-            // Wayland-specific optimizations
-            .with_decorations(should_use_decorations(&desktop_env))
-            .with_transparent(false) // Solid backgrounds perform better
-            .with_resizable(true)
-            .with_maximize_button(true)
-            .with_minimize_button(true)
-            .with_close_button(true),
-
-        // Hardware acceleration settings (eframe will use wgpu on Wayland by default)
-        hardware_acceleration: eframe::HardwareAcceleration::Preferred,
-
-        // High DPI support (Wayland handles this well)
+            .with_icon(eframe::icon_data::from_png_bytes(&[]).unwrap_or_default()),
         ..Default::default()
     };
 
-    info!("Starting Nova Manager with Wayland optimizations");
     eframe::run_native(
         "Nova Manager",
         options,
         Box::new(|cc| Box::new(NovaApp::new(cc))),
     )
-}
-
-/// Desktop environment variants for optimization
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DesktopEnvironment {
-    KdePlasma,
-    Gnome,
-    Cosmic,
-    Other,
-}
-
-/// Detect the current desktop environment
-fn detect_desktop_environment() -> DesktopEnvironment {
-    // Check XDG_CURRENT_DESKTOP environment variable
-    if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
-        let desktop_lower = desktop.to_lowercase();
-
-        if desktop_lower.contains("kde") || desktop_lower.contains("plasma") {
-            return DesktopEnvironment::KdePlasma;
-        }
-        if desktop_lower.contains("gnome") {
-            return DesktopEnvironment::Gnome;
-        }
-        if desktop_lower.contains("cosmic") {
-            return DesktopEnvironment::Cosmic;
-        }
-    }
-
-    // Check XDG_SESSION_DESKTOP as fallback
-    if let Ok(session) = std::env::var("XDG_SESSION_DESKTOP") {
-        let session_lower = session.to_lowercase();
-
-        if session_lower.contains("plasma") {
-            return DesktopEnvironment::KdePlasma;
-        }
-        if session_lower.contains("gnome") {
-            return DesktopEnvironment::Gnome;
-        }
-        if session_lower.contains("cosmic") {
-            return DesktopEnvironment::Cosmic;
-        }
-    }
-
-    DesktopEnvironment::Other
-}
-
-/// Determine whether to use window decorations based on desktop environment
-fn should_use_decorations(env: &DesktopEnvironment) -> bool {
-    match env {
-        DesktopEnvironment::KdePlasma => {
-            // KDE Plasma: Use server-side decorations (KWin handles them beautifully)
-            true
-        }
-        DesktopEnvironment::Gnome => {
-            // GNOME: Use client-side decorations (GTK style)
-            true
-        }
-        DesktopEnvironment::Cosmic => {
-            // Cosmic: Use decorations (Cosmic compositor handles them)
-            true
-        }
-        DesktopEnvironment::Other => {
-            // Default: enable decorations
-            true
-        }
-    }
-}
-
-/// Apply Wayland-specific rendering optimizations
-fn apply_wayland_optimizations(ctx: &egui::Context) {
-    // Check if we're running on Wayland
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
-        || std::env::var("XDG_SESSION_TYPE")
-            .map(|t| t.to_lowercase() == "wayland")
-            .unwrap_or(false);
-
-    if !is_wayland {
-        info!("Not running on Wayland, skipping Wayland-specific optimizations");
-        return;
-    }
-
-    info!("Applying Wayland-specific rendering optimizations");
-
-    // Configure optimal frame rate for Wayland
-    // Wayland compositors handle vsync and frame pacing better than X11
-    ctx.request_repaint_after(Duration::from_millis(16)); // Target 60 FPS
-
-    // Enable tessellation options for smooth rendering
-    let mut tessellation_options = egui::epaint::TessellationOptions::default();
-    tessellation_options.feathering_size_in_pixels = 1.0; // Smooth edges on Wayland
-    tessellation_options.coarse_tessellation_culling = true; // Better performance
-    ctx.tessellation_options_mut(|opts| *opts = tessellation_options);
-
-    // Configure pixel rounding for sharp rendering on Wayland
-    // Wayland handles fractional scaling better than X11
-    ctx.set_pixels_per_point(ctx.pixels_per_point()); // Use compositor's scale
-
-    info!("Wayland optimizations applied successfully");
-}
-
-/// Check if running on Wayland
-// Helper function for future use
-#[allow(dead_code)]
-fn is_wayland() -> bool {
-    std::env::var("WAYLAND_DISPLAY").is_ok()
-        || std::env::var("XDG_SESSION_TYPE")
-            .map(|t| t.to_lowercase() == "wayland")
-            .unwrap_or(false)
 }
 
 #[derive(Default, Clone)]
@@ -211,6 +77,43 @@ impl InstanceSummary {
     }
 }
 
+#[derive(Default, Clone)]
+struct TemplateCatalogSummary {
+    total: usize,
+    linux: usize,
+    windows: usize,
+    other: usize,
+    recent: Vec<String>,
+    last_refresh: Option<DateTime<Utc>>,
+}
+
+impl TemplateCatalogSummary {
+    fn from_manager(manager: &TemplateManager) -> Self {
+        let mut templates: Vec<&VmTemplate> = manager.list_templates();
+        templates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+        let mut summary = TemplateCatalogSummary {
+            total: templates.len(),
+            ..TemplateCatalogSummary::default()
+        };
+
+        for template in &templates {
+            match template.os_type {
+                OperatingSystem::Linux { .. } => summary.linux += 1,
+                OperatingSystem::Windows { .. } => summary.windows += 1,
+                OperatingSystem::Other { .. } => summary.other += 1,
+            }
+
+            if summary.recent.len() < 3 {
+                summary.recent.push(template.name.clone());
+            }
+        }
+
+        summary.last_refresh = Some(Utc::now());
+        summary
+    }
+}
+
 #[derive(Clone, Copy)]
 enum InstanceAction {
     Start,
@@ -226,37 +129,11 @@ enum SessionEvent {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MainView {
-    Dashboard,
-    VirtualMachines,
-    Containers,
-    Networking,
-    Tools,
-}
-
-impl Default for MainView {
-    fn default() -> Self {
-        MainView::VirtualMachines
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum DetailTab {
     Overview,
     Snapshots,
     Networking,
     Sessions,
-    Performance,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolWindow {
-    None,
-    GpuManager,
-    UsbPassthrough,
-    PciPassthrough,
-    SriovManager,
-    MigrationManager,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -273,14 +150,9 @@ struct NovaApp {
     enhanced_console: Arc<AsyncMutex<EnhancedConsoleManager>>,
     template_manager: Arc<AsyncMutex<TemplateManager>>,
     session_events: Arc<Mutex<Vec<SessionEvent>>>,
-    gpu_manager: Arc<Mutex<GpuManager>>,
-    usb_manager: Arc<Mutex<UsbManager>>,
-    pci_manager: Arc<Mutex<PciPassthroughManager>>,
-    sriov_manager: Arc<Mutex<SriovManager>>,
-    spice_manager: Arc<Mutex<SpiceManager>>,
-    migration_manager: Option<Arc<Mutex<MigrationManager>>>,
     _config: NovaConfig,
     runtime: Runtime,
+    template_summary: TemplateCatalogSummary,
 
     selected_instance: Option<String>,
     show_console: bool,
@@ -294,15 +166,7 @@ struct NovaApp {
     only_running: bool,
 
     show_insights: bool,
-    main_view: MainView,
     detail_tab: DetailTab,
-    open_tool_window: ToolWindow,
-
-    // Tool window GUI instances
-    gpu_manager_gui: Option<GpuManagerGui>,
-
-    // Theme settings
-    theme_variant: theme::TokyoNightVariant,
 
     last_refresh: Option<Instant>,
     last_refresh_at: Option<DateTime<Utc>>,
@@ -328,11 +192,7 @@ struct NovaApp {
 
 impl NovaApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Configure Tokyo Night theme
-        theme::configure_tokyo_night_theme(&cc.egui_ctx, theme::TokyoNightVariant::Night);
-
-        // Apply Wayland-specific rendering optimizations
-        apply_wayland_optimizations(&cc.egui_ctx);
+        theme::configure_ocean_theme(&cc.egui_ctx);
 
         let vm_manager = Arc::new(VmManager::new());
         let container_manager = Arc::new(ContainerManager::new());
@@ -368,19 +228,6 @@ impl NovaApp {
 
         let runtime = Runtime::new().expect("failed to initialize Tokio runtime");
 
-        // Initialize new managers
-        let gpu_manager = Arc::new(Mutex::new(GpuManager::new()));
-        let usb_manager = Arc::new(Mutex::new(UsbManager::new()));
-        let pci_manager = Arc::new(Mutex::new(PciPassthroughManager::new()));
-        let sriov_manager = Arc::new(Mutex::new(SriovManager::new()));
-        let spice_manager = Arc::new(Mutex::new(SpiceManager::new()));
-
-        // Initialize migration manager with default config
-        let migration_config = MigrationConfig::default();
-        let migration_manager = Some(Arc::new(Mutex::new(
-            MigrationManager::new(migration_config, None)
-        )));
-
         let mut app = Self {
             vm_manager,
             container_manager,
@@ -388,14 +235,9 @@ impl NovaApp {
             enhanced_console,
             template_manager,
             session_events,
-            gpu_manager,
-            usb_manager,
-            pci_manager,
-            sriov_manager,
-            spice_manager,
-            migration_manager,
             _config: config,
             runtime,
+            template_summary: TemplateCatalogSummary::default(),
             selected_instance: None,
             show_console: false,
             console_output: Vec::new(),
@@ -406,11 +248,7 @@ impl NovaApp {
             filter_text: String::new(),
             only_running: false,
             show_insights: true,
-            main_view: MainView::default(),
             detail_tab: DetailTab::Overview,
-            open_tool_window: ToolWindow::None,
-            gpu_manager_gui: None,
-            theme_variant: theme::TokyoNightVariant::Night,
             last_refresh: None,
             last_refresh_at: None,
             refresh_interval: Duration::from_secs(INSTANCE_REFRESH_SECONDS),
@@ -437,6 +275,7 @@ impl NovaApp {
         app.log_console("Ready for virtualization management");
         app.refresh_instances(true);
         app.refresh_network_summary(true);
+        app.refresh_template_summary();
 
         app
     }
@@ -471,6 +310,7 @@ impl NovaApp {
         }
 
         self.populate_instance_ips();
+        self.refresh_template_summary();
     }
 
     fn populate_instance_ips(&mut self) {
@@ -481,6 +321,14 @@ impl NovaApp {
                 }
             }
         }
+    }
+
+    fn refresh_template_summary(&mut self) {
+        let summary = self.runtime.block_on(async {
+            let manager = self.template_manager.lock().await;
+            TemplateCatalogSummary::from_manager(&manager)
+        });
+        self.template_summary = summary;
     }
 
     fn probe_vm_ip(vm_name: &str) -> Option<String> {
@@ -914,115 +762,24 @@ impl NovaApp {
                     });
 
                 ui.add_space(8.0);
-                ui.heading("Network Profile");
-                ui.small("Choose how VMs on this switch connect to networks:");
-                ui.add_space(6.0);
-
-                // External (Bridged) - VMs on LAN
-                let external_frame = if matches!(self.new_switch_profile_mode, SwitchProfileMode::External) {
-                    egui::Frame::default()
-                        .fill(theme::BG_ELEVATED)
-                        .stroke(egui::Stroke::new(2.0, theme::TN_NIGHT_BLUE))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                } else {
-                    egui::Frame::default()
-                        .fill(theme::BG_SECONDARY)
-                        .stroke(egui::Stroke::new(1.0, theme::BG_HOVER))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                };
-
-                let ext_response = external_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.new_switch_profile_mode,
-                            SwitchProfileMode::External,
-                            "",
-                        );
-                        ui.vertical(|ui| {
-                            ui.strong("External (Bridged to LAN)");
-                            ui.small("VMs appear directly on your physical network");
-                            ui.small("✓ VMs get IP from your router (DHCP)");
-                            ui.small("✓ Accessible from other devices on LAN");
-                        });
-                    });
+                ui.label("Switch profile");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.new_switch_profile_mode,
+                        SwitchProfileMode::Internal,
+                        "Internal",
+                    );
+                    ui.selectable_value(
+                        &mut self.new_switch_profile_mode,
+                        SwitchProfileMode::External,
+                        "External uplink",
+                    );
+                    ui.selectable_value(
+                        &mut self.new_switch_profile_mode,
+                        SwitchProfileMode::Nat,
+                        "NAT + DHCP",
+                    );
                 });
-                if ext_response.response.interact(egui::Sense::click()).clicked() {
-                    self.new_switch_profile_mode = SwitchProfileMode::External;
-                }
-
-                ui.add_space(4.0);
-
-                // NAT - VMs behind NAT
-                let nat_frame = if matches!(self.new_switch_profile_mode, SwitchProfileMode::Nat) {
-                    egui::Frame::default()
-                        .fill(theme::BG_ELEVATED)
-                        .stroke(egui::Stroke::new(2.0, theme::TN_NIGHT_BLUE))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                } else {
-                    egui::Frame::default()
-                        .fill(theme::BG_SECONDARY)
-                        .stroke(egui::Stroke::new(1.0, theme::BG_HOVER))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                };
-
-                let nat_response = nat_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.new_switch_profile_mode,
-                            SwitchProfileMode::Nat,
-                            "",
-                        );
-                        ui.vertical(|ui| {
-                            ui.strong("NAT (Shared with Host)");
-                            ui.small("VMs share host's IP via NAT (like home router)");
-                            ui.small("✓ VMs can access internet through host");
-                            ui.small("✓ Includes built-in DHCP server");
-                        });
-                    });
-                });
-                if nat_response.response.interact(egui::Sense::click()).clicked() {
-                    self.new_switch_profile_mode = SwitchProfileMode::Nat;
-                }
-
-                ui.add_space(4.0);
-
-                // Internal (Host-only)
-                let internal_frame = if matches!(self.new_switch_profile_mode, SwitchProfileMode::Internal) {
-                    egui::Frame::default()
-                        .fill(theme::BG_ELEVATED)
-                        .stroke(egui::Stroke::new(2.0, theme::TN_NIGHT_BLUE))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                } else {
-                    egui::Frame::default()
-                        .fill(theme::BG_SECONDARY)
-                        .stroke(egui::Stroke::new(1.0, theme::BG_HOVER))
-                        .rounding(4.0)
-                        .inner_margin(10.0)
-                };
-
-                let int_response = internal_frame.show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.radio_value(
-                            &mut self.new_switch_profile_mode,
-                            SwitchProfileMode::Internal,
-                            "",
-                        );
-                        ui.vertical(|ui| {
-                            ui.strong("Internal (Host-Only Network)");
-                            ui.small("Isolated network for VMs and host only");
-                            ui.small("✓ VMs can talk to each other and host");
-                            ui.small("✗ No internet or LAN access");
-                        });
-                    });
-                });
-                if int_response.response.interact(egui::Sense::click()).clicked() {
-                    self.new_switch_profile_mode = SwitchProfileMode::Internal;
-                }
 
                 if matches!(
                     self.new_switch_profile_mode,
@@ -1282,12 +1039,6 @@ impl NovaApp {
         });
     }
 
-    fn request_session_launch_selected(&mut self) {
-        if let Some(instance) = self.selected_instance_owned() {
-            self.request_session_launch(&instance);
-        }
-    }
-
     fn request_session_close(&mut self, session_id: String) {
         let console = self.enhanced_console.clone();
         let events = self.session_events.clone();
@@ -1516,6 +1267,48 @@ impl NovaApp {
             ui.small("Persistent switch profiles are automatically hydrated after restart.");
         } else {
             ui.label("Network telemetry pending…");
+        }
+
+        ui.add_space(12.0);
+        ui.heading("Template catalog");
+        ui.separator();
+
+        if self.template_summary.total == 0 {
+            ui.label("No VM templates have been catalogued yet.");
+        } else {
+            ui.label(format!(
+                "Templates available: {}",
+                self.template_summary.total
+            ));
+
+            let mut breakdown = Vec::new();
+            if self.template_summary.linux > 0 {
+                breakdown.push(format!("{} Linux", self.template_summary.linux));
+            }
+            if self.template_summary.windows > 0 {
+                breakdown.push(format!("{} Windows", self.template_summary.windows));
+            }
+            if self.template_summary.other > 0 {
+                breakdown.push(format!("{} Other", self.template_summary.other));
+            }
+
+            if !breakdown.is_empty() {
+                ui.small(format!("Breakdown: {}", breakdown.join(" • ")));
+            }
+
+            if !self.template_summary.recent.is_empty() {
+                ui.small(format!(
+                    "Recent templates: {}",
+                    self.template_summary.recent.join(", ")
+                ));
+            }
+
+            if let Some(scan) = self.template_summary.last_refresh {
+                ui.small(format!(
+                    "Catalog refreshed {}",
+                    scan.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                ));
+            }
         }
 
         ui.add_space(12.0);
@@ -2126,96 +1919,6 @@ impl NovaApp {
             });
     }
 
-    fn draw_tab_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("nova.tab_bar")
-            .frame(egui::Frame::default().fill(theme::BG_CONSOLE).inner_margin(egui::Margin {
-                left: 12.0,
-                right: 12.0,
-                top: 8.0,
-                bottom: 8.0,
-            }))
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(4.0, 0.0);
-
-                    // Dashboard tab
-                    let dashboard_selected = self.main_view == MainView::Dashboard;
-                    let dashboard_button = if dashboard_selected {
-                        egui::Button::new("🏠 Dashboard")
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
-                    } else {
-                        egui::Button::new("🏠 Dashboard")
-                            .fill(theme::BG_PANEL)
-                    };
-                    if ui.add_sized([120.0, 32.0], dashboard_button).clicked() {
-                        self.main_view = MainView::Dashboard;
-                        self.log_console("Switched to Dashboard view");
-                    }
-
-                    // Virtual Machines tab
-                    let vms_selected = self.main_view == MainView::VirtualMachines;
-                    let vms_button = if vms_selected {
-                        egui::Button::new("💻 Virtual Machines")
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
-                    } else {
-                        egui::Button::new("💻 Virtual Machines")
-                            .fill(theme::BG_PANEL)
-                    };
-                    if ui.add_sized([160.0, 32.0], vms_button).clicked() {
-                        self.main_view = MainView::VirtualMachines;
-                        self.log_console("Switched to Virtual Machines view");
-                    }
-
-                    // Containers tab
-                    let containers_selected = self.main_view == MainView::Containers;
-                    let containers_button = if containers_selected {
-                        egui::Button::new("📦 Containers")
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
-                    } else {
-                        egui::Button::new("📦 Containers")
-                            .fill(theme::BG_PANEL)
-                    };
-                    if ui.add_sized([130.0, 32.0], containers_button).clicked() {
-                        self.main_view = MainView::Containers;
-                        self.log_console("Switched to Containers view");
-                    }
-
-                    // Networking tab
-                    let networking_selected = self.main_view == MainView::Networking;
-                    let networking_button = if networking_selected {
-                        egui::Button::new("🌐 Networking")
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
-                    } else {
-                        egui::Button::new("🌐 Networking")
-                            .fill(theme::BG_PANEL)
-                    };
-                    if ui.add_sized([130.0, 32.0], networking_button).clicked() {
-                        self.main_view = MainView::Networking;
-                        self.log_console("Switched to Networking view");
-                    }
-
-                    // Tools tab
-                    let tools_selected = self.main_view == MainView::Tools;
-                    let tools_button = if tools_selected {
-                        egui::Button::new("🔧 Tools")
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(1.0, theme::TN_NIGHT_BLUE))
-                    } else {
-                        egui::Button::new("🔧 Tools")
-                            .fill(theme::BG_PANEL)
-                    };
-                    if ui.add_sized([100.0, 32.0], tools_button).clicked() {
-                        self.main_view = MainView::Tools;
-                        self.log_console("Switched to Tools view");
-                    }
-                });
-            });
-    }
-
     fn draw_navigation_panel(&mut self, ctx: &egui::Context, filter: &str) {
         egui::SidePanel::left("nova.navigation")
             .default_width(260.0)
@@ -2228,429 +1931,6 @@ impl NovaApp {
                 ui.add_space(8.0);
                 self.draw_instance_tree(ui, filter);
             });
-    }
-
-    fn draw_dashboard_view(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(16.0);
-        ui.vertical_centered(|ui| {
-            ui.heading("📊 System Dashboard");
-        });
-        ui.add_space(16.0);
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // System Overview Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("System Overview");
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("💻 Virtual Machines:");
-                        ui.label(format!("{} total", self.instances_cache.iter()
-                            .filter(|i| i.instance_type == InstanceType::Vm).count()));
-                        ui.label("•");
-                        ui.colored_label(theme::STATUS_RUNNING, format!("{} running", self.summary.running));
-                        ui.label("•");
-                        ui.colored_label(theme::STATUS_STOPPED, format!("{} stopped", self.summary.stopped));
-                    });
-
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("📦 Containers:");
-                        ui.label(format!("{}", self.instances_cache.iter()
-                            .filter(|i| i.instance_type == InstanceType::Container).count()));
-                    });
-
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label("🌐 Network Switches:");
-                        let active_switches = self.network_summary.as_ref()
-                            .map(|s| s.active_switches).unwrap_or(0);
-                        ui.colored_label(theme::STATUS_WARNING, format!("{} active", active_switches));
-                    });
-                });
-
-            ui.add_space(16.0);
-
-            // Quick Actions Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Quick Actions");
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        if ui.button("➕ Create New VM").clicked() {
-                            self.log_console("VM creation wizard coming soon");
-                        }
-                        if ui.button("📦 Create Container").clicked() {
-                            self.log_console("Container creation wizard coming soon");
-                        }
-                        if ui.button("🌐 Create Virtual Switch").clicked() {
-                            self.show_create_switch_modal = true;
-                        }
-                    });
-                });
-
-            ui.add_space(16.0);
-
-            // Recent Activity Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Recent Activity");
-                    ui.add_space(8.0);
-
-                    for (i, line) in self.console_output.iter().rev().take(8).enumerate() {
-                        ui.monospace(line);
-                        if i < 7 {
-                            ui.add_space(2.0);
-                        }
-                    }
-                });
-        });
-    }
-
-    fn draw_networking_view(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(16.0);
-        ui.heading("🌐 Network Management");
-        ui.add_space(8.0);
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // Network Summary Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Network Summary");
-                    ui.add_space(8.0);
-
-                    if let Some(summary) = &self.network_summary {
-                        ui.horizontal(|ui| {
-                            ui.label("Active Switches:");
-                            ui.colored_label(theme::STATUS_WARNING, summary.active_switches.to_string());
-                        });
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label("Total Interfaces:");
-                            ui.label(summary.total_interfaces.to_string());
-                        });
-                    } else {
-                        ui.label("Loading network information...");
-                    }
-                });
-
-            ui.add_space(16.0);
-
-            // Virtual Switches Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Virtual Switches");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("➕ Create Switch").clicked() {
-                                self.show_create_switch_modal = true;
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-
-                    if self.network_switches.is_empty() {
-                        ui.label("No virtual switches configured.");
-                    } else {
-                        for switch in &self.network_switches {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    let status_color = match &switch.status {
-                                        SwitchStatus::Active => theme::STATUS_RUNNING,
-                                        SwitchStatus::Inactive => theme::STATUS_STOPPED,
-                                        SwitchStatus::Error(_) => theme::STATUS_STOPPED,
-                                    };
-                                    ui.colored_label(status_color, "●");
-                                    ui.strong(&switch.name);
-                                    ui.label(format!("({:?})", switch.switch_type));
-                                });
-                            });
-                        }
-                    }
-                });
-
-            ui.add_space(16.0);
-
-            // Host Interfaces Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Host Network Interfaces");
-                    ui.add_space(8.0);
-
-                    if self.network_interfaces.is_empty() {
-                        ui.label("No network interfaces detected.");
-                    } else {
-                        for interface in &self.network_interfaces {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    let status_color = match interface.state {
-                                        InterfaceState::Up => theme::STATUS_RUNNING,
-                                        InterfaceState::Down => theme::STATUS_STOPPED,
-                                        InterfaceState::Unknown => theme::STATUS_SUSPENDED,
-                                    };
-                                    ui.colored_label(status_color, "●");
-                                    ui.strong(&interface.name);
-                                });
-                            });
-                        }
-                    }
-                });
-        });
-    }
-
-    fn draw_containers_view(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(16.0);
-        ui.heading("📦 Container Management");
-        ui.add_space(8.0);
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // Container Runtime Summary Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Runtime Information");
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label("Active Runtime:");
-                        ui.colored_label(theme::TN_NIGHT_BLUE, self.container_manager.get_runtime_name());
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Bolt Available:");
-                        let bolt_available = self.container_manager.check_bolt_available();
-                        if bolt_available {
-                            ui.colored_label(theme::STATUS_RUNNING, "✓ Yes");
-                        } else {
-                            ui.colored_label(theme::STATUS_STOPPED, "✗ No");
-                        }
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("Docker Available:");
-                        let docker_available = self.container_manager.check_docker_available();
-                        if docker_available {
-                            ui.colored_label(theme::STATUS_RUNNING, "✓ Yes");
-                        } else {
-                            ui.colored_label(theme::STATUS_STOPPED, "✗ No");
-                        }
-                    });
-                });
-
-            ui.add_space(16.0);
-
-            // Running Containers Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Running Containers");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("🔄 Refresh").clicked() {
-                                self.refresh_instances(true);
-                            }
-                        });
-                    });
-                    ui.add_space(8.0);
-
-                    let containers: Vec<_> = self.instances_cache
-                        .iter()
-                        .filter(|inst| inst.instance_type == InstanceType::Container)
-                        .cloned()
-                        .collect();
-
-                    if containers.is_empty() {
-                        ui.label("No containers running.");
-                    } else {
-                        for container in containers {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    let status_color = match container.status {
-                                        InstanceStatus::Running => theme::STATUS_RUNNING,
-                                        InstanceStatus::Stopped => theme::STATUS_STOPPED,
-                                        InstanceStatus::Suspended => theme::STATUS_SUSPENDED,
-                                        _ => theme::STATUS_STOPPED,
-                                    };
-                                    ui.colored_label(status_color, "●");
-                                    ui.strong(&container.name);
-                                    ui.label(format!("({:?})", container.status));
-
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if container.status == InstanceStatus::Running {
-                                            if ui.small_button("⏹ Stop").clicked() {
-                                                // TODO: Implement stop
-                                                self.log_console(&format!("Stopping container: {}", container.name));
-                                            }
-                                        } else {
-                                            if ui.small_button("▶ Start").clicked() {
-                                                // TODO: Implement start
-                                                self.log_console(&format!("Starting container: {}", container.name));
-                                            }
-                                        }
-                                    });
-                                });
-                            });
-                        }
-                    }
-                });
-
-            ui.add_space(16.0);
-
-            // Container Templates Card
-            egui::Frame::default()
-                .fill(theme::BG_ELEVATED)
-                .rounding(8.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Available Templates");
-                    ui.add_space(8.0);
-
-                    ui.label("Container templates provide pre-configured environments for common use cases.");
-                    ui.add_space(8.0);
-
-                    if ui.button("📄 Browse Templates").clicked() {
-                        self.log_console("Opening container templates...");
-                    }
-                });
-        });
-    }
-
-    fn draw_tools_view(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(16.0);
-        ui.vertical_centered(|ui| {
-            ui.heading("🔧 Tools & Utilities");
-        });
-        ui.add_space(16.0);
-
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                // GPU Manager Tool
-                egui::Frame::default()
-                    .fill(theme::BG_ELEVATED)
-                    .rounding(8.0)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(250.0);
-                        ui.vertical(|ui| {
-                            ui.heading("🎮 GPU Passthrough Manager");
-                            ui.add_space(8.0);
-                            ui.label("Manage GPU passthrough for virtual machines");
-                            ui.add_space(8.0);
-                            if ui.button("Open GPU Manager [Ctrl+G]").clicked() {
-                                self.open_tool_window = ToolWindow::GpuManager;
-                            }
-                        });
-                    });
-
-                ui.add_space(8.0);
-
-                // USB Passthrough Tool
-                egui::Frame::default()
-                    .fill(theme::BG_ELEVATED)
-                    .rounding(8.0)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(250.0);
-                        ui.vertical(|ui| {
-                            ui.heading("🔌 USB Passthrough");
-                            ui.add_space(8.0);
-                            ui.label("Configure USB device passthrough");
-                            ui.add_space(8.0);
-                            if ui.button("Open USB Manager [Ctrl+U]").clicked() {
-                                self.open_tool_window = ToolWindow::UsbPassthrough;
-                            }
-                        });
-                    });
-            });
-
-            ui.add_space(16.0);
-
-            ui.horizontal_wrapped(|ui| {
-                // PCI Passthrough Tool
-                egui::Frame::default()
-                    .fill(theme::BG_ELEVATED)
-                    .rounding(8.0)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(250.0);
-                        ui.vertical(|ui| {
-                            ui.heading("💾 PCI Passthrough");
-                            ui.add_space(8.0);
-                            ui.label("Configure PCI device passthrough");
-                            ui.add_space(8.0);
-                            if ui.button("Open PCI Manager [Ctrl+P]").clicked() {
-                                self.open_tool_window = ToolWindow::PciPassthrough;
-                            }
-                        });
-                    });
-
-                ui.add_space(8.0);
-
-                // SR-IOV Manager Tool
-                egui::Frame::default()
-                    .fill(theme::BG_ELEVATED)
-                    .rounding(8.0)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(250.0);
-                        ui.vertical(|ui| {
-                            ui.heading("🔀 SR-IOV Manager");
-                            ui.add_space(8.0);
-                            ui.label("Manage SR-IOV virtual functions");
-                            ui.add_space(8.0);
-                            if ui.button("Open SR-IOV Manager [Ctrl+R]").clicked() {
-                                self.open_tool_window = ToolWindow::SriovManager;
-                            }
-                        });
-                    });
-            });
-
-            ui.add_space(16.0);
-
-            ui.horizontal_wrapped(|ui| {
-                // Migration Manager Tool
-                egui::Frame::default()
-                    .fill(theme::BG_ELEVATED)
-                    .rounding(8.0)
-                    .inner_margin(16.0)
-                    .show(ui, |ui| {
-                        ui.set_min_width(250.0);
-                        ui.vertical(|ui| {
-                            ui.heading("📦 Migration Manager");
-                            ui.add_space(8.0);
-                            ui.label("Migrate VMs between hosts");
-                            ui.add_space(8.0);
-                            if ui.button("Open Migration Manager [Ctrl+M]").clicked() {
-                                self.open_tool_window = ToolWindow::MigrationManager;
-                            }
-                        });
-                    });
-            });
-        });
     }
 
     fn draw_event_log_panel(&self, ctx: &egui::Context) {
@@ -2685,115 +1965,73 @@ impl NovaApp {
                 .last()
                 .map(|session| session.session_id.clone())
         });
+        ui.horizontal(|ui| {
+            if ui.button("➕ New VM").clicked() {
+                self.log_console("VM creation wizard coming soon");
+            }
+            if ui.button("📦 New Container").clicked() {
+                self.log_console("Container creation wizard coming soon");
+            }
 
-        // Prominent toolbar with modern styling
-        egui::Frame::default()
-            .fill(theme::BG_ELEVATED)
-            .stroke(egui::Stroke::new(1.0, theme::BG_HOVER))
-            .rounding(6.0)
-            .inner_margin(egui::Margin::symmetric(16.0, 12.0))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    // Creation actions - prominent primary buttons
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Create").strong());
-                        if ui.add(egui::Button::new("➕ New VM")
-                            .fill(theme::TN_NIGHT_BLUE)
-                            .min_size(egui::vec2(100.0, 32.0)))
-                            .clicked() {
-                            self.log_console("VM creation wizard coming soon");
-                        }
-                        if ui.add(egui::Button::new("📦 Container")
-                            .fill(theme::TN_NIGHT_PURPLE)
-                            .min_size(egui::vec2(100.0, 32.0)))
-                            .clicked() {
-                            self.log_console("Container creation wizard coming soon");
-                        }
-                    });
+            ui.separator();
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
+            if ui
+                .add_enabled(can_start, egui::Button::new("▶ Start"))
+                .clicked()
+            {
+                self.handle_action(InstanceAction::Start);
+            }
+            if ui
+                .add_enabled(can_stop, egui::Button::new("⏹ Stop"))
+                .clicked()
+            {
+                self.handle_action(InstanceAction::Stop);
+            }
+            if ui
+                .add_enabled(can_restart, egui::Button::new("🔁 Restart"))
+                .clicked()
+            {
+                self.handle_action(InstanceAction::Restart);
+            }
 
-                    // Power management - color-coded buttons
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Power").strong());
-                        if ui
-                            .add_enabled(can_start, egui::Button::new("▶ Start")
-                                .fill(theme::TN_NIGHT_GREEN)
-                                .min_size(egui::vec2(80.0, 32.0)))
-                            .clicked()
-                        {
-                            self.handle_action(InstanceAction::Start);
-                        }
-                        if ui
-                            .add_enabled(can_stop, egui::Button::new("⏹ Stop")
-                                .fill(theme::TN_NIGHT_RED)
-                                .min_size(egui::vec2(80.0, 32.0)))
-                            .clicked()
-                        {
-                            self.handle_action(InstanceAction::Stop);
-                        }
-                        if ui
-                            .add_enabled(can_restart, egui::Button::new("🔁 Restart")
-                                .fill(theme::TN_NIGHT_ORANGE)
-                                .min_size(egui::vec2(80.0, 32.0)))
-                            .clicked()
-                        {
-                            self.handle_action(InstanceAction::Restart);
-                        }
-                    });
+            ui.separator();
 
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    // Management actions
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Manage").strong());
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("🖥 Console")
-                                .min_size(egui::vec2(90.0, 32.0)))
-                            .clicked()
-                        {
-                            self.show_console = true;
-                            self.log_console("Opening interactive console view");
-                        }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("🚀 Session")
-                                .min_size(egui::vec2(90.0, 32.0)))
-                            .clicked()
-                        {
-                            if let Some(instance) = self.selected_instance_owned() {
-                                self.request_session_launch(&instance);
-                            }
-                        }
-                        if ui
-                            .add_enabled(ready_session.is_some(), egui::Button::new("🪟 Viewer")
-                                .min_size(egui::vec2(80.0, 32.0)))
-                            .clicked()
-                        {
-                            if let Some(session_id) = ready_session.clone() {
-                                self.request_session_launch_client(session_id);
-                            }
-                        }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("🛡 Checkpoint")
-                                .min_size(egui::vec2(110.0, 32.0)))
-                            .clicked()
-                        {
-                            self.log_console("Checkpoint workflow coming soon");
-                        }
-                        if ui
-                            .add_enabled(has_selection, egui::Button::new("⚙ Settings")
-                                .min_size(egui::vec2(90.0, 32.0)))
-                            .clicked()
-                        {
-                            self.log_console("Settings panel under construction");
-                        }
-                    });
-                });
-            });
+            if ui
+                .add_enabled(has_selection, egui::Button::new("🖥 Console"))
+                .clicked()
+            {
+                self.show_console = true;
+                self.log_console("Opening interactive console view");
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("🚀 Session"))
+                .clicked()
+            {
+                if let Some(instance) = self.selected_instance_owned() {
+                    self.request_session_launch(&instance);
+                }
+            }
+            if ui
+                .add_enabled(ready_session.is_some(), egui::Button::new("🪟 Viewer"))
+                .clicked()
+            {
+                if let Some(session_id) = ready_session.clone() {
+                    self.request_session_launch_client(session_id);
+                }
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("🛡 Checkpoint"))
+                .clicked()
+            {
+                self.log_console("Checkpoint workflow coming soon");
+            }
+            if ui
+                .add_enabled(has_selection, egui::Button::new("⚙ Settings"))
+                .clicked()
+            {
+                self.log_console("Settings panel under construction");
+            }
+        });
     }
 
     fn draw_filter_bar(&mut self, ui: &mut egui::Ui) {
@@ -2834,84 +2072,45 @@ impl NovaApp {
         egui::ScrollArea::vertical()
             .id_source("nova.instance_table")
             .show(ui, |ui| {
-                for instance in instances.iter() {
-                    let is_selected = self
-                        .selected_instance
-                        .as_ref()
-                        .map(|name| name == &instance.name)
-                        .unwrap_or(false);
+                egui::Grid::new("instance_grid")
+                    .striped(true)
+                    .min_col_width(110.0)
+                    .show(ui, |ui| {
+                        ui.strong("Name");
+                        ui.strong("Type");
+                        ui.strong("Status");
+                        ui.strong("CPU");
+                        ui.strong("Memory");
+                        ui.strong("Network");
+                        ui.strong("Updated");
+                        ui.end_row();
 
-                    // Modern card design
-                    let frame = if is_selected {
-                        egui::Frame::default()
-                            .fill(theme::BG_ELEVATED)
-                            .stroke(egui::Stroke::new(2.0, theme::TN_NIGHT_CYAN))
-                            .rounding(6.0)
-                            .inner_margin(12.0)
-                    } else {
-                        egui::Frame::default()
-                            .fill(theme::BG_SECONDARY)
-                            .stroke(egui::Stroke::new(1.0, theme::BG_ELEVATED))
-                            .rounding(6.0)
-                            .inner_margin(12.0)
-                    };
+                        for instance in instances.iter() {
+                            let is_selected = self
+                                .selected_instance
+                                .as_ref()
+                                .map(|name| name == &instance.name)
+                                .unwrap_or(false);
 
-                    let response = frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            // Status dot (prominent)
+                            if ui.selectable_label(is_selected, &instance.name).clicked() {
+                                self.selected_instance = Some(instance.name.clone());
+                                self.detail_tab = DetailTab::Overview;
+                            }
+                            ui.label(match instance.instance_type {
+                                InstanceType::Vm => "VM",
+                                InstanceType::Container => "Container",
+                            });
+
                             let status_color = theme::get_status_color(&instance.status);
-                            let status_icon = theme::get_status_icon(&instance.status);
-                            ui.colored_label(status_color,
-                                egui::RichText::new(status_icon).size(20.0));
+                            ui.colored_label(status_color, format!("{:?}", instance.status));
 
-                            ui.vertical(|ui| {
-                                // Name and type
-                                ui.horizontal(|ui| {
-                                    ui.heading(&instance.name);
-                                    ui.small(match instance.instance_type {
-                                        InstanceType::Vm => "VM",
-                                        InstanceType::Container => "Container",
-                                    });
-                                });
-
-                                // Status and resource info
-                                ui.horizontal(|ui| {
-                                    ui.colored_label(status_color, format!("{:?}", instance.status));
-                                    ui.label("•");
-                                    ui.label(format!("{} cores", instance.cpu_cores));
-                                    ui.label("•");
-                                    ui.label(format!("{} MB RAM", instance.memory_mb));
-
-                                    if let Some(network) = &instance.network {
-                                        ui.label("•");
-                                        ui.label(network);
-                                    }
-
-                                    if let Some(ip) = &instance.ip_address {
-                                        ui.label("•");
-                                        ui.small(ip);
-                                    }
-                                });
-                            });
-
-                            // Right-aligned actions
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Details →").clicked() {
-                                    self.selected_instance = Some(instance.name.clone());
-                                    self.detail_tab = DetailTab::Overview;
-                                }
-                            });
-                        });
+                            ui.label(format!("{} cores", instance.cpu_cores));
+                            ui.label(format!("{} MB", instance.memory_mb));
+                            ui.label(instance.network.clone().unwrap_or_else(|| "-".to_string()));
+                            ui.label(instance.last_updated.format("%H:%M:%S").to_string());
+                            ui.end_row();
+                        }
                     });
-
-                    // Make entire card clickable
-                    if response.response.interact(egui::Sense::click()).clicked() {
-                        self.selected_instance = Some(instance.name.clone());
-                        self.detail_tab = DetailTab::Overview;
-                    }
-
-                    ui.add_space(6.0);
-                }
             });
     }
 
@@ -2922,7 +2121,6 @@ impl NovaApp {
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Snapshots, "Snapshots");
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Networking, "Networking");
                 ui.selectable_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions");
-                ui.selectable_value(&mut self.detail_tab, DetailTab::Performance, "Performance");
             });
 
             ui.separator();
@@ -2932,294 +2130,18 @@ impl NovaApp {
                 DetailTab::Snapshots => self.draw_snapshots(ui),
                 DetailTab::Networking => self.draw_networking(ui, instance),
                 DetailTab::Sessions => self.draw_sessions(ui, instance),
-                DetailTab::Performance => self.draw_performance(ui, instance),
             }
         });
-    }
-
-    fn draw_performance(&self, ui: &mut egui::Ui, instance: &Instance) {
-        ui.heading("Performance metrics");
-        ui.separator();
-        ui.label("Performance monitoring and graphs are on the roadmap.");
-        ui.label("Planned capabilities:");
-        ui.small("• CPU utilization graphs over time");
-        ui.small("• Memory usage and pressure metrics");
-        ui.small("• Disk I/O throughput and latency");
-        ui.small("• Network bandwidth utilization");
-
-        ui.add_space(8.0);
-        ui.group(|ui| {
-            ui.label(egui::RichText::new(&instance.name).strong());
-            ui.separator();
-            ui.label(format!("vCPUs: {}", instance.cpu_cores));
-            ui.label(format!("Memory: {} MB", instance.memory_mb));
-            ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                ui.label("Performance graphs will appear here.");
-                ui.small("Chart rendering with egui_plot is coming soon.");
-            });
-        });
-    }
-
-    fn draw_usb_passthrough_window(&mut self, ui: &mut egui::Ui) {
-        ui.heading("USB Device Passthrough");
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            if ui.button("🔄 Refresh Devices").clicked() {
-                let result = if let Ok(mut manager) = self.usb_manager.lock() {
-                    manager.discover_devices().map(|_| ())
-                } else {
-                    Ok(())
-                };
-
-                if let Err(e) = result {
-                    self.log_console(format!("Failed to refresh USB devices: {:?}", e));
-                } else {
-                    self.log_console("USB devices refreshed");
-                }
-            }
-        });
-
-        ui.add_space(8.0);
-
-        if let Ok(manager) = self.usb_manager.lock() {
-            let devices = manager.list_devices();
-
-            if devices.is_empty() {
-                ui.group(|ui| {
-                    ui.label("No USB devices detected");
-                    ui.small("Click 'Refresh Devices' to scan for USB devices");
-                });
-            } else {
-                ui.label(format!("Found {} USB device(s)", devices.len()));
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for device in devices.iter() {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(&device.product_name).strong());
-                                    ui.label(format!("by {}", device.vendor_name));
-                                });
-                                ui.label(format!("Vendor:Product = {}:{}", device.vendor_id, device.product_id));
-                                ui.label(format!("Bus {} Device {}", device.bus, device.device));
-                                if let Some(serial) = &device.serial {
-                                    ui.small(format!("Serial: {}", serial));
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-                    });
-            }
-        } else {
-            ui.label("USB manager is currently busy");
-        }
-    }
-
-    fn draw_pci_passthrough_window(&mut self, ui: &mut egui::Ui) {
-        ui.heading("PCI Device Passthrough");
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            if ui.button("🔄 Refresh Devices").clicked() {
-                let result = if let Ok(mut manager) = self.pci_manager.lock() {
-                    manager.discover_devices().map(|_| ())
-                } else {
-                    Ok(())
-                };
-
-                if let Err(e) = result {
-                    self.log_console(format!("Failed to discover PCI devices: {:?}", e));
-                } else {
-                    self.log_console("PCI devices discovered");
-                }
-            }
-        });
-
-        ui.add_space(8.0);
-
-        if let Ok(manager) = self.pci_manager.lock() {
-            let devices = manager.list_devices();
-
-            if devices.is_empty() {
-                ui.group(|ui| {
-                    ui.label("No PCI devices detected");
-                    ui.small("Click 'Refresh Devices' to scan for PCI devices");
-                });
-            } else {
-                ui.label(format!("Found {} PCI device(s)", devices.len()));
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for device in devices.iter() {
-                            ui.group(|ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(&device.device_name).strong());
-                                    ui.label(&device.vendor_name);
-                                });
-                                ui.monospace(format!("PCI Address: {}", device.address));
-                                ui.label(format!("Vendor:Device = {}:{}", device.vendor_id, device.device_id));
-                                if let Some(driver) = &device.driver {
-                                    ui.label(format!("Driver: {}", driver));
-                                }
-                                if let Some(iommu) = device.iommu_group {
-                                    ui.label(format!("IOMMU Group: {}", iommu));
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-                    });
-            }
-        } else {
-            ui.label("PCI manager is currently busy");
-        }
-    }
-
-    fn draw_sriov_manager_window(&mut self, ui: &mut egui::Ui) {
-        ui.heading("SR-IOV Virtual Function Manager");
-        ui.separator();
-
-        ui.label("SR-IOV allows creating virtual functions (VFs) from physical network adapters.");
-        ui.small("Virtual functions can be assigned directly to VMs for near-native performance.");
-
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            if ui.button("🔄 Refresh Devices").clicked() {
-                let result = if let Ok(mut manager) = self.sriov_manager.lock() {
-                    manager.discover_sriov_devices().map(|_| ())
-                } else {
-                    Ok(())
-                };
-
-                if let Err(e) = result {
-                    self.log_console(format!("Failed to discover SR-IOV devices: {:?}", e));
-                } else {
-                    self.log_console("SR-IOV capable devices discovered");
-                }
-            }
-        });
-
-        ui.add_space(8.0);
-
-        if let Ok(manager) = self.sriov_manager.lock() {
-            let devices = manager.list_devices();
-
-            if devices.is_empty() {
-                ui.group(|ui| {
-                    ui.label("No SR-IOV capable devices detected");
-                    ui.small("SR-IOV requires compatible hardware and may need to be enabled in BIOS/UEFI");
-                });
-            } else {
-                ui.label(format!("Found {} SR-IOV capable device(s)", devices.len()));
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .max_height(400.0)
-                    .show(ui, |ui| {
-                        for device in devices.iter() {
-                            ui.group(|ui| {
-                                ui.label(egui::RichText::new(&device.device_name).strong());
-                                ui.monospace(format!("PCI: {}", device.pf_address));
-                                ui.label(format!("Current VFs: {} / Max VFs: {}", device.current_vfs, device.max_vfs));
-
-                                if device.current_vfs > 0 {
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(102, 220, 144),
-                                        format!("{} virtual functions active", device.current_vfs)
-                                    );
-                                }
-                            });
-                            ui.add_space(4.0);
-                        }
-                    });
-            }
-        } else {
-            ui.label("SR-IOV manager is currently busy");
-        }
-    }
-
-    fn draw_migration_manager_window(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Virtual Machine Migration");
-        ui.separator();
-
-        ui.label("Live migration allows moving running VMs between hosts with minimal downtime.");
-        ui.small("Supports offline, live, and hybrid migration modes.");
-
-        ui.add_space(8.0);
-
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Migration Options").strong());
-            ui.separator();
-            ui.label("• Live Migration: Move running VMs with minimal downtime");
-            ui.label("• Offline Migration: Migrate stopped VMs");
-            ui.label("• Hybrid Migration: Combine live and offline approaches");
-        });
-
-        ui.add_space(8.0);
-
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Recent Migrations").strong());
-            ui.separator();
-
-            if let Some(ref manager_arc) = self.migration_manager {
-                if let Ok(manager) = manager_arc.lock() {
-                    let active = manager.list_active_migrations();
-
-                    if active.is_empty() {
-                        ui.label("No active migrations");
-                    } else {
-                        for migration in active.iter() {
-                            ui.horizontal(|ui| {
-                                ui.label(&migration.vm_name);
-                                ui.label(format!("→ {}", migration.destination_host));
-                                ui.label(format!("{:?}", migration.status));
-                            });
-                        }
-                    }
-                } else {
-                    ui.label("Migration manager is currently busy");
-                }
-            } else {
-                ui.label("Migration manager not initialized");
-            }
-        });
-
-        ui.add_space(8.0);
-        ui.small("Use the CLI for initiating VM migrations");
-        ui.small("GUI-based migration workflow coming soon");
     }
 }
 
 impl eframe::App for NovaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        theme::configure_tokyo_night_theme(ctx, self.theme_variant);
+        theme::configure_ocean_theme(ctx);
 
         self.refresh_instances(false);
         self.refresh_network_summary(false);
         self.drain_session_events();
-
-        // Handle keyboard shortcuts
-        ctx.input(|i| {
-            if i.modifiers.ctrl {
-                if i.key_pressed(egui::Key::G) {
-                    self.open_tool_window = ToolWindow::GpuManager;
-                } else if i.key_pressed(egui::Key::U) {
-                    self.open_tool_window = ToolWindow::UsbPassthrough;
-                } else if i.key_pressed(egui::Key::P) {
-                    self.open_tool_window = ToolWindow::PciPassthrough;
-                } else if i.key_pressed(egui::Key::R) {
-                    self.open_tool_window = ToolWindow::SriovManager;
-                } else if i.key_pressed(egui::Key::M) {
-                    self.open_tool_window = ToolWindow::MigrationManager;
-                }
-            }
-        });
 
         let filter = self.filter_text.trim().to_lowercase();
         let (can_start, can_stop, can_restart) = self.compute_action_state();
@@ -3266,53 +2188,14 @@ impl eframe::App for NovaApp {
                     ui.checkbox(&mut self.show_console, "Event log");
                     ui.checkbox(&mut self.show_insights, "Insights panel");
                     ui.separator();
-
-                    ui.label("Theme:");
-                    if ui.radio_value(&mut self.theme_variant, theme::TokyoNightVariant::Night, "🌙 Tokyo Night").clicked() {
-                        self.log_console("Theme changed to Tokyo Night");
-                    }
-                    if ui.radio_value(&mut self.theme_variant, theme::TokyoNightVariant::Storm, "⛈️ Tokyo Storm").clicked() {
-                        self.log_console("Theme changed to Tokyo Storm");
-                    }
-                    if ui.radio_value(&mut self.theme_variant, theme::TokyoNightVariant::Moon, "🌕 Tokyo Moon").clicked() {
-                        self.log_console("Theme changed to Tokyo Moon");
-                    }
-                    ui.separator();
-
-                    ui.label("Detail Tab:");
-                    ui.radio_value(&mut self.detail_tab, DetailTab::Overview, "Overview");
-                    ui.radio_value(&mut self.detail_tab, DetailTab::Snapshots, "Snapshots");
+                    ui.radio_value(&mut self.detail_tab, DetailTab::Overview, "Overview tab");
+                    ui.radio_value(&mut self.detail_tab, DetailTab::Snapshots, "Snapshots tab");
                     ui.radio_value(
                         &mut self.detail_tab,
                         DetailTab::Networking,
-                        "Networking",
+                        "Networking tab",
                     );
-                    ui.radio_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions");
-                    ui.radio_value(&mut self.detail_tab, DetailTab::Performance, "Performance");
-                });
-
-                ui.menu_button("Tools", |ui| {
-                    if ui.button("GPU Manager [Ctrl+G]").clicked() {
-                        self.open_tool_window = ToolWindow::GpuManager;
-                        ui.close_menu();
-                    }
-                    if ui.button("USB Passthrough [Ctrl+U]").clicked() {
-                        self.open_tool_window = ToolWindow::UsbPassthrough;
-                        ui.close_menu();
-                    }
-                    if ui.button("PCI Passthrough [Ctrl+P]").clicked() {
-                        self.open_tool_window = ToolWindow::PciPassthrough;
-                        ui.close_menu();
-                    }
-                    if ui.button("SR-IOV Manager [Ctrl+R]").clicked() {
-                        self.open_tool_window = ToolWindow::SriovManager;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Migration Manager [Ctrl+M]").clicked() {
-                        self.open_tool_window = ToolWindow::MigrationManager;
-                        ui.close_menu();
-                    }
+                    ui.radio_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions tab");
                 });
 
                 ui.menu_button("Help", |ui| if ui.button("About Nova").clicked() {});
@@ -3328,14 +2211,9 @@ impl eframe::App for NovaApp {
         });
 
         self.draw_header(ctx);
-        self.draw_tab_bar(ctx);
+        self.draw_navigation_panel(ctx, &filter);
 
-        // Only show navigation panel for VMs view
-        if self.main_view == MainView::VirtualMachines {
-            self.draw_navigation_panel(ctx, &filter);
-        }
-
-        if self.show_insights && self.main_view == MainView::VirtualMachines {
+        if self.show_insights {
             egui::SidePanel::right("insights")
                 .default_width(320.0)
                 .min_width(260.0)
@@ -3353,138 +2231,37 @@ impl eframe::App for NovaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(theme::BG_PANEL))
             .show(ctx, |ui| {
-                match self.main_view {
-                    MainView::Dashboard => {
-                        self.draw_dashboard_view(ui);
-                    }
-                    MainView::VirtualMachines => {
-                        ui.add_space(8.0);
-                        self.draw_action_toolbar(ui, can_start, can_stop, can_restart);
+                ui.add_space(8.0);
+                self.draw_action_toolbar(ui, can_start, can_stop, can_restart);
 
-                        ui.add_space(6.0);
-                        ui.separator();
-                        self.draw_filter_bar(ui);
-                        ui.add_space(10.0);
+                ui.add_space(6.0);
+                ui.separator();
+                self.draw_filter_bar(ui);
+                ui.add_space(10.0);
 
-                        ui.columns(2, |columns| {
-                            columns[0].heading("Managed instances");
-                            columns[0].small(format!(
-                                "{} total • {} running",
-                                self.instances_cache.len(),
-                                self.summary.running
-                            ));
-                            columns[0].separator();
-                            self.draw_instance_table(&mut columns[0], &filter);
+                ui.columns(2, |columns| {
+                    columns[0].heading("Managed instances");
+                    columns[0].small(format!(
+                        "{} total • {} running",
+                        self.instances_cache.len(),
+                        self.summary.running
+                    ));
+                    columns[0].separator();
+                    self.draw_instance_table(&mut columns[0], &filter);
 
-                            columns[1].heading("Details & telemetry");
-                            columns[1].separator();
-                            if let Some(instance) = selected_instance.as_ref() {
-                                self.draw_instance_detail(&mut columns[1], instance);
-                            } else {
-                                columns[1].vertical_centered(|ui| {
-                                    ui.add_space(60.0);
-                                    ui.heading("Select an instance");
-                                    ui.label("Choose a VM or container from the inventory to drill into metrics.");
-                                });
-                            }
+                    columns[1].heading("Details & telemetry");
+                    columns[1].separator();
+                    if let Some(instance) = selected_instance.as_ref() {
+                        self.draw_instance_detail(&mut columns[1], instance);
+                    } else {
+                        columns[1].vertical_centered(|ui| {
+                            ui.add_space(60.0);
+                            ui.heading("Select an instance");
+                            ui.label("Choose a VM or container from the inventory to drill into metrics.");
                         });
                     }
-                    MainView::Containers => {
-                        self.draw_containers_view(ui);
-                    }
-                    MainView::Networking => {
-                        self.draw_networking_view(ui);
-                    }
-                    MainView::Tools => {
-                        self.draw_tools_view(ui);
-                    }
-                }
+                });
             });
-
-        // Render tool windows
-        match self.open_tool_window {
-            ToolWindow::None => {}
-            ToolWindow::GpuManager => {
-                // Lazy-initialize GPU Manager GUI
-                if self.gpu_manager_gui.is_none() {
-                    let mut gui = GpuManagerGui::new(Arc::clone(&self.gpu_manager));
-                    gui.refresh();
-                    self.gpu_manager_gui = Some(gui);
-                }
-
-                let mut open = true;
-                egui::Window::new("GPU Passthrough Manager")
-                    .open(&mut open)
-                    .default_size([900.0, 600.0])
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        if let Some(gui) = &mut self.gpu_manager_gui {
-                            gui.draw(ui);
-                        }
-                    });
-
-                if !open {
-                    self.open_tool_window = ToolWindow::None;
-                    self.gpu_manager_gui = None;
-                }
-            }
-            ToolWindow::UsbPassthrough => {
-                let mut open = true;
-                egui::Window::new("USB Passthrough Manager")
-                    .open(&mut open)
-                    .default_size([800.0, 500.0])
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        self.draw_usb_passthrough_window(ui);
-                    });
-
-                if !open {
-                    self.open_tool_window = ToolWindow::None;
-                }
-            }
-            ToolWindow::PciPassthrough => {
-                let mut open = true;
-                egui::Window::new("PCI Passthrough Manager")
-                    .open(&mut open)
-                    .default_size([800.0, 500.0])
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        self.draw_pci_passthrough_window(ui);
-                    });
-
-                if !open {
-                    self.open_tool_window = ToolWindow::None;
-                }
-            }
-            ToolWindow::SriovManager => {
-                let mut open = true;
-                egui::Window::new("SR-IOV Manager")
-                    .open(&mut open)
-                    .default_size([800.0, 500.0])
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        self.draw_sriov_manager_window(ui);
-                    });
-
-                if !open {
-                    self.open_tool_window = ToolWindow::None;
-                }
-            }
-            ToolWindow::MigrationManager => {
-                let mut open = true;
-                egui::Window::new("VM Migration Manager")
-                    .open(&mut open)
-                    .default_size([800.0, 500.0])
-                    .resizable(true)
-                    .show(ctx, |ui| {
-                        self.draw_migration_manager_window(ui);
-                    });
-
-                if !open {
-                    self.open_tool_window = ToolWindow::None;
-                }
-            }
-        }
 
         ctx.request_repaint_after(self.refresh_interval.min(self.network_refresh_interval));
     }

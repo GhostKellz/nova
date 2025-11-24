@@ -1,6 +1,5 @@
 // Integration tests for storage pool functionality
 use nova::storage_pool::*;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -8,7 +7,10 @@ async fn test_storage_manager_creation() {
     let manager = StoragePoolManager::new();
     let pools = manager.list_pools();
 
-    assert!(pools.is_empty() || !pools.is_empty(), "Manager should be created successfully");
+    assert!(
+        pools.is_empty(),
+        "Fresh storage manager should start with an empty cache"
+    );
 }
 
 #[tokio::test]
@@ -23,7 +25,11 @@ async fn test_storage_pool_discovery() {
             for pool in pools {
                 println!("  Pool: {} ({:?})", pool.name, pool.pool_type);
                 assert!(!pool.name.is_empty(), "Pool name should not be empty");
-                assert!(pool.path.exists() || true, "Pool path validation");
+                assert!(pool.path.is_absolute(), "Pool paths must be absolute");
+                assert!(
+                    !pool.uuid.is_empty(),
+                    "Discovered pool UUID should be populated"
+                );
             }
         }
         Err(e) => {
@@ -66,7 +72,10 @@ async fn test_directory_pool_creation() {
             let _ = manager.delete_pool("test-dir-pool", false).await;
         }
         Err(e) => {
-            println!("Pool creation failed (expected in CI without libvirt): {:?}", e);
+            println!(
+                "Pool creation failed (expected in CI without libvirt): {:?}",
+                e
+            );
         }
     }
 }
@@ -93,7 +102,12 @@ async fn test_btrfs_pool_configuration() {
     };
 
     // Verify Btrfs configuration
-    if let PoolConfig::Btrfs { compression, subvolume, .. } = &pool.config {
+    if let PoolConfig::Btrfs {
+        compression,
+        subvolume,
+        ..
+    } = &pool.config
+    {
         assert!(matches!(compression, BtrfsCompression::Zstd { level: 3 }));
         assert_eq!(subvolume.as_ref().unwrap(), "nova-volumes");
     } else {
@@ -104,8 +118,8 @@ async fn test_btrfs_pool_configuration() {
 #[test]
 fn test_pool_capacity_calculations() {
     let capacity = PoolCapacity {
-        total_bytes: 1_073_741_824, // 1 GB
-        used_bytes: 536_870_912,     // 512 MB
+        total_bytes: 1_073_741_824,   // 1 GB
+        used_bytes: 536_870_912,      // 512 MB
         available_bytes: 536_870_912, // 512 MB
         allocation_bytes: 536_870_912,
     };
@@ -121,7 +135,11 @@ fn test_pool_capacity_calculations() {
         allocation_bytes: 0,
     };
 
-    assert_eq!(empty_capacity.usage_percent(), 0.0, "Empty capacity should be 0%");
+    assert_eq!(
+        empty_capacity.usage_percent(),
+        0.0,
+        "Empty capacity should be 0%"
+    );
 }
 
 #[tokio::test]
@@ -131,15 +149,18 @@ async fn test_volume_creation() {
 
     let pools = manager.list_pools();
 
-    if let Some(pool) = pools.first() {
-        println!("Testing volume creation in pool: {}", pool.name);
+    if let Some(pool_name) = pools.first().map(|pool| pool.name.clone()) {
+        println!("Testing volume creation in pool: {}", pool_name);
 
-        match manager.create_volume(
-            &pool.name,
-            "test-volume",
-            10_737_418_240, // 10 GB
-            VolumeFormat::Qcow2,
-        ).await {
+        match manager
+            .create_volume(
+                &pool_name,
+                "test-volume",
+                10_737_418_240, // 10 GB
+                VolumeFormat::Qcow2,
+            )
+            .await
+        {
             Ok(volume) => {
                 println!("✅ Volume created: {}", volume.name);
                 assert_eq!(volume.name, "test-volume");
@@ -238,7 +259,10 @@ async fn test_pool_lifecycle() {
     match manager.create_pool(pool.clone()).await {
         Ok(_) => {
             // Test listing
-            assert!(manager.get_pool("lifecycle-test-pool").is_some(), "Pool should exist after creation");
+            assert!(
+                manager.get_pool("lifecycle-test-pool").is_some(),
+                "Pool should exist after creation"
+            );
 
             // Test deletion
             match manager.delete_pool("lifecycle-test-pool", false).await {
@@ -264,7 +288,12 @@ fn test_nfs_pool_configuration() {
         mount_options: vec!["rw".to_string(), "async".to_string()],
     };
 
-    if let PoolConfig::Nfs { server, export_path, mount_options } = nfs_config {
+    if let PoolConfig::Nfs {
+        server,
+        export_path,
+        mount_options,
+    } = nfs_config
+    {
         assert_eq!(server, "192.168.1.100");
         assert_eq!(export_path, "/export/vms");
         assert_eq!(mount_options.len(), 2);
@@ -286,7 +315,13 @@ fn test_iscsi_pool_configuration() {
         }),
     };
 
-    if let PoolConfig::Iscsi { target, portal, lun, auth } = iscsi_config {
+    if let PoolConfig::Iscsi {
+        target,
+        portal,
+        lun,
+        auth,
+    } = iscsi_config
+    {
         assert!(target.starts_with("iqn."));
         assert!(portal.contains(':'));
         assert_eq!(lun, 0);
@@ -308,7 +343,12 @@ fn test_ceph_pool_configuration() {
         secret_uuid: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
     };
 
-    if let PoolConfig::Ceph { monitors, pool_name, .. } = ceph_config {
+    if let PoolConfig::Ceph {
+        monitors,
+        pool_name,
+        ..
+    } = ceph_config
+    {
         assert_eq!(monitors.len(), 2);
         assert_eq!(pool_name, "rbd");
     } else {
@@ -323,7 +363,11 @@ fn test_lvm_pool_configuration() {
         pv_devices: vec!["/dev/sdb".to_string(), "/dev/sdc".to_string()],
     };
 
-    if let PoolConfig::Lvm { vg_name, pv_devices } = lvm_config {
+    if let PoolConfig::Lvm {
+        vg_name,
+        pv_devices,
+    } = lvm_config
+    {
         assert_eq!(vg_name, "nova-vg");
         assert_eq!(pv_devices.len(), 2);
     } else {
@@ -341,6 +385,6 @@ async fn test_concurrent_pool_operations() {
     let pools2 = manager2.list_pools();
 
     // Both managers should work independently
-    assert!(pools1.len() >= 0);
-    assert!(pools2.len() >= 0);
+    assert!(pools1.is_empty(), "Manager one should not share state");
+    assert!(pools2.is_empty(), "Manager two should not share state");
 }

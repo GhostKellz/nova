@@ -1,0 +1,47 @@
+app-id: com.nova.Virtualization
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: nova
+finish-args:
+  - --share=network
+  - --filesystem=host
+  - --socket=wayland
+  - --socket=x11
+  - --device=all
+  - --talk-name=org.freedesktop.login1
+  - --talk-name=org.freedesktop.systemd1
+  - --talk-name=org.freedesktop.ColorManager
+modules:
+  - name: nova
+    buildsystem: simple
+    builddir: true
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/nova/cargo
+        RUSTFLAGS: -C target-cpu=native
+        RUST_BACKTRACE: full
+    build-commands:
+      - cargo fetch --locked
+      - cargo build --release --locked --bins
+      - install -Dm755 target/release/nova /app/bin/nova
+      - install -Dm755 target/release/nova-gui /app/bin/nova-gui
+      - install -Dm644 packaging/config/nova.conf /app/etc/nova/nova.conf
+      - install -Dm644 nova.desktop /app/share/applications/com.nova.Virtualization.desktop
+      - install -Dm644 assets/icons/nova-256.png /app/share/icons/hicolor/256x256/apps/com.nova.Virtualization.png
+      - install -Dm644 assets/icons/nova-128.png /app/share/icons/hicolor/128x128/apps/com.nova.Virtualization.png
+      - install -Dm644 assets/icons/nova-64.png /app/share/icons/hicolor/64x64/apps/com.nova.Virtualization.png
+      - install -Dm644 assets/icons/nova-32.png /app/share/icons/hicolor/32x32/apps/com.nova.Virtualization.png
+      - install -Dm644 assets/icons/nova-28.png /app/share/icons/hicolor/28x28/apps/com.nova.Virtualization.png
+      - install -Dm644 LICENSE /app/share/licenses/com.nova.Virtualization/LICENSE
+      - install -Dm644 README.md /app/share/doc/com.nova.Virtualization/README.md
+    sources:
+      - type: dir
+        path: ../..
+cleanup:
+  - /share/man
+  - /share/doc
+  - /share/gtk-doc

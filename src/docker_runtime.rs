@@ -5,7 +5,6 @@
 
 use crate::container_runtime::*;
 use crate::{log_debug, log_error, log_info};
-use async_trait::async_trait;
 use std::process::Command;
 
 /// Docker runtime implementation
@@ -24,7 +23,10 @@ impl DockerRuntime {
         };
 
         if available {
-            log_info!("Docker runtime initialized (version: {})", version.as_deref().unwrap_or("unknown"));
+            log_info!(
+                "Docker runtime initialized (version: {})",
+                version.as_deref().unwrap_or("unknown")
+            );
         } else {
             log_debug!("Docker runtime not available");
         }
@@ -47,7 +49,9 @@ impl DockerRuntime {
             .ok()
             .and_then(|output| {
                 if output.status.success() {
-                    String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
                 } else {
                     None
                 }
@@ -179,7 +183,6 @@ impl DockerRuntime {
     }
 }
 
-#[async_trait]
 impl ContainerRuntime for DockerRuntime {
     fn is_available(&self) -> bool {
         self.available
@@ -189,164 +192,198 @@ impl ContainerRuntime for DockerRuntime {
         "Docker"
     }
 
-    async fn version(&self) -> Result<String> {
-        self.version.clone().ok_or_else(|| {
-            ContainerRuntimeError::RuntimeNotAvailable("Docker version unknown".to_string())
+    fn version<'a>(&'a self) -> RuntimeFuture<'a, String> {
+        Box::pin(async move {
+            self.version.clone().ok_or_else(|| {
+                ContainerRuntimeError::RuntimeNotAvailable("Docker version unknown".to_string())
+            })
         })
     }
 
-    async fn run_container(
-        &self,
-        image: &str,
-        name: Option<&str>,
-        config: &ContainerConfig,
-    ) -> Result<String> {
-        if !self.available {
-            return Err(ContainerRuntimeError::RuntimeNotAvailable(
-                "Docker is not installed".to_string(),
-            ));
-        }
+    fn run_container<'a>(
+        &'a self,
+        image: &'a str,
+        name: Option<&'a str>,
+        config: &'a ContainerConfig,
+    ) -> RuntimeFuture<'a, String> {
+        Box::pin(async move {
+            if !self.available {
+                return Err(ContainerRuntimeError::RuntimeNotAvailable(
+                    "Docker is not installed".to_string(),
+                ));
+            }
 
-        log_info!("Starting Docker container: {} from image {}", name.unwrap_or("<unnamed>"), image);
+            log_info!(
+                "Starting Docker container: {} from image {}",
+                name.unwrap_or("<unnamed>"),
+                image
+            );
 
-        let mut docker_config = config.clone();
-        docker_config.capsule = image.to_string();
-        let args = self.build_docker_args(name, &docker_config);
+            let mut docker_config = config.clone();
+            docker_config.capsule = image.to_string();
+            let args = self.build_docker_args(name, &docker_config);
 
-        let output = Command::new("docker")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::StartFailed(format!("Failed to execute docker: {}", e)))?;
+            let output = Command::new("docker").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::StartFailed(format!("Failed to execute docker: {}", e))
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            log_error!("Docker run failed: {}", stderr);
-            return Err(ContainerRuntimeError::StartFailed(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log_error!("Docker run failed: {}", stderr);
+                return Err(ContainerRuntimeError::StartFailed(stderr.to_string()));
+            }
 
-        let container_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+            let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        log_info!("Docker container started: {}", container_id);
-        Ok(container_id)
+            log_info!("Docker container started: {}", container_id);
+            Ok(container_id)
+        })
     }
 
-    async fn stop_container(&self, id_or_name: &str) -> Result<()> {
-        log_info!("Stopping Docker container: {}", id_or_name);
+    fn stop_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Stopping Docker container: {}", id_or_name);
 
-        let output = Command::new("docker")
-            .args(&["stop", id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::StopFailed(format!("Failed to execute docker stop: {}", e)))?;
+            let output = Command::new("docker")
+                .args(&["stop", id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::StopFailed(format!(
+                        "Failed to execute docker stop: {}",
+                        e
+                    ))
+                })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::StopFailed(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::StopFailed(stderr.to_string()));
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn remove_container(&self, id_or_name: &str, force: bool) -> Result<()> {
-        log_info!("Removing Docker container: {}", id_or_name);
+    fn remove_container<'a>(&'a self, id_or_name: &'a str, force: bool) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Removing Docker container: {}", id_or_name);
 
-        let mut args = vec!["rm"];
-        if force {
-            args.push("-f");
-        }
-        args.push(id_or_name);
+            let mut args = vec!["rm"];
+            if force {
+                args.push("-f");
+            }
+            args.push(id_or_name);
 
-        let output = Command::new("docker")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute docker rm: {}", e)))?;
+            let output = Command::new("docker").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::Other(format!("Failed to execute docker rm: {}", e))
+            })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::Other(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::Other(stderr.to_string()));
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn list_containers(&self, all: bool) -> Result<Vec<ContainerInfo>> {
-        let mut args = vec!["ps", "--format", "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}"];
-        if all {
-            args.push("-a");
-        }
+    fn list_containers<'a>(&'a self, all: bool) -> RuntimeFuture<'a, Vec<ContainerInfo>> {
+        Box::pin(async move {
+            let mut args = vec![
+                "ps",
+                "--format",
+                "{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}",
+            ];
+            if all {
+                args.push("-a");
+            }
 
-        let output = Command::new("docker")
-            .args(&args)
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute docker ps: {}", e)))?;
+            let output = Command::new("docker").args(&args).output().map_err(|e| {
+                ContainerRuntimeError::Other(format!("Failed to execute docker ps: {}", e))
+            })?;
 
-        if !output.status.success() {
-            return Ok(Vec::new());
-        }
+            if !output.status.success() {
+                return Ok(Vec::new());
+            }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let containers: Vec<ContainerInfo> = stdout
-            .lines()
-            .filter_map(|line| self.parse_docker_ps_line(line))
-            .collect();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let containers: Vec<ContainerInfo> = stdout
+                .lines()
+                .filter_map(|line| self.parse_docker_ps_line(line))
+                .collect();
 
-        Ok(containers)
+            Ok(containers)
+        })
     }
 
-    async fn inspect_container(&self, id_or_name: &str) -> Result<ContainerInfo> {
-        let containers = self.list_containers(true).await?;
-        containers
-            .into_iter()
-            .find(|c| c.id == id_or_name || c.name == id_or_name)
-            .ok_or_else(|| ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()))
+    fn inspect_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerInfo> {
+        Box::pin(async move {
+            let containers = self.list_containers(true).await?;
+            containers
+                .into_iter()
+                .find(|c| c.id == id_or_name || c.name == id_or_name)
+                .ok_or_else(|| ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()))
+        })
     }
 
-    async fn pull_image(&self, image: &str) -> Result<()> {
-        log_info!("Pulling Docker image: {}", image);
+    fn pull_image<'a>(&'a self, image: &'a str) -> RuntimeFuture<'a, ()> {
+        Box::pin(async move {
+            log_info!("Pulling Docker image: {}", image);
 
-        let output = Command::new("docker")
-            .args(&["pull", image])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute docker pull: {}", e)))?;
+            let output = Command::new("docker")
+                .args(&["pull", image])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute docker pull: {}", e))
+                })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ContainerRuntimeError::Other(stderr.to_string()));
-        }
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(ContainerRuntimeError::Other(stderr.to_string()));
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    async fn list_images(&self) -> Result<Vec<ImageInfo>> {
-        // Simple implementation - would need proper parsing
-        Ok(Vec::new())
+    fn list_images<'a>(&'a self) -> RuntimeFuture<'a, Vec<ImageInfo>> {
+        Box::pin(async move {
+            // Simple implementation - would need proper parsing
+            Ok(Vec::new())
+        })
     }
 
-    async fn get_logs(&self, id_or_name: &str, lines: usize) -> Result<Vec<String>> {
-        let output = Command::new("docker")
-            .args(&["logs", "--tail", &lines.to_string(), id_or_name])
-            .output()
-            .map_err(|e| ContainerRuntimeError::Other(format!("Failed to execute docker logs: {}", e)))?;
+    fn get_logs<'a>(&'a self, id_or_name: &'a str, lines: usize) -> RuntimeFuture<'a, Vec<String>> {
+        Box::pin(async move {
+            let output = Command::new("docker")
+                .args(&["logs", "--tail", &lines.to_string(), id_or_name])
+                .output()
+                .map_err(|e| {
+                    ContainerRuntimeError::Other(format!("Failed to execute docker logs: {}", e))
+                })?;
 
-        if !output.status.success() {
-            return Err(ContainerRuntimeError::ContainerNotFound(id_or_name.to_string()));
-        }
+            if !output.status.success() {
+                return Err(ContainerRuntimeError::ContainerNotFound(
+                    id_or_name.to_string(),
+                ));
+            }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.lines().map(|s| s.to_string()).collect())
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(stdout.lines().map(|s| s.to_string()).collect())
+        })
     }
 
-    async fn get_stats(&self, _id_or_name: &str) -> Result<ContainerStats> {
-        // Placeholder - would need proper stats parsing
-        Ok(ContainerStats {
-            cpu_usage_percent: 0.0,
-            memory_usage_mb: 0,
-            memory_limit_mb: 0,
-            network_rx_bytes: 0,
-            network_tx_bytes: 0,
-            disk_read_bytes: 0,
-            disk_write_bytes: 0,
+    fn get_stats<'a>(&'a self, _id_or_name: &'a str) -> RuntimeFuture<'a, ContainerStats> {
+        Box::pin(async move {
+            // Placeholder - would need proper stats parsing
+            Ok(ContainerStats {
+                cpu_usage_percent: 0.0,
+                memory_usage_mb: 0,
+                memory_limit_mb: 0,
+                network_rx_bytes: 0,
+                network_tx_bytes: 0,
+                disk_read_bytes: 0,
+                disk_write_bytes: 0,
+            })
         })
     }
 }

@@ -40,7 +40,7 @@ pub struct PoolCapacity {
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub available_bytes: u64,
-    pub allocation_bytes: u64,  // Allocated but not yet used (thin provisioning)
+    pub allocation_bytes: u64, // Allocated but not yet used (thin provisioning)
 }
 
 impl PoolCapacity {
@@ -131,7 +131,7 @@ pub enum ZfsCompression {
 pub struct IscsiAuth {
     pub username: String,
     pub password: String,
-    pub auth_type: String,  // CHAP, etc.
+    pub auth_type: String, // CHAP, etc.
 }
 
 /// Storage volume representation
@@ -383,9 +383,10 @@ impl StoragePoolManager {
             PoolType::Btrfs => self.create_btrfs_pool(&pool).await?,
             PoolType::Nfs => self.create_nfs_pool(&pool).await?,
             _ => {
-                return Err(NovaError::ConfigError(
-                    format!("Pool type {:?} not yet implemented", pool.pool_type)
-                ));
+                return Err(NovaError::ConfigError(format!(
+                    "Pool type {:?} not yet implemented",
+                    pool.pool_type
+                )));
             }
         }
 
@@ -442,7 +443,13 @@ impl StoragePoolManager {
     async fn create_btrfs_pool(&self, pool: &StoragePool) -> Result<()> {
         log_info!("Creating Btrfs pool: {}", pool.name);
 
-        if let PoolConfig::Btrfs { mount_point, subvolume, compression, .. } = &pool.config {
+        if let PoolConfig::Btrfs {
+            mount_point,
+            subvolume,
+            compression,
+            ..
+        } = &pool.config
+        {
             // Create btrfs subvolume if specified
             if let Some(subvol) = subvolume {
                 let subvol_path = mount_point.join(subvol);
@@ -466,24 +473,33 @@ impl StoragePoolManager {
                     BtrfsCompression::Zstd { level } => {
                         let _ = Command::new("btrfs")
                             .args(&[
-                                "property", "set", subvol_path.to_str().unwrap(),
-                                "compression", &format!("zstd:{}", level)
+                                "property",
+                                "set",
+                                subvol_path.to_str().unwrap(),
+                                "compression",
+                                &format!("zstd:{}", level),
                             ])
                             .output();
                     }
                     BtrfsCompression::Lzo => {
                         let _ = Command::new("btrfs")
                             .args(&[
-                                "property", "set", subvol_path.to_str().unwrap(),
-                                "compression", "lzo"
+                                "property",
+                                "set",
+                                subvol_path.to_str().unwrap(),
+                                "compression",
+                                "lzo",
                             ])
                             .output();
                     }
                     BtrfsCompression::Zlib => {
                         let _ = Command::new("btrfs")
                             .args(&[
-                                "property", "set", subvol_path.to_str().unwrap(),
-                                "compression", "zlib"
+                                "property",
+                                "set",
+                                subvol_path.to_str().unwrap(),
+                                "compression",
+                                "zlib",
                             ])
                             .output();
                     }
@@ -509,7 +525,12 @@ impl StoragePoolManager {
     async fn create_nfs_pool(&self, pool: &StoragePool) -> Result<()> {
         log_info!("Creating NFS pool: {}", pool.name);
 
-        if let PoolConfig::Nfs { server, export_path, mount_options } = &pool.config {
+        if let PoolConfig::Nfs {
+            server,
+            export_path,
+            mount_options,
+        } = &pool.config
+        {
             // Generate libvirt XML for NFS
             let xml = self.generate_nfs_pool_xml(pool, server, export_path, mount_options)?;
 
@@ -594,9 +615,7 @@ impl StoragePoolManager {
         log_info!("Deleting storage pool: {}", name);
 
         // Stop the pool
-        let _ = Command::new("virsh")
-            .args(&["pool-destroy", name])
-            .output();
+        let _ = Command::new("virsh").args(&["pool-destroy", name]).output();
 
         // Undefine the pool
         let args = vec!["pool-undefine", name];

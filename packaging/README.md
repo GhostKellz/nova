@@ -12,6 +12,11 @@ This directory contains packaging files for multiple Linux distributions.
 yay -S nova-virtualization
 ```
 
+**Build from source (Make target):**
+```bash
+make -C packaging arch
+```
+
 **Files:**
 - `arch/PKGBUILD` - AUR package definition
 - `arch/nova.install` - Post-install hooks
@@ -95,6 +100,49 @@ sudo dnf install ~/rpmbuild/RPMS/x86_64/nova-virtualization-*.rpm
 
 ---
 
+### Flatpak (Beta)
+**Status:** Beta (requires Flatpak runtime and Rust SDK extension)
+
+**Build & Install:**
+```bash
+flatpak install flathub org.freedesktop.Platform//23.08 org.freedesktop.Sdk//23.08
+flatpak install flathub org.freedesktop.Sdk.Extension.rust-stable//23.08
+
+# From repository root
+flatpak-builder build/flatpak packaging/flatpak/com.nova.Virtualization.yml --user --install
+flatpak run com.nova.Virtualization --version
+```
+
+**Manifest:** `flatpak/com.nova.Virtualization.yml`
+- Uses local checkout as source (no network access required)
+- Bundles both `nova` CLI and `nova-gui`
+- Declares Wayland/X11 sockets, device passthrough, and logind/systemd D-Bus access for virtualization workflows
+
+**Notes:**
+- Requires Flatpak 1.12+ and the Rust SDK extension
+- Builder outputs cached repo under `target/package-build/flatpak`
+- Use `flatpak-builder --run build/flatpak com.nova.Virtualization.sh --help` for debugging
+
+---
+
+### AppImage (Beta)
+**Status:** Beta (requires `appimage-builder`)
+
+**Build:**
+```bash
+pip install --user appimage-builder
+cd /data/projects/nova
+appimage-builder --recipe packaging/appimage/AppImageBuilder.yml
+```
+
+**Output:** `target/package-build/appimage/Nova-*.AppImage`
+
+**Notes:**
+- Bundles `nova` and `nova-gui` with default configuration
+- Uses `packaging/appimage/AppRun` launcher to expose GUI by default
+- Requires `desktop-file-utils` (for `desktop-file-edit`) during build
+- Run with `APPIMAGE_EXTRACT_AND_RUN=1 ./Nova-x86_64.AppImage --version` when FUSE is unavailable
+
 ## Common Files
 
 ### Systemd Services
@@ -106,6 +154,25 @@ sudo dnf install ~/rpmbuild/RPMS/x86_64/nova-virtualization-*.rpm
 
 ### Udev Rules
 - `udev/99-nova-vfio.rules` - GPU passthrough device permissions
+
+---
+
+## Automation
+
+The packaging directory now ships with automation helpers:
+
+- `packaging/Makefile` — unified entrypoint for building Arch, Fedora, Flatpak, and AppImage artifacts under `target/package-build/`
+- `packaging/scripts/smoke-tests.sh` — optional smoke test that validates package contents (requires corresponding tooling on the host)
+
+Examples:
+
+```bash
+# Build every packaging target
+make -C packaging all
+
+# Run smoke tests (builds missing artifacts on demand)
+make -C packaging smoke-test
+```
 
 ---
 

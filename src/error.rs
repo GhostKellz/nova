@@ -30,7 +30,10 @@ impl fmt::Display for NovaError {
             NovaError::IoError(err) => write!(f, "IO error: {}", err),
             NovaError::SerdeError(err) => write!(f, "Configuration parse error: {}", err),
             NovaError::SnapshotNotFound(name) => write!(f, "Snapshot '{}' not found", name),
-            NovaError::SnapshotHasChildren => write!(f, "Snapshot has children and cannot be deleted without --children flag"),
+            NovaError::SnapshotHasChildren => write!(
+                f,
+                "Snapshot has children and cannot be deleted without --children flag"
+            ),
         }
     }
 }

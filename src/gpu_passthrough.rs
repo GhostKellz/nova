@@ -1,6 +1,7 @@
 use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,26 +18,55 @@ pub struct IommuGroup {
 /// PCI Device representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PciDevice {
-    pub address: String,        // e.g., "0000:01:00.0"
-    pub vendor_id: String,       // e.g., "10de" (NVIDIA)
-    pub device_id: String,       // e.g., "2684" (RTX 4090)
-    pub vendor_name: String,     // e.g., "NVIDIA Corporation"
-    pub device_name: String,     // e.g., "GeForce RTX 4090"
+    pub address: String,     // e.g., "0000:01:00.0"
+    pub vendor_id: String,   // e.g., "10de" (NVIDIA)
+    pub device_id: String,   // e.g., "2684" (RTX 4090)
+    pub vendor_name: String, // e.g., "NVIDIA Corporation"
+    pub device_name: String, // e.g., "GeForce RTX 4090"
     pub iommu_group: Option<u32>,
-    pub driver: Option<String>,  // vfio-pci, nvidia, nouveau, etc.
+    pub driver: Option<String>, // vfio-pci, nvidia, nouveau, etc.
     pub in_use: bool,
 }
 
 /// GPU capabilities and features
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GpuCapabilities {
-    pub compute_capability: Option<String>,  // CUDA compute capability
+    pub compute_capability: Option<String>, // CUDA compute capability
     pub vram_mb: Option<u64>,
     pub pcie_generation: Option<u8>,
     pub pcie_lanes: Option<u8>,
     pub sriov_capable: bool,
     pub vgpu_capable: bool,
-    pub reset_bug: bool,  // Known NVIDIA reset bug
+    pub reset_bug: bool, // Known NVIDIA reset bug
+    pub generation: Option<GpuGeneration>,
+    pub minimum_driver: Option<String>,
+    pub recommended_kernel: Option<String>,
+    pub tcc_supported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum GpuGeneration {
+    Pascal,
+    Turing,
+    Ampere,
+    AdaLovelace,
+    Blackwell,
+    Unknown,
+}
+
+impl fmt::Display for GpuGeneration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            GpuGeneration::Pascal => "Pascal (RTX 10)",
+            GpuGeneration::Turing => "Turing (RTX 20)",
+            GpuGeneration::Ampere => "Ampere (RTX 30)",
+            GpuGeneration::AdaLovelace => "Ada Lovelace (RTX 40)",
+            GpuGeneration::Blackwell => "Blackwell (RTX 50)",
+            GpuGeneration::Unknown => "Unknown",
+        };
+
+        write!(f, "{}", label)
+    }
 }
 
 /// GPU Passthrough configuration
@@ -46,26 +76,26 @@ pub struct GpuPassthroughConfig {
     pub mode: PassthroughMode,
     pub romfile: Option<PathBuf>,
     pub multifunction: bool,
-    pub audio_device: Option<String>,  // GPU audio device address
+    pub audio_device: Option<String>,   // GPU audio device address
     pub usb_controller: Option<String>, // USB controller for looking glass
-    pub x_vga: bool,  // Primary VGA device
+    pub x_vga: bool,                    // Primary VGA device
     pub display: DisplayMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PassthroughMode {
-    Full,           // Full device passthrough
-    SrIov,          // SR-IOV virtual function
-    Vgpu,           // NVIDIA vGPU
-    ManagedVfio,    // Managed by Nova
+    Full,        // Full device passthrough
+    SrIov,       // SR-IOV virtual function
+    Vgpu,        // NVIDIA vGPU
+    ManagedVfio, // Managed by Nova
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DisplayMode {
-    None,           // Headless
-    Spice,          // SPICE display
-    LookingGlass,   // Looking Glass for near-native
-    VirtioGpu,      // Virtio GPU (software)
+    None,         // Headless
+    Spice,        // SPICE display
+    LookingGlass, // Looking Glass for near-native
+    VirtioGpu,    // Virtio GPU (software)
 }
 
 /// GPU Manager - handles all GPU passthrough operations
@@ -79,18 +109,23 @@ pub struct GpuManager {
     /// GPU reservations (device_address -> vm_name)
     reservations: HashMap<String, String>,
 
+    /// Discovered GPU capabilities by PCI address
+    gpu_capabilities: HashMap<String, GpuCapabilities>,
+
     /// nvbind integration enabled
     pub nvbind_available: bool,
 
     /// System configuration
     pub config: GpuSystemConfig,
+
+    discovered: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuSystemConfig {
     pub vfio_enabled: bool,
     pub iommu_enabled: bool,
-    pub iommu_mode: Option<String>,  // intel_iommu or amd_iommu
+    pub iommu_mode: Option<String>, // intel_iommu or amd_iommu
     pub kernel_modules: Vec<String>,
     pub blacklisted_drivers: Vec<String>,
 }
@@ -101,8 +136,10 @@ impl GpuManager {
             gpus: Vec::new(),
             iommu_groups: Vec::new(),
             reservations: HashMap::new(),
+            gpu_capabilities: HashMap::new(),
             nvbind_available: Self::check_nvbind(),
             config: GpuSystemConfig::detect(),
+            discovered: false,
         }
     }
 
@@ -119,6 +156,10 @@ impl GpuManager {
     pub fn discover(&mut self) -> Result<()> {
         log_info!("Discovering GPUs and IOMMU groups...");
 
+        self.gpus.clear();
+        self.iommu_groups.clear();
+        self.gpu_capabilities.clear();
+
         // Discover PCI devices
         self.discover_pci_devices()?;
 
@@ -128,9 +169,22 @@ impl GpuManager {
         // Check GPU capabilities
         self.discover_gpu_capabilities()?;
 
-        log_info!("Discovered {} GPUs in {} IOMMU groups",
-                  self.gpus.len(), self.iommu_groups.len());
+        log_info!(
+            "Discovered {} GPUs in {} IOMMU groups",
+            self.gpus.len(),
+            self.iommu_groups.len()
+        );
 
+        self.discovered = true;
+
+        Ok(())
+    }
+
+    /// Ensure discovery has been performed (idempotent)
+    pub fn ensure_discovered(&mut self) -> Result<()> {
+        if !self.discovered {
+            self.discover()?;
+        }
         Ok(())
     }
 
@@ -155,8 +209,8 @@ impl GpuManager {
             // Look for VGA/3D/Display controllers
             if line.contains("VGA compatible controller")
                 || line.contains("3D controller")
-                || line.contains("Display controller") {
-
+                || line.contains("Display controller")
+            {
                 if let Some(device) = self.parse_lspci_line(line) {
                     log_debug!("Found GPU: {} ({})", device.device_name, device.address);
                     self.gpus.push(device);
@@ -261,6 +315,12 @@ impl GpuManager {
                 if let Some(group_id_str) = entry.file_name().to_str() {
                     if let Ok(group_id) = group_id_str.parse::<u32>() {
                         let devices = self.get_iommu_group_devices(group_id);
+
+                        // Skip groups that do not contain any discoverable GPUs
+                        if devices.is_empty() {
+                            continue;
+                        }
+
                         let isolated = devices.len() == 1;
                         let viable = isolated || self.is_group_viable(&devices);
 
@@ -293,9 +353,9 @@ impl GpuManager {
         // (e.g., GPU + GPU audio device)
         devices.iter().all(|d| {
             d.device_name.contains("NVIDIA")
-            || d.device_name.contains("AMD")
-            || d.device_name.contains("Intel")
-            || d.device_name.contains("Audio")
+                || d.device_name.contains("AMD")
+                || d.device_name.contains("Intel")
+                || d.device_name.contains("Audio")
         })
     }
 
@@ -312,7 +372,7 @@ impl GpuManager {
     }
 
     /// Discover GPU capabilities via nvbind
-    fn discover_capabilities_via_nvbind(&self) -> Result<()> {
+    fn discover_capabilities_via_nvbind(&mut self) -> Result<()> {
         log_info!("Using nvbind for GPU capability discovery");
 
         let output = Command::new("nvbind")
@@ -328,38 +388,91 @@ impl GpuManager {
             // Format: "GPU 0: GeForce RTX 4090"
             //         "  PCI Address: 0000:01:00.0"
             //         "  Memory: 24576 MB"
+            let mut current_name: Option<String> = None;
+            let mut current_addr: Option<String> = None;
+            let mut current_memory: Option<u64> = None;
+
+            let flush_entry = |manager: &mut GpuManager,
+                               name: Option<String>,
+                               addr: Option<String>,
+                               memory: Option<u64>| {
+                if let (Some(name), Some(addr)) = (name, addr) {
+                    let normalized = GpuManager::normalize_pci_address(&addr);
+                    let caps_entry = manager
+                        .gpu_capabilities
+                        .entry(normalized.clone())
+                        .or_default();
+
+                    if let Some(mem) = memory {
+                        caps_entry.vram_mb = Some(mem);
+                    }
+
+                    if let Some(detected_gen) = GpuManager::detect_gpu_generation(&name) {
+                        caps_entry.generation = Some(detected_gen);
+                    }
+
+                    if matches!(caps_entry.generation, Some(GpuGeneration::Blackwell)) {
+                        GpuManager::apply_blackwell_requirements(caps_entry);
+                    }
+                }
+            };
+
             for line in info.lines() {
-                if line.trim().starts_with("GPU ") {
-                    if let Some(colon_pos) = line.find(':') {
-                        let gpu_name = line[colon_pos+1..].trim();
-                        log_debug!("Found GPU via nvbind: {}", gpu_name);
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    flush_entry(
+                        self,
+                        current_name.take(),
+                        current_addr.take(),
+                        current_memory.take(),
+                    );
+                    continue;
+                }
+
+                if trimmed.starts_with("GPU ") {
+                    if let Some(colon_pos) = trimmed.find(':') {
+                        let gpu_name = trimmed[colon_pos + 1..].trim().to_string();
+                        current_name = Some(gpu_name);
                     }
-                } else if line.contains("PCI Address:") {
-                    if let Some(colon_pos) = line.find(':') {
-                        let pci_addr = line[colon_pos+1..].trim();
-                        log_debug!("PCI Address: {}", pci_addr);
-                    }
-                } else if line.contains("Memory:") && line.contains("MB") {
-                    if let Some(memory_str) = line.split_whitespace()
-                        .find(|s| s.chars().all(|c| c.is_ascii_digit())) {
+                } else if trimmed.starts_with("PCI Address:") {
+                    let addr = trimmed
+                        .split(':')
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    current_addr = Some(addr);
+                } else if trimmed.starts_with("Memory:") && trimmed.contains("MB") {
+                    if let Some(memory_str) = trimmed
+                        .split_whitespace()
+                        .find(|s| s.chars().all(|c| c.is_ascii_digit()))
+                    {
                         if let Ok(memory_mb) = memory_str.parse::<u64>() {
-                            log_debug!("GPU Memory: {} MB", memory_mb);
-                            // Store capability info (would need to match to GPU by PCI address)
+                            current_memory = Some(memory_mb);
                         }
                     }
                 }
             }
+
+            flush_entry(
+                self,
+                current_name.take(),
+                current_addr.take(),
+                current_memory.take(),
+            );
         }
 
         Ok(())
     }
 
     /// Discover GPU capabilities via nvidia-smi
-    fn discover_capabilities_via_nvidia_smi(&self) -> Result<()> {
+    fn discover_capabilities_via_nvidia_smi(&mut self) -> Result<()> {
         log_info!("Using nvidia-smi for GPU capability discovery");
 
         let output = Command::new("nvidia-smi")
-            .args(&["--query-gpu=index,name,memory.total,pcie.link.gen.current,pcie.link.width.current", "--format=csv,noheader"])
+            .args(&[
+                "--query-gpu=pci.bus_id,name,memory.total,pcie.link.gen.current,pcie.link.width.current,compute_cap",
+                "--format=csv,noheader",
+            ])
             .output();
 
         if let Ok(output) = output {
@@ -368,42 +481,54 @@ impl GpuManager {
                 log_debug!("nvidia-smi output: {}", info);
 
                 // Parse CSV output
-                // Format: "0, GeForce RTX 4090, 24576 MiB, 4, 16"
+                // Format: "00000000:01:00.0, GeForce RTX 5090, 32768 MiB, 5, 16, 9.0"
                 for line in info.lines() {
                     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-                    if parts.len() >= 5 {
-                        let index = parts[0];
+                    if parts.len() >= 6 {
+                        let bus_id = parts[0];
                         let name = parts[1];
                         let memory_str = parts[2].replace(" MiB", "").replace(" MB", "");
                         let pcie_gen = parts[3];
                         let pcie_lanes = parts[4];
+                        let compute_cap = parts[5];
 
-                        log_debug!("GPU {}: {} (Memory: {} MiB, PCIe Gen {}, x{} lanes)",
-                                   index, name, memory_str, pcie_gen, pcie_lanes);
+                        let normalized = GpuManager::normalize_pci_address(bus_id);
+                        log_debug!(
+                            "GPU {}: {} (Memory: {} MiB, PCIe Gen {}, x{} lanes, CC {})",
+                            normalized,
+                            name,
+                            memory_str,
+                            pcie_gen,
+                            pcie_lanes,
+                            compute_cap
+                        );
 
-                        // Parse memory value
+                        let caps_entry =
+                            self.gpu_capabilities.entry(normalized.clone()).or_default();
+
+                        caps_entry.compute_capability = Self::parse_non_empty(compute_cap);
                         if let Ok(memory_mb) = memory_str.parse::<u64>() {
-                            log_debug!("  VRAM: {} MB ({} GB)", memory_mb, memory_mb / 1024);
+                            caps_entry.vram_mb = Some(memory_mb);
+                        }
+                        caps_entry.pcie_generation = pcie_gen.parse::<u8>().ok();
+                        caps_entry.pcie_lanes = pcie_lanes.parse::<u8>().ok();
+
+                        if let Some(detected_gen) = Self::detect_gpu_generation(name) {
+                            caps_entry.generation = Some(detected_gen.clone());
                         }
 
-                        // Parse PCIe generation
-                        if let Ok(generation) = pcie_gen.parse::<u8>() {
-                            log_debug!("  PCIe: Gen {} x{} lanes", generation, pcie_lanes);
+                        caps_entry.tcc_supported = matches!(
+                            caps_entry.generation,
+                            Some(GpuGeneration::AdaLovelace) | Some(GpuGeneration::Blackwell)
+                        );
 
-                            // Calculate theoretical bandwidth
-                            let bandwidth_per_lane_gbps = match generation {
-                                1 => 0.25,
-                                2 => 0.5,
-                                3 => 1.0,
-                                4 => 2.0,
-                                5 => 4.0,
-                                _ => 0.0,
-                            };
-
-                            if let Ok(lanes) = pcie_lanes.parse::<u8>() {
-                                let total_bandwidth = bandwidth_per_lane_gbps * lanes as f64;
-                                log_debug!("  Theoretical Bandwidth: {:.1} GB/s", total_bandwidth);
-                            }
+                        if matches!(caps_entry.generation, Some(GpuGeneration::Blackwell)) {
+                            GpuManager::apply_blackwell_requirements(caps_entry);
+                        } else if matches!(caps_entry.generation, Some(GpuGeneration::AdaLovelace))
+                        {
+                            caps_entry
+                                .minimum_driver
+                                .get_or_insert_with(|| "545.0".to_string());
                         }
                     }
                 }
@@ -417,21 +542,87 @@ impl GpuManager {
         Ok(())
     }
 
+    fn apply_blackwell_requirements(caps: &mut GpuCapabilities) {
+        caps.minimum_driver = Some("560.0".to_string());
+        caps.recommended_kernel = Some("6.9".to_string());
+        caps.vgpu_capable = true;
+        caps.sriov_capable = true;
+        caps.tcc_supported = true;
+    }
+
+    fn parse_non_empty(value: &str) -> Option<String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("n/a") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn normalize_pci_address(bus_id: &str) -> String {
+        let trimmed = bus_id.trim();
+        if trimmed.len() > 12 {
+            trimmed[trimmed.len() - 12..].to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn detect_gpu_generation(name: &str) -> Option<GpuGeneration> {
+        let lower = name.to_lowercase();
+
+        if lower.contains("rtx 50")
+            || lower.contains(" 50") && lower.contains("rtx")
+            || lower.contains("blackwell")
+            || lower.contains("gb202")
+        {
+            Some(GpuGeneration::Blackwell)
+        } else if lower.contains("rtx 40")
+            || lower.contains("4090")
+            || lower.contains("4080")
+            || lower.contains("ada")
+        {
+            Some(GpuGeneration::AdaLovelace)
+        } else if lower.contains("rtx 30")
+            || lower.contains("3090")
+            || lower.contains("3080")
+            || lower.contains("ampere")
+        {
+            Some(GpuGeneration::Ampere)
+        } else if lower.contains("rtx 20")
+            || lower.contains("2080")
+            || lower.contains("2070")
+            || lower.contains("turing")
+        {
+            Some(GpuGeneration::Turing)
+        } else if lower.contains("gtx 10") || lower.contains("1080") || lower.contains("pascal") {
+            Some(GpuGeneration::Pascal)
+        } else {
+            None
+        }
+    }
+
     /// Configure a GPU for passthrough
     pub fn configure_passthrough(&mut self, device_address: &str, vm_name: &str) -> Result<()> {
-        log_info!("Configuring GPU {} for passthrough to VM '{}'", device_address, vm_name);
+        log_info!(
+            "Configuring GPU {} for passthrough to VM '{}'",
+            device_address,
+            vm_name
+        );
 
         // Find the GPU
-        let _gpu = self.gpus.iter()
+        let _gpu = self
+            .gpus
+            .iter()
             .find(|g| g.address == device_address)
             .ok_or_else(|| NovaError::ConfigError(format!("GPU {} not found", device_address)))?;
 
         // Check if GPU is already reserved
         if self.reservations.contains_key(device_address) {
-            return Err(NovaError::ConfigError(
-                format!("GPU {} is already reserved by VM '{}'",
-                        device_address, self.reservations[device_address])
-            ));
+            return Err(NovaError::ConfigError(format!(
+                "GPU {} is already reserved by VM '{}'",
+                device_address, self.reservations[device_address]
+            )));
         }
 
         // Unbind from current driver
@@ -441,9 +632,13 @@ impl GpuManager {
         self.bind_vfio_pci(device_address)?;
 
         // Reserve the GPU
-        self.reservations.insert(device_address.to_string(), vm_name.to_string());
+        self.reservations
+            .insert(device_address.to_string(), vm_name.to_string());
 
-        log_info!("GPU {} successfully configured for passthrough", device_address);
+        log_info!(
+            "GPU {} successfully configured for passthrough",
+            device_address
+        );
         Ok(())
     }
 
@@ -452,11 +647,10 @@ impl GpuManager {
         let driver_path = format!("/sys/bus/pci/devices/{}/driver/unbind", device_address);
 
         if Path::new(&driver_path).exists() {
-            fs::write(&driver_path, device_address)
-                .map_err(|e| {
-                    log_error!("Failed to unbind driver: {}", e);
-                    NovaError::SystemCommandFailed
-                })?;
+            fs::write(&driver_path, device_address).map_err(|e| {
+                log_error!("Failed to unbind driver: {}", e);
+                NovaError::SystemCommandFailed
+            })?;
             log_debug!("Unbound driver from {}", device_address);
         }
 
@@ -466,23 +660,22 @@ impl GpuManager {
     /// Bind a device to vfio-pci driver
     fn bind_vfio_pci(&self, device_address: &str) -> Result<()> {
         // Load vfio-pci module
-        let _ = Command::new("modprobe")
-            .arg("vfio-pci")
-            .output();
+        let _ = Command::new("modprobe").arg("vfio-pci").output();
 
         // Write device IDs to vfio-pci new_id
-        let gpu = self.gpus.iter()
+        let gpu = self
+            .gpus
+            .iter()
             .find(|g| g.address == device_address)
             .ok_or_else(|| NovaError::ConfigError(format!("GPU {} not found", device_address)))?;
 
         let new_id_path = "/sys/bus/pci/drivers/vfio-pci/new_id";
         let device_ids = format!("{} {}", gpu.vendor_id, gpu.device_id);
 
-        fs::write(new_id_path, device_ids)
-            .map_err(|e| {
-                log_error!("Failed to bind to vfio-pci: {}", e);
-                NovaError::SystemCommandFailed
-            })?;
+        fs::write(new_id_path, device_ids).map_err(|e| {
+            log_error!("Failed to bind to vfio-pci: {}", e);
+            NovaError::SystemCommandFailed
+        })?;
 
         log_debug!("Bound {} to vfio-pci", device_address);
         Ok(())
@@ -498,7 +691,9 @@ impl GpuManager {
         // Parse PCI address (0000:01:00.0)
         let parts: Vec<&str> = config.device_address.split(':').collect();
         if parts.len() != 3 {
-            return Err(NovaError::ConfigError("Invalid PCI address format".to_string()));
+            return Err(NovaError::ConfigError(
+                "Invalid PCI address format".to_string(),
+            ));
         }
 
         let domain = &parts[0][0..4];
@@ -524,8 +719,10 @@ impl GpuManager {
         if let Some(_audio_address) = &config.audio_device {
             xml.push_str("    <hostdev mode='subsystem' type='pci' managed='yes'>\n");
             xml.push_str("      <source>\n");
-            xml.push_str(&format!("        <address domain='0x0000' bus='0x{}' slot='0x{}' function='0x{}'/>\n",
-                                  "01", "00", "1")); // Simplified
+            xml.push_str(&format!(
+                "        <address domain='0x0000' bus='0x{}' slot='0x{}' function='0x{}'/>\n",
+                "01", "00", "1"
+            )); // Simplified
             xml.push_str("      </source>\n");
             xml.push_str("    </hostdev>\n");
         }
@@ -553,6 +750,18 @@ impl GpuManager {
     /// List all available GPUs
     pub fn list_gpus(&self) -> &[PciDevice] {
         &self.gpus
+    }
+
+    /// Retrieve discovered capabilities for a specific GPU (if available)
+    pub fn capabilities_for(&self, device_address: &str) -> Option<&GpuCapabilities> {
+        self.gpu_capabilities.get(device_address)
+    }
+
+    /// Determine whether any detected GPUs are part of the RTX 50-series family
+    pub fn any_blackwell_gpus(&self) -> bool {
+        self.gpu_capabilities
+            .values()
+            .any(|caps| matches!(caps.generation, Some(GpuGeneration::Blackwell)))
     }
 
     /// List all IOMMU groups
@@ -606,8 +815,25 @@ impl GpuManager {
             issues.push("No GPUs detected on the system".to_string());
         }
 
-        if self.iommu_groups.iter().filter(|g| g.viable_for_passthrough).count() == 0 {
+        if self
+            .iommu_groups
+            .iter()
+            .filter(|g| g.viable_for_passthrough)
+            .count()
+            == 0
+        {
             issues.push("No viable IOMMU groups for GPU passthrough".to_string());
+        }
+
+        if self
+            .gpu_capabilities
+            .values()
+            .any(|caps| matches!(caps.generation, Some(GpuGeneration::Blackwell)))
+        {
+            issues.push(
+                "RTX 50-series detected — ensure NVIDIA driver 560+, Linux kernel 6.9+, and TCC mode for low-latency consoles (Looking Glass)."
+                    .to_string(),
+            );
         }
 
         issues
@@ -652,5 +878,64 @@ impl GpuSystemConfig {
 impl Default for GpuManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Default for GpuPassthroughConfig {
+    fn default() -> Self {
+        Self {
+            device_address: String::new(),
+            mode: PassthroughMode::Full,
+            romfile: None,
+            multifunction: true,
+            audio_device: None,
+            usb_controller: None,
+            x_vga: true,
+            display: DisplayMode::None,
+        }
+    }
+}
+
+impl GpuPassthroughConfig {
+    /// Generate vfio device arguments for QEMU
+    pub fn qemu_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        if !self.device_address.is_empty() {
+            let mut device = format!("vfio-pci,host={}", self.device_address);
+
+            if self.multifunction {
+                device.push_str(",multifunction=on");
+            }
+
+            if self.x_vga {
+                device.push_str(",x-vga=on");
+            }
+
+            match self.mode {
+                PassthroughMode::SrIov => device.push_str(",disable-err=on"),
+                PassthroughMode::Vgpu => device.push_str(",enable-migration=on"),
+                PassthroughMode::ManagedVfio | PassthroughMode::Full => {}
+            }
+
+            args.push("-device".to_string());
+            args.push(device);
+        }
+
+        if let Some(audio) = &self.audio_device {
+            if !audio.is_empty() {
+                args.push("-device".to_string());
+                args.push(format!("vfio-pci,host={}", audio));
+            }
+        }
+
+        if let Some(controller) = &self.usb_controller {
+            if !controller.is_empty() {
+                args.push("-device".to_string());
+                args.push(format!("vfio-pci,host={}", controller));
+            }
+        }
+
+        args
     }
 }

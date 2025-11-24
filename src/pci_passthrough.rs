@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PciDevice {
-    pub address: String,             // e.g., "0000:01:00.0"
+    pub address: String, // e.g., "0000:01:00.0"
     pub vendor_id: String,
     pub device_id: String,
     pub subsystem_vendor_id: String,
@@ -28,7 +28,7 @@ pub struct PciDevice {
 pub enum PciDeviceClass {
     GPU,
     NetworkController,
-    StorageController,   // NVMe, SATA, SAS
+    StorageController, // NVMe, SATA, SAS
     AudioDevice,
     USBController,
     SATAController,
@@ -40,7 +40,7 @@ pub enum PciDeviceClass {
 
 pub struct PciPassthroughManager {
     devices: HashMap<String, PciDevice>,
-    assignments: HashMap<String, String>,  // pci_address -> vm_name
+    assignments: HashMap<String, String>, // pci_address -> vm_name
 }
 
 impl PciPassthroughManager {
@@ -61,7 +61,8 @@ impl PciPassthroughManager {
         }
 
         for entry in fs::read_dir(pci_devices_path)
-            .map_err(|e| format!("Failed to read PCI devices: {}", e))? {
+            .map_err(|e| format!("Failed to read PCI devices: {}", e))?
+        {
             let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
             let device_path = entry.path();
             let address = entry.file_name().to_string_lossy().to_string();
@@ -77,8 +78,7 @@ impl PciPassthroughManager {
     }
 
     /// Parse PCI device information from sysfs
-    fn parse_pci_device(&self, device_path: &Path, address: &str)
-        -> Result<PciDevice, String> {
+    fn parse_pci_device(&self, device_path: &Path, address: &str) -> Result<PciDevice, String> {
         // Read device IDs
         let vendor_id = Self::read_hex_file(&device_path.join("vendor"))?;
         let device_id = Self::read_hex_file(&device_path.join("device"))?;
@@ -135,7 +135,9 @@ impl PciPassthroughManager {
 
     /// Bind PCI device to vfio-pci driver
     pub fn bind_to_vfio(&self, pci_address: &str) -> Result<(), String> {
-        let device = self.devices.get(pci_address)
+        let device = self
+            .devices
+            .get(pci_address)
             .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
         println!("Binding {} to vfio-pci driver", pci_address);
@@ -181,11 +183,12 @@ impl PciPassthroughManager {
     }
 
     /// Assign PCI device to VM
-    pub fn assign_to_vm(&mut self, pci_address: &str, vm_name: &str)
-        -> Result<(), String> {
+    pub fn assign_to_vm(&mut self, pci_address: &str, vm_name: &str) -> Result<(), String> {
         // Check device exists and current driver
         let needs_vfio_bind = {
-            let device = self.devices.get(pci_address)
+            let device = self
+                .devices
+                .get(pci_address)
                 .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
             if device.assigned_to_vm.is_some() {
@@ -203,7 +206,8 @@ impl PciPassthroughManager {
         // Now update device state
         let device = self.devices.get_mut(pci_address).unwrap();
         device.assigned_to_vm = Some(vm_name.to_string());
-        self.assignments.insert(pci_address.to_string(), vm_name.to_string());
+        self.assignments
+            .insert(pci_address.to_string(), vm_name.to_string());
 
         println!("✅ Device {} assigned to VM '{}'", pci_address, vm_name);
         Ok(())
@@ -211,7 +215,9 @@ impl PciPassthroughManager {
 
     /// Release PCI device from VM
     pub fn release_from_vm(&mut self, pci_address: &str) -> Result<(), String> {
-        let device = self.devices.get_mut(pci_address)
+        let device = self
+            .devices
+            .get_mut(pci_address)
             .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
         device.assigned_to_vm = None;
@@ -223,7 +229,9 @@ impl PciPassthroughManager {
 
     /// Generate libvirt XML for PCI passthrough
     pub fn generate_libvirt_xml(&self, pci_address: &str) -> Result<String, String> {
-        let _device = self.devices.get(pci_address)
+        let _device = self
+            .devices
+            .get(pci_address)
             .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
         // Parse PCI address components
@@ -237,18 +245,26 @@ impl PciPassthroughManager {
         let slot = parts[2];
         let function = parts[3];
 
-        Ok(format!(r#"
+        Ok(format!(
+            r#"
     <hostdev mode='subsystem' type='pci' managed='yes'>
       <source>
         <address domain='0x{}' bus='0x{}' slot='0x{}' function='0x{}'/>
       </source>
     </hostdev>
-"#, domain, bus, slot, function))
+"#,
+            domain, bus, slot, function
+        ))
     }
 
     /// Check if device can be safely passed through
-    pub fn check_passthrough_viability(&self, pci_address: &str) -> Result<PassthroughViability, String> {
-        let device = self.devices.get(pci_address)
+    pub fn check_passthrough_viability(
+        &self,
+        pci_address: &str,
+    ) -> Result<PassthroughViability, String> {
+        let device = self
+            .devices
+            .get(pci_address)
             .ok_or_else(|| format!("Device {} not found", pci_address))?;
 
         let mut viability = PassthroughViability {
@@ -260,7 +276,9 @@ impl PciPassthroughManager {
         // Check IOMMU group
         if device.iommu_group.is_none() {
             viability.viable = false;
-            viability.errors.push("Device not in IOMMU group (IOMMU not enabled?)".to_string());
+            viability
+                .errors
+                .push("Device not in IOMMU group (IOMMU not enabled?)".to_string());
         } else {
             // Check if IOMMU group has multiple devices
             let group_devices = self.get_iommu_group_devices(device.iommu_group.unwrap());
@@ -276,7 +294,8 @@ impl PciPassthroughManager {
         // Check if device is critical for system
         if Self::is_critical_device(&device.device_class) {
             viability.warnings.push(
-                "This is a critical system device - passthrough may affect host stability".to_string()
+                "This is a critical system device - passthrough may affect host stability"
+                    .to_string(),
             );
         }
 
@@ -321,8 +340,7 @@ impl PciPassthroughManager {
 
     // Helper methods
     fn read_file(path: &Path) -> Result<String, String> {
-        fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {:?}: {}", path, e))
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {:?}: {}", path, e))
     }
 
     fn read_hex_file(path: &Path) -> Result<String, String> {
@@ -354,9 +372,9 @@ impl PciPassthroughManager {
     fn is_critical_device(device_class: &PciDeviceClass) -> bool {
         matches!(
             device_class,
-            PciDeviceClass::Bridge |
-            PciDeviceClass::SATAController |
-            PciDeviceClass::StorageController
+            PciDeviceClass::Bridge
+                | PciDeviceClass::SATAController
+                | PciDeviceClass::StorageController
         )
     }
 
@@ -380,10 +398,18 @@ impl PciPassthroughManager {
         match (vendor_id, class) {
             ("10de", PciDeviceClass::GPU) => format!("NVIDIA GPU [{}]", device_id),
             ("1002", PciDeviceClass::GPU) => format!("AMD GPU [{}]", device_id),
-            ("8086", PciDeviceClass::NetworkController) => format!("Intel Network Adapter [{}]", device_id),
-            ("8086", PciDeviceClass::StorageController) => format!("Intel NVMe Controller [{}]", device_id),
-            ("1022", PciDeviceClass::StorageController) => format!("AMD NVMe Controller [{}]", device_id),
-            ("1b21", PciDeviceClass::SATAController) => format!("ASMedia SATA Controller [{}]", device_id),
+            ("8086", PciDeviceClass::NetworkController) => {
+                format!("Intel Network Adapter [{}]", device_id)
+            }
+            ("8086", PciDeviceClass::StorageController) => {
+                format!("Intel NVMe Controller [{}]", device_id)
+            }
+            ("1022", PciDeviceClass::StorageController) => {
+                format!("AMD NVMe Controller [{}]", device_id)
+            }
+            ("1b21", PciDeviceClass::SATAController) => {
+                format!("ASMedia SATA Controller [{}]", device_id)
+            }
             _ => format!("{:?} [{}]", class, device_id),
         }
     }
@@ -395,8 +421,17 @@ impl PciPassthroughManager {
         println!("  Vendor         {}", device.vendor_name);
         println!("  Device         {}", device.device_name);
         println!("  Class          {:?}", device.device_class);
-        println!("  IOMMU Group    {}", device.iommu_group.map(|g| g.to_string()).unwrap_or_else(|| "None".to_string()));
-        println!("  Driver         {}", device.driver.as_deref().unwrap_or("None"));
+        println!(
+            "  IOMMU Group    {}",
+            device
+                .iommu_group
+                .map(|g| g.to_string())
+                .unwrap_or_else(|| "None".to_string())
+        );
+        println!(
+            "  Driver         {}",
+            device.driver.as_deref().unwrap_or("None")
+        );
         if let Some(numa) = device.numa_node {
             println!("  NUMA Node      {}", numa);
         }

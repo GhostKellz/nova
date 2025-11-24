@@ -89,8 +89,14 @@ impl GpuDoctor {
         checks.push(self.check_resizable_bar());
 
         // Analyze results
-        let failures = checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
-        let warns = checks.iter().filter(|c| c.status == CheckStatus::Warn).count();
+        let failures = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Fail)
+            .count();
+        let warns = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Warn)
+            .count();
 
         let overall_status = if failures > 0 {
             SystemStatus::NotSupported
@@ -148,7 +154,9 @@ impl GpuDoctor {
                 name: "IOMMU".to_string(),
                 status: CheckStatus::Fail,
                 message: "IOMMU not enabled or not detected".to_string(),
-                fix_command: Some("Add 'intel_iommu=on' or 'amd_iommu=on' to kernel parameters".to_string()),
+                fix_command: Some(
+                    "Add 'intel_iommu=on' or 'amd_iommu=on' to kernel parameters".to_string(),
+                ),
             }
         }
     }
@@ -211,10 +219,11 @@ impl GpuDoctor {
 
     /// Check NVIDIA driver status
     fn check_nvidia_drivers(&self) -> DiagnosticCheck {
-        // Check for nvidia-open kernel module (used for version detection)
-        let nvidia_open_version = self.get_nvidia_open_version();
+        const MIN_BLACKWELL_DRIVER: &str = "560.0";
+        const MIN_ADA_DRIVER: &str = "545.0";
+        const MIN_BLACKWELL_KERNEL: &str = "6.9";
 
-        // Check for proprietary driver
+        let nvidia_open_version = self.get_nvidia_open_version();
         let nvidia_proprietary = Command::new("nvidia-smi")
             .arg("--query-gpu=driver_version")
             .arg("--format=csv,noheader")
@@ -228,34 +237,155 @@ impl GpuDoctor {
                 }
             });
 
-        if let Some(version) = nvidia_open_version {
-            DiagnosticCheck {
-                name: "NVIDIA Driver".to_string(),
-                status: CheckStatus::Pass,
-                message: format!("NVIDIA Open Kernel Module {} detected (recommended)", version),
-                fix_command: None,
-            }
-        } else if let Some(version) = nvidia_proprietary {
-            DiagnosticCheck {
-                name: "NVIDIA Driver".to_string(),
-                status: CheckStatus::Warn,
-                message: format!("Proprietary NVIDIA driver {} detected", version),
-                fix_command: Some("Consider switching to nvidia-open for better passthrough support: yay -S nvidia-open".to_string()),
-            }
+        let (driver_source, driver_version) = if let Some(v) = nvidia_open_version.clone() {
+            ("nvidia-open", Some(v))
+        } else if let Some(v) = nvidia_proprietary.clone() {
+            ("proprietary", Some(v))
         } else {
-            DiagnosticCheck {
-                name: "NVIDIA Driver".to_string(),
-                status: CheckStatus::Warn,
-                message: "No NVIDIA driver detected".to_string(),
-                fix_command: Some("Install nvidia-open: yay -S nvidia-open nvidia-open-dkms".to_string()),
+            ("none", None)
+        };
+
+        let has_blackwell = self.gpu_manager.any_blackwell_gpus();
+        let required_driver = if has_blackwell {
+            Some(MIN_BLACKWELL_DRIVER)
+        } else {
+            None
+        };
+
+        let mut status = CheckStatus::Warn;
+        let mut message: String;
+        let mut fix_command: Option<String> = None;
+
+        match (driver_source, driver_version.as_deref()) {
+            ("nvidia-open", Some(version)) => {
+                status = CheckStatus::Pass;
+                message = format!(
+                    "NVIDIA Open Kernel Module {} detected (recommended)",
+                    version
+                );
             }
+            ("proprietary", Some(version)) => {
+                status = CheckStatus::Warn;
+                message = format!("Proprietary NVIDIA driver {} detected", version);
+                fix_command = Some(
+                    "Consider switching to nvidia-open for better passthrough support: yay -S nvidia-open".to_string(),
+                );
+            }
+            _ => {
+                message = "No NVIDIA driver detected".to_string();
+                fix_command =
+                    Some("Install nvidia-open: yay -S nvidia-open nvidia-open-dkms".to_string());
+            }
+        }
+
+        if let Some(required) = required_driver {
+            match driver_version {
+                Some(ref actual) if Self::version_meets(actual, required) => {
+                    message.push_str(&format!(
+                        " — meets RTX 50-series requirement ({}+)",
+                        required
+                    ));
+                }
+                Some(ref actual) => {
+                    status = CheckStatus::Warn;
+                    message = format!(
+                        "Driver {} detected; RTX 50-series requires {} or newer",
+                        actual, required
+                    );
+                    fix_command =
+                        Some("Update to NVIDIA driver 560+ (nvidia-open recommended)".to_string());
+                }
+                None => {
+                    status = CheckStatus::Warn;
+                    message = format!(
+                        "RTX 50-series GPU detected but driver information unavailable (need {}+)",
+                        required
+                    );
+                    fix_command = Some(
+                        "Install nvidia-open 560+ or the latest proprietary driver".to_string(),
+                    );
+                }
+            }
+
+            if let Some(kernel) = Self::get_kernel_version() {
+                if !Self::version_meets(&kernel, MIN_BLACKWELL_KERNEL) {
+                    message.push_str(&format!(
+                        "; kernel {} detected ({}+ recommended)",
+                        kernel.trim(),
+                        MIN_BLACKWELL_KERNEL
+                    ));
+                    fix_command
+                        .get_or_insert_with(|| "Upgrade to Linux kernel 6.9 or newer".to_string());
+                }
+            }
+
+            message.push_str("; enable TCC mode for low-latency consoles (Looking Glass)");
+        } else if matches!(driver_version.as_deref(), Some(version) if !Self::version_meets(version, MIN_ADA_DRIVER))
+        {
+            message.push_str(&format!(
+                "; Ada Lovelace GPUs prefer driver {}+",
+                MIN_ADA_DRIVER
+            ));
+        }
+
+        DiagnosticCheck {
+            name: "NVIDIA Driver".to_string(),
+            status,
+            message,
+            fix_command,
         }
     }
 
     /// Get NVIDIA open kernel module version
     fn get_nvidia_open_version(&self) -> Option<String> {
         let version_path = "/sys/module/nvidia/version";
-        fs::read_to_string(version_path).ok().map(|v| v.trim().to_string())
+        fs::read_to_string(version_path)
+            .ok()
+            .map(|v| v.trim().to_string())
+    }
+
+    fn version_meets(actual: &str, required: &str) -> bool {
+        fn parse_components(input: &str) -> Vec<u32> {
+            input
+                .split(|c| c == '.' || c == '-')
+                .filter_map(|segment| segment.parse::<u32>().ok())
+                .collect()
+        }
+
+        let mut actual_parts = parse_components(actual);
+        let mut required_parts = parse_components(required);
+
+        if required_parts.is_empty() {
+            return true;
+        }
+
+        while actual_parts.len() < required_parts.len() {
+            actual_parts.push(0);
+        }
+
+        while required_parts.len() < actual_parts.len() {
+            required_parts.push(0);
+        }
+
+        for (a, r) in actual_parts.iter().zip(required_parts.iter()) {
+            if a > r {
+                return true;
+            } else if a < r {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn get_kernel_version() -> Option<String> {
+        Command::new("uname").arg("-r").output().ok().and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
     }
 
     /// Check GPU detection
@@ -270,7 +400,8 @@ impl GpuDoctor {
                 fix_command: Some("Ensure GPU is properly seated and powered".to_string()),
             }
         } else {
-            let gpu_list = gpus.iter()
+            let gpu_list = gpus
+                .iter()
                 .map(|g| format!("{} ({})", g.device_name, g.address))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -294,14 +425,22 @@ impl GpuDoctor {
                 name: "IOMMU Groups".to_string(),
                 status: CheckStatus::Fail,
                 message: "No viable IOMMU groups for GPU passthrough".to_string(),
-                fix_command: Some("Check BIOS settings for ACS override or PCIe configuration".to_string()),
+                fix_command: Some(
+                    "Check BIOS settings for ACS override or PCIe configuration".to_string(),
+                ),
             }
         } else if viable_count < groups.len() {
             DiagnosticCheck {
                 name: "IOMMU Groups".to_string(),
                 status: CheckStatus::Warn,
-                message: format!("{}/{} IOMMU groups are viable for passthrough", viable_count, groups.len()),
-                fix_command: Some("Some GPUs share IOMMU groups - consider ACS override patch".to_string()),
+                message: format!(
+                    "{}/{} IOMMU groups are viable for passthrough",
+                    viable_count,
+                    groups.len()
+                ),
+                fix_command: Some(
+                    "Some GPUs share IOMMU groups - consider ACS override patch".to_string(),
+                ),
             }
         } else {
             DiagnosticCheck {
@@ -326,7 +465,8 @@ impl GpuDoctor {
             DiagnosticCheck {
                 name: "nvbind".to_string(),
                 status: CheckStatus::Warn,
-                message: "nvbind not installed (optional for container GPU passthrough)".to_string(),
+                message: "nvbind not installed (optional for container GPU passthrough)"
+                    .to_string(),
                 fix_command: Some("Install nvbind: cargo install nvbind".to_string()),
             }
         }
@@ -378,7 +518,10 @@ impl GpuDoctor {
         for gpu in gpus {
             if let Some(driver) = &gpu.driver {
                 if driver == "nouveau" {
-                    conflicts.push(format!("{}: nouveau (conflicts with NVIDIA passthrough)", gpu.address));
+                    conflicts.push(format!(
+                        "{}: nouveau (conflicts with NVIDIA passthrough)",
+                        gpu.address
+                    ));
                 }
             }
         }
@@ -417,7 +560,8 @@ impl GpuDoctor {
             DiagnosticCheck {
                 name: "Resizable BAR".to_string(),
                 status: CheckStatus::Warn,
-                message: "Resizable BAR not detected (may impact performance on newer GPUs)".to_string(),
+                message: "Resizable BAR not detected (may impact performance on newer GPUs)"
+                    .to_string(),
                 fix_command: Some("Enable Resizable BAR in BIOS if supported".to_string()),
             }
         } else {
@@ -439,7 +583,9 @@ impl GpuDoctor {
         // Overall status
         let status_msg = match report.overall_status {
             SystemStatus::Ready => "✅ READY - System is configured for GPU passthrough",
-            SystemStatus::NeedsConfiguration => "⚠️  NEEDS CONFIGURATION - System requires adjustments",
+            SystemStatus::NeedsConfiguration => {
+                "⚠️  NEEDS CONFIGURATION - System requires adjustments"
+            }
             SystemStatus::NotSupported => "❌ NOT READY - Critical issues detected",
         };
         println!("Status: {}\n", status_msg);
@@ -504,7 +650,8 @@ impl GpuDoctor {
             }
         }
 
-        script.push_str("echo 'Configuration complete. Please reboot for changes to take effect.'\n");
+        script
+            .push_str("echo 'Configuration complete. Please reboot for changes to take effect.'\n");
         script
     }
 }

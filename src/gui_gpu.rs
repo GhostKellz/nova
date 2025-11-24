@@ -1,5 +1,5 @@
-use crate::gpu_doctor::GpuDoctor;
-use crate::gpu_passthrough::{GpuManager, PciDevice};
+use crate::gpu_doctor::{CheckStatus, DiagnosticReport as DoctorReport, GpuDoctor, SystemStatus};
+use crate::gpu_passthrough::{GpuCapabilities, GpuManager, PciDevice};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,8 +26,12 @@ pub struct GpuManagerGui {
     // Reservations (PCI address -> VM name)
     reservations: HashMap<String, String>,
 
+    // Cached GPU capabilities
+    capabilities: HashMap<String, GpuCapabilities>,
+
     // Diagnostics
     diagnostic_text: String,
+    diagnostic_report: Option<DoctorReport>,
 
     // Messages
     last_message: Option<String>,
@@ -44,7 +48,9 @@ impl GpuManagerGui {
             gpus: Vec::new(),
             iommu_groups: HashMap::new(),
             reservations: HashMap::new(),
+            capabilities: HashMap::new(),
             diagnostic_text: String::new(),
+            diagnostic_report: None,
             last_message: None,
             last_error: None,
         }
@@ -75,6 +81,14 @@ impl GpuManagerGui {
             for (addr, vm) in reservations {
                 self.reservations.insert(addr.clone(), vm.clone());
             }
+
+            // Cache capabilities for quick UI access
+            self.capabilities.clear();
+            for gpu in &self.gpus {
+                if let Some(caps) = manager.capabilities_for(&gpu.address).cloned() {
+                    self.capabilities.insert(gpu.address.clone(), caps);
+                }
+            }
         }
     }
 
@@ -83,31 +97,48 @@ impl GpuManagerGui {
         let doctor = GpuDoctor::new();
         let report = doctor.diagnose();
 
-        self.diagnostic_text.clear();
-        self.diagnostic_text.push_str(&format!("Overall Status: {:?}\n\n", report.overall_status));
+        self.diagnostic_text = Self::format_report_output(&report);
+        self.diagnostic_report = Some(report);
+    }
+
+    fn format_report_output(report: &DoctorReport) -> String {
+        let mut buffer = String::new();
+        buffer.push_str(&format!("Overall Status: {:?}\n\n", report.overall_status));
 
         for check in &report.checks {
             let symbol = match check.status {
-                crate::gpu_doctor::CheckStatus::Pass => "✓",
-                crate::gpu_doctor::CheckStatus::Warn => "⚠",
-                crate::gpu_doctor::CheckStatus::Fail => "✗",
+                CheckStatus::Pass => "✓",
+                CheckStatus::Warn => "⚠",
+                CheckStatus::Fail => "✗",
             };
-            self.diagnostic_text.push_str(&format!("{} {}: {}\n", symbol, check.name, check.message));
+            buffer.push_str(&format!("{} {}: {}\n", symbol, check.name, check.message));
+            if let Some(fix) = &check.fix_command {
+                buffer.push_str(&format!("    fix: {}\n", fix));
+            }
         }
 
         if !report.errors.is_empty() {
-            self.diagnostic_text.push_str("\nErrors:\n");
+            buffer.push_str("\nErrors:\n");
             for error in &report.errors {
-                self.diagnostic_text.push_str(&format!("  {}\n", error));
+                buffer.push_str(&format!("  {}\n", error));
             }
         }
 
         if !report.warnings.is_empty() {
-            self.diagnostic_text.push_str("\nWarnings:\n");
+            buffer.push_str("\nWarnings:\n");
             for warning in &report.warnings {
-                self.diagnostic_text.push_str(&format!("  {}\n", warning));
+                buffer.push_str(&format!("  {}\n", warning));
             }
         }
+
+        if !report.recommendations.is_empty() {
+            buffer.push_str("\nRecommendations:\n");
+            for rec in &report.recommendations {
+                buffer.push_str(&format!("  {}\n", rec));
+            }
+        }
+
+        buffer
     }
 
     /// Assign GPU to VM
@@ -296,16 +327,55 @@ impl GpuManagerGui {
                 ui.small(format!("{}:{}", gpu.vendor_id, gpu.device_id));
                 ui.add_space(4.0);
 
+                if let Some(caps) = self.capabilities.get(&gpu.address) {
+                    let generation = caps
+                        .generation
+                        .as_ref()
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let min_driver = caps.minimum_driver.as_deref().unwrap_or("-");
+                    let recommended_kernel = caps.recommended_kernel.as_deref().unwrap_or("-");
+                    let tcc_status = if caps.tcc_supported { "Yes" } else { "No" };
+
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Generation: {}", generation));
+                        ui.label(format!("Min Driver: {}", min_driver));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Kernel: {}", recommended_kernel));
+                        ui.label(format!("TCC: {}", tcc_status));
+                    });
+
+                    if let Some(vram_mb) = caps.vram_mb {
+                        ui.label(format!("VRAM: {} MB", vram_mb));
+                    }
+
+                    ui.add_space(4.0);
+                }
+
                 // Status indicator
-                let (status_text, status_color) = if let Some(vm) = self.reservations.get(&gpu.address) {
-                    (format!("Assigned to VM: {}", vm), egui::Color32::from_rgb(102, 220, 144))
-                } else if gpu.driver.as_deref() == Some("vfio-pci") {
-                    ("Ready for passthrough".to_string(), egui::Color32::from_rgb(255, 200, 100))
-                } else if let Some(driver) = &gpu.driver {
-                    (format!("Driver: {}", driver), egui::Color32::from_rgb(160, 160, 160))
-                } else {
-                    ("No driver".to_string(), egui::Color32::from_rgb(160, 160, 160))
-                };
+                let (status_text, status_color) =
+                    if let Some(vm) = self.reservations.get(&gpu.address) {
+                        (
+                            format!("Assigned to VM: {}", vm),
+                            egui::Color32::from_rgb(102, 220, 144),
+                        )
+                    } else if gpu.driver.as_deref() == Some("vfio-pci") {
+                        (
+                            "Ready for passthrough".to_string(),
+                            egui::Color32::from_rgb(255, 200, 100),
+                        )
+                    } else if let Some(driver) = &gpu.driver {
+                        (
+                            format!("Driver: {}", driver),
+                            egui::Color32::from_rgb(160, 160, 160),
+                        )
+                    } else {
+                        (
+                            "No driver".to_string(),
+                            egui::Color32::from_rgb(160, 160, 160),
+                        )
+                    };
 
                 ui.colored_label(status_color, status_text);
                 ui.add_space(6.0);
@@ -368,12 +438,17 @@ impl GpuManagerGui {
                                 ui.label(format!("{} device(s) in group", devices.len()));
 
                                 for pci_address in devices {
-                                    if let Some(gpu) = self.gpus.iter().find(|g| &g.address == pci_address) {
+                                    if let Some(gpu) =
+                                        self.gpus.iter().find(|g| &g.address == pci_address)
+                                    {
                                         ui.horizontal(|ui| {
                                             ui.monospace(pci_address);
                                             ui.label(&gpu.device_name);
 
-                                            let (status, color) = if self.reservations.contains_key(pci_address) {
+                                            let (status, color) = if self
+                                                .reservations
+                                                .contains_key(pci_address)
+                                            {
                                                 ("Assigned", egui::Color32::from_rgb(102, 220, 144))
                                             } else if gpu.driver.as_deref() == Some("vfio-pci") {
                                                 ("VFIO", egui::Color32::from_rgb(255, 200, 100))
@@ -390,7 +465,8 @@ impl GpuManagerGui {
 
                                 // Check if entire group is ready for passthrough
                                 let all_vfio = devices.iter().all(|addr| {
-                                    self.gpus.iter()
+                                    self.gpus
+                                        .iter()
                                         .find(|g| &g.address == addr)
                                         .and_then(|g| g.driver.as_ref())
                                         .map(|d| d == "vfio-pci")
@@ -421,18 +497,129 @@ impl GpuManagerGui {
         ui.heading("GPU Passthrough Diagnostics");
         ui.separator();
 
-        if self.diagnostic_text.is_empty() {
+        if self.diagnostic_report.is_none() {
+            if self.diagnostic_text.is_empty() {
+                ui.group(|ui| {
+                    ui.label("No diagnostics run yet");
+                    ui.small("Click 'Run Diagnostics' to check GPU passthrough readiness");
+                });
+                return;
+            }
+
+            egui::ScrollArea::vertical()
+                .max_height(500.0)
+                .show(ui, |ui| {
+                    ui.monospace(&self.diagnostic_text);
+                });
             ui.group(|ui| {
-                ui.label("No diagnostics run yet");
-                ui.small("Click 'Run Diagnostics' to check GPU passthrough readiness");
+                ui.small("Structured diagnostics will appear here after the next run");
             });
             return;
         }
 
-        egui::ScrollArea::vertical()
-            .max_height(500.0)
+        let report = self
+            .diagnostic_report
+            .as_ref()
+            .expect("diagnostic report cached");
+
+        let (status_text, status_color, status_icon) = match report.overall_status {
+            SystemStatus::Ready => ("Ready", egui::Color32::from_rgb(96, 200, 140), "✓"),
+            SystemStatus::NeedsConfiguration => (
+                "Needs Configuration",
+                egui::Color32::from_rgb(255, 170, 0),
+                "⚠",
+            ),
+            SystemStatus::NotSupported => {
+                ("Not Supported", egui::Color32::from_rgb(220, 80, 80), "✗")
+            }
+        };
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(status_color, format!("{} {}", status_icon, status_text));
+                ui.label(format!(
+                    "Checks: {} • Warnings: {} • Errors: {}",
+                    report.checks.len(),
+                    report.warnings.len(),
+                    report.errors.len()
+                ));
+            });
+        });
+
+        ui.add_space(8.0);
+
+        egui::Grid::new("gpu_diagnostics_checks")
+            .striped(true)
+            .spacing([12.0, 4.0])
             .show(ui, |ui| {
-                ui.monospace(&self.diagnostic_text);
+                ui.label(egui::RichText::new("Status").strong());
+                ui.label(egui::RichText::new("Check").strong());
+                ui.label(egui::RichText::new("Details").strong());
+                ui.label(egui::RichText::new("Resolution").strong());
+                ui.end_row();
+
+                for check in &report.checks {
+                    let (icon, color) = match check.status {
+                        CheckStatus::Pass => ("✓", egui::Color32::from_rgb(96, 200, 140)),
+                        CheckStatus::Warn => ("⚠", egui::Color32::from_rgb(255, 170, 0)),
+                        CheckStatus::Fail => ("✗", egui::Color32::from_rgb(220, 80, 80)),
+                    };
+
+                    ui.colored_label(color, icon);
+                    ui.label(&check.name);
+                    ui.label(&check.message);
+                    if let Some(fix) = &check.fix_command {
+                        ui.monospace(fix);
+                    } else {
+                        ui.label("—");
+                    }
+                    ui.end_row();
+                }
+            });
+
+        ui.add_space(8.0);
+
+        if !report.recommendations.is_empty() {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Recommended Actions").strong());
+                ui.add_space(4.0);
+                for rec in &report.recommendations {
+                    ui.small(format!("• {}", rec));
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        if !report.errors.is_empty() {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Errors").strong());
+                ui.add_space(4.0);
+                for error in &report.errors {
+                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), error);
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        if !report.warnings.is_empty() {
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Warnings").strong());
+                ui.add_space(4.0);
+                for warning in &report.warnings {
+                    ui.colored_label(egui::Color32::from_rgb(255, 170, 0), warning);
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        egui::CollapsingHeader::new("Raw Diagnostic Output")
+            .default_open(false)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&self.diagnostic_text);
+                    });
             });
     }
 }
@@ -448,10 +635,7 @@ impl GpuManagerWindow {
         let mut gui = GpuManagerGui::new(gpu_manager);
         gui.refresh();
 
-        Self {
-            gui,
-            open: true,
-        }
+        Self { gui, open: true }
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {

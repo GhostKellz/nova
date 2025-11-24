@@ -14,7 +14,7 @@ pub struct LookingGlassConfig {
     pub shmem_path: PathBuf,          // /dev/shm/looking-glass
     pub socket_path: Option<PathBuf>, // KVMFR socket
     pub audio_enabled: bool,
-    pub audio_buffer_latency: u32,    // In milliseconds
+    pub audio_buffer_latency: u32, // In milliseconds
     pub vsync_enabled: bool,
     pub mouse_input: MouseInputMode,
 }
@@ -27,8 +27,8 @@ pub struct Resolution {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MouseInputMode {
-    Relative,   // Best for gaming
-    Absolute,   // Best for desktop work
+    Relative, // Best for gaming
+    Absolute, // Best for desktop work
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +44,10 @@ impl LookingGlassProfile {
         match self {
             LookingGlassProfile::Gaming => LookingGlassConfig {
                 enabled: true,
-                resolution: Resolution { width: 1920, height: 1080 },
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
                 framebuffer_size: 64,
                 shmem_path: PathBuf::from("/dev/shm/looking-glass"),
                 socket_path: None,
@@ -55,7 +58,10 @@ impl LookingGlassProfile {
             },
             LookingGlassProfile::Productivity => LookingGlassConfig {
                 enabled: true,
-                resolution: Resolution { width: 2560, height: 1440 },
+                resolution: Resolution {
+                    width: 2560,
+                    height: 1440,
+                },
                 framebuffer_size: 128,
                 shmem_path: PathBuf::from("/dev/shm/looking-glass"),
                 socket_path: None,
@@ -66,7 +72,10 @@ impl LookingGlassProfile {
             },
             LookingGlassProfile::Streaming => LookingGlassConfig {
                 enabled: true,
-                resolution: Resolution { width: 1920, height: 1080 },
+                resolution: Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
                 framebuffer_size: 64,
                 shmem_path: PathBuf::from("/dev/shm/looking-glass"),
                 socket_path: None,
@@ -84,7 +93,10 @@ impl Default for LookingGlassConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            resolution: Resolution { width: 1920, height: 1080 },
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
             framebuffer_size: 64, // 64MB for 1080p, 128MB for 4K
             shmem_path: PathBuf::from("/dev/shm/looking-glass"),
             socket_path: None,
@@ -175,7 +187,10 @@ impl LookingGlassManager {
                 if count >= 512 {
                     (true, format!("{} huge pages configured", count))
                 } else {
-                    (false, format!("Only {} huge pages (need at least 512)", count))
+                    (
+                        false,
+                        format!("Only {} huge pages (need at least 512)", count),
+                    )
                 }
             }
             Err(_) => (false, "Cannot read huge pages configuration".to_string()),
@@ -230,7 +245,8 @@ The application will minimize to system tray
 - If capture fails: Try disabling Secure Boot in guest
 - For NVIDIA: Install latest GeForce drivers
 - For AMD: Ensure guest GPU is set as primary in BIOS
-"#.to_string()
+"#
+        .to_string()
     }
 
     /// Setup huge pages for better performance
@@ -244,7 +260,10 @@ The application will minimize to system tray
         // Set huge pages
         let set_cmd = Command::new("sh")
             .arg("-c")
-            .arg(format!("echo {} | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages", required))
+            .arg(format!(
+                "echo {} | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages",
+                required
+            ))
             .output()
             .map_err(|e| format!("Failed to set huge pages: {}", e))?;
 
@@ -255,7 +274,10 @@ The application will minimize to system tray
         // Make persistent across reboots
         let persist_cmd = Command::new("sh")
             .arg("-c")
-            .arg(format!("echo 'vm.nr_hugepages = {}' | sudo tee -a /etc/sysctl.d/99-hugepages.conf", required))
+            .arg(format!(
+                "echo 'vm.nr_hugepages = {}' | sudo tee -a /etc/sysctl.d/99-hugepages.conf",
+                required
+            ))
             .output()
             .map_err(|e| format!("Failed to make persistent: {}", e))?;
 
@@ -271,13 +293,16 @@ The application will minimize to system tray
     pub fn generate_ivshmem_xml(&self, config: &LookingGlassConfig) -> String {
         let size_mb = config.framebuffer_size;
 
-        format!(r#"
+        format!(
+            r#"
     <!-- Looking Glass IVSHMEM Device -->
     <shmem name='looking-glass'>
       <model type='ivshmem-plain'/>
       <size unit='M'>{}</size>
     </shmem>
-"#, size_mb)
+"#,
+            size_mb
+        )
     }
 
     /// Generate QEMU command line arguments for Looking Glass
@@ -289,14 +314,19 @@ The application will minimize to system tray
             "-device".to_string(),
             format!("ivshmem-plain,memdev=ivshmem,bus=pcie.0"),
             "-object".to_string(),
-            format!("memory-backend-file,id=ivshmem,share=on,mem-path={},size={}M",
-                    shmem_path, size_mb),
+            format!(
+                "memory-backend-file,id=ivshmem,share=on,mem-path={},size={}M",
+                shmem_path, size_mb
+            ),
         ]
     }
 
     /// Setup shared memory file
-    pub async fn setup_shmem(&self, config: &LookingGlassConfig,
-                              _vm_name: &str) -> Result<(), String> {
+    pub async fn setup_shmem(
+        &self,
+        config: &LookingGlassConfig,
+        _vm_name: &str,
+    ) -> Result<(), String> {
         let shmem_path = &config.shmem_path;
         let _size_bytes = config.framebuffer_size * 1024 * 1024;
 
@@ -312,7 +342,10 @@ The application will minimize to system tray
             .map_err(|e| format!("Failed to create shmem file: {}", e))?;
 
         if !output.status.success() {
-            return Err(format!("dd failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "dd failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
 
         // Set permissions for QEMU access
@@ -327,8 +360,11 @@ The application will minimize to system tray
             .output()
             .map_err(|e| format!("Failed to set ownership: {}", e))?;
 
-        println!("✅ Looking Glass shared memory setup: {} ({}MB)",
-                 shmem_path.display(), config.framebuffer_size);
+        println!(
+            "✅ Looking Glass shared memory setup: {} ({}MB)",
+            shmem_path.display(),
+            config.framebuffer_size
+        );
 
         Ok(())
     }
@@ -344,9 +380,9 @@ The application will minimize to system tray
     }
 
     /// Generate Looking Glass client configuration file
-    pub fn generate_client_config(&self, config: &LookingGlassConfig,
-                                   vm_name: &str) -> String {
-        format!(r#"
+    pub fn generate_client_config(&self, config: &LookingGlassConfig, vm_name: &str) -> String {
+        format!(
+            r#"
 # Looking Glass Client Configuration for {}
 
 [app]
@@ -412,22 +448,29 @@ vsync={}
             println!("✅ Looking Glass client installed successfully");
             Ok(())
         } else {
-            Err(format!("Installation failed: {}",
-                       String::from_utf8_lossy(&output.stderr)))
+            Err(format!(
+                "Installation failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
     }
 
     /// Launch Looking Glass client
     pub async fn launch_client(&self, config: &LookingGlassConfig) -> Result<(), String> {
         if !self.check_client_installed() {
-            return Err("Looking Glass client not installed. Run: yay -S looking-glass".to_string());
+            return Err(
+                "Looking Glass client not installed. Run: yay -S looking-glass".to_string(),
+            );
         }
 
         let mut cmd = Command::new("looking-glass-client");
 
         // Add configuration arguments
         cmd.arg("-f").arg(config.shmem_path.display().to_string());
-        cmd.arg("-m").arg(format!("{}x{}", config.resolution.width, config.resolution.height));
+        cmd.arg("-m").arg(format!(
+            "{}x{}",
+            config.resolution.width, config.resolution.height
+        ));
 
         if config.vsync_enabled {
             cmd.arg("--opengl-vsync");
@@ -459,7 +502,9 @@ vsync={}
             .map_err(|e| format!("Failed to check module: {}", e))?;
 
         if !module_check.status.success() {
-            return Err("KVMFR module not available. Install looking-glass-module-dkms".to_string());
+            return Err(
+                "KVMFR module not available. Install looking-glass-module-dkms".to_string(),
+            );
         }
 
         // Load module
@@ -469,8 +514,10 @@ vsync={}
             .map_err(|e| format!("Failed to load module: {}", e))?;
 
         if !load.status.success() {
-            return Err(format!("Failed to load kvmfr: {}",
-                              String::from_utf8_lossy(&load.stderr)));
+            return Err(format!(
+                "Failed to load kvmfr: {}",
+                String::from_utf8_lossy(&load.stderr)
+            ));
         }
 
         println!("✅ KVMFR module loaded");
@@ -478,13 +525,17 @@ vsync={}
     }
 
     /// Generate complete VM configuration with Looking Glass
-    pub fn generate_complete_vm_config(&self, config: &LookingGlassConfig,
-                                       vm_name: &str,
-                                       gpu_address: &str) -> Result<String, String> {
+    pub fn generate_complete_vm_config(
+        &self,
+        config: &LookingGlassConfig,
+        vm_name: &str,
+        gpu_address: &str,
+    ) -> Result<String, String> {
         // Parse GPU address
         let (bus, slot, function) = Self::parse_pci_address(gpu_address)?;
 
-        Ok(format!(r#"
+        Ok(format!(
+            r#"
 <!-- Complete VM Configuration with Looking Glass -->
 <domain type='kvm'>
   <name>{}</name>
@@ -575,7 +626,9 @@ vsync={}
 "#,
             vm_name,
             vm_name,
-            bus, slot, function,
+            bus,
+            slot,
+            function,
             self.generate_ivshmem_xml(config),
         ))
     }
@@ -611,8 +664,10 @@ vsync={}
         reqs.shmem_available = Path::new("/dev/shm").exists();
 
         // Overall status
-        reqs.ready = reqs.iommu_enabled && reqs.kvm_available &&
-                     reqs.libvirt_installed && reqs.shmem_available;
+        reqs.ready = reqs.iommu_enabled
+            && reqs.kvm_available
+            && reqs.libvirt_installed
+            && reqs.shmem_available;
 
         reqs
     }
@@ -663,7 +718,14 @@ looking-glass-client -f /dev/shm/looking-glass
 # - Disable compositor (for X11)
 # - Use dedicated NVIDIA GPU for guest
 # - Enable huge pages in host
-"#.to_string()
+"#
+        .to_string()
+    }
+}
+
+impl Default for LookingGlassManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -681,13 +743,46 @@ pub struct SystemRequirements {
 impl SystemRequirements {
     pub fn print_status(&self) {
         println!("\n=== Looking Glass System Requirements ===");
-        println!("IOMMU Enabled:           {}", if self.iommu_enabled { "✅" } else { "❌" });
-        println!("KVM Available:           {}", if self.kvm_available { "✅" } else { "❌" });
-        println!("Libvirt Installed:       {}", if self.libvirt_installed { "✅" } else { "❌" });
-        println!("LG Client Installed:     {}", if self.lg_client_installed { "✅" } else { "❌" });
-        println!("KVMFR Module Available:  {}", if self.kvmfr_available { "✅" } else { "⚠️  Optional" });
-        println!("Shared Memory Available: {}", if self.shmem_available { "✅" } else { "❌" });
-        println!("\nOverall Status:          {}", if self.ready { "✅ READY" } else { "❌ NOT READY" });
+        println!(
+            "IOMMU Enabled:           {}",
+            if self.iommu_enabled { "✅" } else { "❌" }
+        );
+        println!(
+            "KVM Available:           {}",
+            if self.kvm_available { "✅" } else { "❌" }
+        );
+        println!(
+            "Libvirt Installed:       {}",
+            if self.libvirt_installed { "✅" } else { "❌" }
+        );
+        println!(
+            "LG Client Installed:     {}",
+            if self.lg_client_installed {
+                "✅"
+            } else {
+                "❌"
+            }
+        );
+        println!(
+            "KVMFR Module Available:  {}",
+            if self.kvmfr_available {
+                "✅"
+            } else {
+                "⚠️  Optional"
+            }
+        );
+        println!(
+            "Shared Memory Available: {}",
+            if self.shmem_available { "✅" } else { "❌" }
+        );
+        println!(
+            "\nOverall Status:          {}",
+            if self.ready {
+                "✅ READY"
+            } else {
+                "❌ NOT READY"
+            }
+        );
 
         if !self.ready {
             println!("\n⚠️  Some requirements are missing. Run:");
@@ -703,7 +798,10 @@ mod tests {
     #[test]
     fn test_framebuffer_calculation() {
         let config = LookingGlassConfig {
-            resolution: Resolution { width: 1920, height: 1080 },
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
             ..Default::default()
         };
 
@@ -715,7 +813,10 @@ mod tests {
     #[test]
     fn test_4k_framebuffer_calculation() {
         let config = LookingGlassConfig {
-            resolution: Resolution { width: 3840, height: 2160 },
+            resolution: Resolution {
+                width: 3840,
+                height: 2160,
+            },
             ..Default::default()
         };
 
@@ -729,7 +830,10 @@ mod tests {
         assert!(config.validate().is_ok());
 
         let invalid_config = LookingGlassConfig {
-            resolution: Resolution { width: 100, height: 100 },
+            resolution: Resolution {
+                width: 100,
+                height: 100,
+            },
             ..Default::default()
         };
         assert!(invalid_config.validate().is_err());

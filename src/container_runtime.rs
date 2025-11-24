@@ -6,15 +6,18 @@
 //! - Podman (alternative): Daemonless alternative
 //! - Unshare (basic): Simple namespace isolation
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 /// Result type for container runtime operations
 pub type Result<T> = std::result::Result<T, ContainerRuntimeError>;
 
+/// Boxed future type for container runtime operations
+pub type RuntimeFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+
 /// Unified interface for container runtimes
-#[async_trait]
 pub trait ContainerRuntime: Send + Sync {
     /// Check if this runtime is available on the system
     fn is_available(&self) -> bool;
@@ -23,39 +26,39 @@ pub trait ContainerRuntime: Send + Sync {
     fn name(&self) -> &str;
 
     /// Get runtime version
-    async fn version(&self) -> Result<String>;
+    fn version<'a>(&'a self) -> RuntimeFuture<'a, String>;
 
     /// Run a container
-    async fn run_container(
-        &self,
-        image: &str,
-        name: Option<&str>,
-        config: &ContainerConfig,
-    ) -> Result<String>;
+    fn run_container<'a>(
+        &'a self,
+        image: &'a str,
+        name: Option<&'a str>,
+        config: &'a ContainerConfig,
+    ) -> RuntimeFuture<'a, String>;
 
     /// Stop a container
-    async fn stop_container(&self, id_or_name: &str) -> Result<()>;
+    fn stop_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ()>;
 
     /// Remove a container
-    async fn remove_container(&self, id_or_name: &str, force: bool) -> Result<()>;
+    fn remove_container<'a>(&'a self, id_or_name: &'a str, force: bool) -> RuntimeFuture<'a, ()>;
 
     /// List containers
-    async fn list_containers(&self, all: bool) -> Result<Vec<ContainerInfo>>;
+    fn list_containers<'a>(&'a self, all: bool) -> RuntimeFuture<'a, Vec<ContainerInfo>>;
 
     /// Inspect container details
-    async fn inspect_container(&self, id_or_name: &str) -> Result<ContainerInfo>;
+    fn inspect_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerInfo>;
 
     /// Pull an image
-    async fn pull_image(&self, image: &str) -> Result<()>;
+    fn pull_image<'a>(&'a self, image: &'a str) -> RuntimeFuture<'a, ()>;
 
     /// List images
-    async fn list_images(&self) -> Result<Vec<ImageInfo>>;
+    fn list_images<'a>(&'a self) -> RuntimeFuture<'a, Vec<ImageInfo>>;
 
     /// Get container logs
-    async fn get_logs(&self, id_or_name: &str, lines: usize) -> Result<Vec<String>>;
+    fn get_logs<'a>(&'a self, id_or_name: &'a str, lines: usize) -> RuntimeFuture<'a, Vec<String>>;
 
     /// Get container stats/metrics
-    async fn get_stats(&self, id_or_name: &str) -> Result<ContainerStats>;
+    fn get_stats<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerStats>;
 }
 
 /// Container configuration

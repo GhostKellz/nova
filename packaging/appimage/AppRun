@@ -1,0 +1,5 @@
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+export NOVA_CONFIG_DIR="$HERE/etc/nova"
+export NOVA_ASSETS_DIR="$HERE/usr/share/nova"
+exec "$HERE/usr/bin/nova-gui" "$@"

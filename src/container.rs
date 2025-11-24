@@ -1,9 +1,11 @@
 use crate::{
-    NovaError, Result, config::ContainerConfig as NovaContainerConfig, instance::Instance,
-    log_error, log_info, log_warn,
+    NovaError, Result,
     bolt_runtime::BoltRuntime,
+    config::ContainerConfig as NovaContainerConfig,
+    container_runtime::{ContainerConfig, ContainerRuntime as Runtime, RestartPolicy},
     docker_runtime::DockerRuntime,
-    container_runtime::{ContainerRuntime as Runtime, ContainerConfig, RestartPolicy},
+    instance::Instance,
+    log_error, log_info, log_warn,
 };
 use std::sync::Arc;
 
@@ -34,7 +36,10 @@ impl ContainerManager {
             }
         };
 
-        Self { runtime, runtime_name }
+        Self {
+            runtime,
+            runtime_name,
+        }
     }
 
     /// Get the active runtime name
@@ -53,7 +58,9 @@ impl ContainerManager {
 
         // Convert Nova config to runtime config
         let runtime_config = ContainerConfig {
-            capsule: nova_config.capsule.unwrap_or_else(|| "ubuntu:latest".to_string()),
+            capsule: nova_config
+                .capsule
+                .unwrap_or_else(|| "ubuntu:latest".to_string()),
             ports: Vec::new(),
             volumes: nova_config.volumes,
             env: nova_config.env,
@@ -66,14 +73,14 @@ impl ContainerManager {
         };
 
         // Use runtime to start container
-        let container_id = self.runtime.run_container(
-            &runtime_config.capsule,
-            Some(name),
-            &runtime_config
-        ).await.map_err(|e| {
-            log_error!("Failed to start container '{}': {:?}", name, e);
-            NovaError::SystemCommandFailed
-        })?;
+        let container_id = self
+            .runtime
+            .run_container(&runtime_config.capsule, Some(name), &runtime_config)
+            .await
+            .map_err(|e| {
+                log_error!("Failed to start container '{}': {:?}", name, e);
+                NovaError::SystemCommandFailed
+            })?;
 
         log_info!("Container '{}' started with ID: {}", name, container_id);
         Ok(())
@@ -94,10 +101,13 @@ impl ContainerManager {
     pub async fn remove_container(&self, name: &str, force: bool) -> Result<()> {
         log_info!("Removing container: {}", name);
 
-        self.runtime.remove_container(name, force).await.map_err(|e| {
-            log_error!("Failed to remove container '{}': {:?}", name, e);
-            NovaError::SystemCommandFailed
-        })?;
+        self.runtime
+            .remove_container(name, force)
+            .await
+            .map_err(|e| {
+                log_error!("Failed to remove container '{}': {:?}", name, e);
+                NovaError::SystemCommandFailed
+            })?;
 
         log_info!("Container '{}' removed successfully", name);
         Ok(())
@@ -108,22 +118,36 @@ impl ContainerManager {
         match self.runtime.list_containers(true).await {
             Ok(containers) => {
                 // Convert ContainerInfo to Instance
-                containers.iter().map(|c| {
-                    let mut instance = Instance::new(c.name.clone(), crate::instance::InstanceType::Container);
-                    instance.update_status(match c.status {
-                        crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
-                        crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
-                        crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
-                        crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
-                        crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
-                        _ => crate::instance::InstanceStatus::Error,
-                    });
-                    if let Some(pid) = c.pid {
-                        instance.set_pid(Some(pid));
-                    }
-                    instance.network = c.network.clone();
-                    instance
-                }).collect()
+                containers
+                    .iter()
+                    .map(|c| {
+                        let mut instance =
+                            Instance::new(c.name.clone(), crate::instance::InstanceType::Container);
+                        instance.update_status(match c.status {
+                            crate::container_runtime::ContainerStatus::Running => {
+                                crate::instance::InstanceStatus::Running
+                            }
+                            crate::container_runtime::ContainerStatus::Stopped => {
+                                crate::instance::InstanceStatus::Stopped
+                            }
+                            crate::container_runtime::ContainerStatus::Paused => {
+                                crate::instance::InstanceStatus::Suspended
+                            }
+                            crate::container_runtime::ContainerStatus::Starting => {
+                                crate::instance::InstanceStatus::Starting
+                            }
+                            crate::container_runtime::ContainerStatus::Restarting => {
+                                crate::instance::InstanceStatus::Starting
+                            }
+                            _ => crate::instance::InstanceStatus::Error,
+                        });
+                        if let Some(pid) = c.pid {
+                            instance.set_pid(Some(pid));
+                        }
+                        instance.network = c.network.clone();
+                        instance
+                    })
+                    .collect()
             }
             Err(e) => {
                 log_warn!("Failed to list containers: {:?}", e);
@@ -138,14 +162,14 @@ impl ContainerManager {
         if tokio::runtime::Handle::try_current().is_ok() {
             // We're in an async context - can't use block_on
             // Return empty for now - GUI should use spawn_blocking or separate thread
-            log_warn!("list_containers() called from async context - use list_containers_async() instead");
+            log_warn!(
+                "list_containers() called from async context - use list_containers_async() instead"
+            );
             Vec::new()
         } else {
             // Not in async context - create runtime and block
             match tokio::runtime::Runtime::new() {
-                Ok(rt) => rt.block_on(async {
-                    self.list_containers_async().await
-                }),
+                Ok(rt) => rt.block_on(async { self.list_containers_async().await }),
                 Err(_) => {
                     log_warn!("Failed to create tokio runtime for list_containers");
                     Vec::new()
@@ -157,23 +181,32 @@ impl ContainerManager {
     pub fn get_container(&self, name: &str) -> Option<Instance> {
         // Use tokio runtime to block on async call
         let runtime = tokio::runtime::Handle::try_current()
-            .or_else(|_| {
-                tokio::runtime::Runtime::new().map(|rt| rt.handle().clone())
-            });
+            .or_else(|_| tokio::runtime::Runtime::new().map(|rt| rt.handle().clone()));
 
         match runtime {
             Ok(handle) => {
-                match handle.block_on(async {
-                    self.runtime.inspect_container(name).await
-                }) {
+                match handle.block_on(async { self.runtime.inspect_container(name).await }) {
                     Ok(container) => {
-                        let mut instance = Instance::new(container.name.clone(), crate::instance::InstanceType::Container);
+                        let mut instance = Instance::new(
+                            container.name.clone(),
+                            crate::instance::InstanceType::Container,
+                        );
                         instance.update_status(match container.status {
-                            crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
-                            crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
-                            crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
-                            crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
-                            crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+                            crate::container_runtime::ContainerStatus::Running => {
+                                crate::instance::InstanceStatus::Running
+                            }
+                            crate::container_runtime::ContainerStatus::Stopped => {
+                                crate::instance::InstanceStatus::Stopped
+                            }
+                            crate::container_runtime::ContainerStatus::Paused => {
+                                crate::instance::InstanceStatus::Suspended
+                            }
+                            crate::container_runtime::ContainerStatus::Starting => {
+                                crate::instance::InstanceStatus::Starting
+                            }
+                            crate::container_runtime::ContainerStatus::Restarting => {
+                                crate::instance::InstanceStatus::Starting
+                            }
                             _ => crate::instance::InstanceStatus::Error,
                         });
                         if let Some(pid) = container.pid {
@@ -182,10 +215,10 @@ impl ContainerManager {
                         instance.network = container.network.clone();
                         Some(instance)
                     }
-                    Err(_) => None
+                    Err(_) => None,
                 }
             }
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
@@ -199,11 +232,21 @@ impl ContainerManager {
         })?;
 
         Ok(match container.status {
-            crate::container_runtime::ContainerStatus::Running => crate::instance::InstanceStatus::Running,
-            crate::container_runtime::ContainerStatus::Stopped => crate::instance::InstanceStatus::Stopped,
-            crate::container_runtime::ContainerStatus::Paused => crate::instance::InstanceStatus::Suspended,
-            crate::container_runtime::ContainerStatus::Starting => crate::instance::InstanceStatus::Starting,
-            crate::container_runtime::ContainerStatus::Restarting => crate::instance::InstanceStatus::Starting,
+            crate::container_runtime::ContainerStatus::Running => {
+                crate::instance::InstanceStatus::Running
+            }
+            crate::container_runtime::ContainerStatus::Stopped => {
+                crate::instance::InstanceStatus::Stopped
+            }
+            crate::container_runtime::ContainerStatus::Paused => {
+                crate::instance::InstanceStatus::Suspended
+            }
+            crate::container_runtime::ContainerStatus::Starting => {
+                crate::instance::InstanceStatus::Starting
+            }
+            crate::container_runtime::ContainerStatus::Restarting => {
+                crate::instance::InstanceStatus::Starting
+            }
             _ => crate::instance::InstanceStatus::Error,
         })
     }
@@ -249,7 +292,6 @@ impl ContainerManager {
             .map(|output| output.status.success())
             .unwrap_or(false)
     }
-
 }
 
 impl Default for ContainerManager {

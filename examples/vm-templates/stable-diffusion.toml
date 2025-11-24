@@ -196,4 +196,3 @@ models = [
 enabled = true
 categories = ["checkpoint", "lora", "embedding"]
 civitai_api_key = ""  # Set your Civitai API key
-"""
