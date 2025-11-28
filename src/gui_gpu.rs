@@ -1,8 +1,10 @@
+use crate::NovaError;
 use crate::gpu_doctor::{CheckStatus, DiagnosticReport as DoctorReport, GpuDoctor, SystemStatus};
-use crate::gpu_passthrough::{GpuCapabilities, GpuManager, PciDevice};
+use crate::gpu_passthrough::{DeviceBindingInfo, GpuCapabilities, GpuManager, PciDevice};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GpuTab {
@@ -36,6 +38,8 @@ pub struct GpuManagerGui {
     // Messages
     last_message: Option<String>,
     last_error: Option<String>,
+    status_poll_interval: Duration,
+    last_status_refresh: Option<Instant>,
 }
 
 impl GpuManagerGui {
@@ -53,6 +57,8 @@ impl GpuManagerGui {
             diagnostic_report: None,
             last_message: None,
             last_error: None,
+            status_poll_interval: Duration::from_secs(3),
+            last_status_refresh: None,
         }
     }
 
@@ -61,6 +67,7 @@ impl GpuManagerGui {
         if let Ok(mut manager) = self.gpu_manager.lock() {
             // Discover GPUs
             let _ = manager.discover();
+            manager.refresh_device_status();
 
             self.gpus = manager.list_gpus().iter().cloned().collect();
 
@@ -90,6 +97,8 @@ impl GpuManagerGui {
                 }
             }
         }
+
+        self.last_status_refresh = Some(Instant::now());
     }
 
     /// Run diagnostics
@@ -139,6 +148,118 @@ impl GpuManagerGui {
         }
 
         buffer
+    }
+
+    fn maybe_poll_binding_status(&mut self) {
+        let needs_refresh = self
+            .last_status_refresh
+            .map(|ts| ts.elapsed() >= self.status_poll_interval)
+            .unwrap_or(true);
+
+        if needs_refresh {
+            self.refresh_binding_status();
+        }
+    }
+
+    fn refresh_binding_status(&mut self) {
+        if let Ok(mut manager) = self.gpu_manager.lock() {
+            manager.refresh_device_status();
+            self.gpus = manager.list_gpus().iter().cloned().collect();
+            self.reservations.clear();
+            for (addr, vm) in manager.get_reservations() {
+                self.reservations.insert(addr.clone(), vm.clone());
+            }
+        }
+
+        self.last_status_refresh = Some(Instant::now());
+    }
+
+    fn bind_to_vfio(&mut self, device_address: String) {
+        self.with_gpu_manager(move |manager| {
+            let before = manager.binding_info(&device_address);
+            manager.bind_device_to_vfio(&device_address)?;
+            let after = manager.binding_info(&device_address);
+            Ok(compose_binding_transition(
+                "Bound",
+                &device_address,
+                before,
+                after,
+            ))
+        });
+    }
+
+    fn reattach_host_driver(&mut self, device_address: String) {
+        self.with_gpu_manager(move |manager| {
+            let before = manager.binding_info(&device_address);
+            manager.reattach_device_driver(&device_address)?;
+            let after = manager.binding_info(&device_address);
+            Ok(compose_binding_transition(
+                "Reattached",
+                &device_address,
+                before,
+                after,
+            ))
+        });
+    }
+
+    fn force_unbind(&mut self, device_address: String) {
+        self.with_gpu_manager(move |manager| {
+            let before = manager.binding_info(&device_address);
+            manager.force_unbind_device(&device_address)?;
+            manager.refresh_device_status();
+            let after = manager.binding_info(&device_address);
+            Ok(compose_binding_transition(
+                "Unbound",
+                &device_address,
+                before,
+                after,
+            ))
+        });
+    }
+
+    fn load_vfio_modules(&mut self) {
+        self.with_gpu_manager(|manager| {
+            manager.load_vfio_stack()?;
+            let missing = manager.missing_vfio_modules();
+            if missing.is_empty() {
+                Ok("VFIO modules active: vfio, vfio_pci, vfio_iommu_type1".to_string())
+            } else {
+                Ok(format!(
+                    "Requested VFIO modules, still missing: {}",
+                    missing.join(", ")
+                ))
+            }
+        });
+    }
+
+    fn with_gpu_manager<F>(&mut self, action: F)
+    where
+        F: FnOnce(&mut GpuManager) -> std::result::Result<String, NovaError>,
+    {
+        match self.gpu_manager.lock() {
+            Ok(mut manager) => match action(&mut manager) {
+                Ok(success_message) => {
+                    manager.refresh_device_status();
+                    self.gpus = manager.list_gpus().iter().cloned().collect();
+                    self.reservations.clear();
+                    for (addr, vm) in manager.get_reservations() {
+                        self.reservations.insert(addr.clone(), vm.clone());
+                    }
+
+                    self.last_message = Some(success_message);
+                    self.last_error = None;
+                    self.last_status_refresh = Some(Instant::now());
+                }
+                Err(err) => {
+                    self.last_error = Some(format!("{:?}", err));
+                    self.last_message = None;
+                }
+            },
+            Err(_) => {
+                self.last_error = Some("GPU manager is currently locked".to_string());
+                self.last_message = None;
+            }
+        }
     }
 
     /// Assign GPU to VM
@@ -194,6 +315,8 @@ impl GpuManagerGui {
         ui.heading("GPU Passthrough Manager");
         ui.separator();
 
+        self.maybe_poll_binding_status();
+
         // Tab selection
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.active_tab, GpuTab::Manager, "GPU Manager");
@@ -237,6 +360,8 @@ impl GpuManagerGui {
 
     /// Draw GPU manager tab
     fn draw_manager_tab(&mut self, ui: &mut egui::Ui) {
+        self.maybe_poll_binding_status();
+
         ui.heading("Available GPUs");
         ui.separator();
 
@@ -260,6 +385,18 @@ impl GpuManagerGui {
 
         ui.add_space(8.0);
 
+        ui.horizontal(|ui| {
+            if ui.button("Load VFIO modules").clicked() {
+                self.load_vfio_modules();
+            }
+
+            if ui.button("Refresh status").clicked() {
+                self.refresh_binding_status();
+            }
+        });
+
+        ui.add_space(6.0);
+
         // GPU list
         egui::ScrollArea::vertical()
             .max_height(400.0)
@@ -275,6 +412,7 @@ impl GpuManagerGui {
     fn draw_gpu_card(&mut self, ui: &mut egui::Ui, gpu: &PciDevice) {
         let is_selected = self.selected_gpu.as_ref() == Some(&gpu.address);
         let is_assigned = self.reservations.contains_key(&gpu.address);
+        let driver = gpu.driver.as_deref();
 
         egui::Frame::none()
             .fill(if is_selected {
@@ -293,15 +431,13 @@ impl GpuManagerGui {
             .rounding(egui::Rounding::same(6.0))
             .inner_margin(egui::Margin::same(12.0))
             .show(ui, |ui| {
-                // Header with vendor logo color
                 ui.horizontal(|ui| {
-                    // Determine vendor color
                     let vendor_color = if gpu.vendor_id == "10de" {
-                        egui::Color32::from_rgb(118, 185, 0) // NVIDIA
+                        egui::Color32::from_rgb(118, 185, 0)
                     } else if gpu.vendor_id == "1002" {
-                        egui::Color32::from_rgb(237, 28, 36) // AMD
+                        egui::Color32::from_rgb(237, 28, 36)
                     } else if gpu.vendor_id == "8086" {
-                        egui::Color32::from_rgb(0, 113, 197) // Intel
+                        egui::Color32::from_rgb(0, 113, 197)
                     } else {
                         egui::Color32::from_gray(160)
                     };
@@ -310,20 +446,28 @@ impl GpuManagerGui {
                         vendor_color,
                         egui::RichText::new(format!("■ {}", gpu.vendor_name)).strong(),
                     );
+
+                    if let Some(group) = gpu.iommu_group {
+                        ui.add_space(6.0);
+                        ui.label(format!("IOMMU Group: {}", group));
+                    }
                 });
 
                 ui.label(egui::RichText::new(&gpu.device_name).strong());
                 ui.add_space(4.0);
 
-                // PCI address and IOMMU group
                 ui.horizontal(|ui| {
                     ui.monospace(format!("PCI: {}", gpu.address));
-                    if let Some(group) = gpu.iommu_group {
-                        ui.label(format!("IOMMU Group: {}", group));
+                    if let Some(driver) = driver {
+                        ui.add_space(6.0);
+                        if gpu.in_use {
+                            ui.small(format!("Driver: {} (active)", driver));
+                        } else {
+                            ui.small(format!("Driver: {}", driver));
+                        }
                     }
                 });
 
-                // Device IDs
                 ui.small(format!("{}:{}", gpu.vendor_id, gpu.device_id));
                 ui.add_space(4.0);
 
@@ -339,10 +483,12 @@ impl GpuManagerGui {
 
                     ui.horizontal(|ui| {
                         ui.label(format!("Generation: {}", generation));
+                        ui.add_space(12.0);
                         ui.label(format!("Min Driver: {}", min_driver));
                     });
                     ui.horizontal(|ui| {
                         ui.label(format!("Kernel: {}", recommended_kernel));
+                        ui.add_space(12.0);
                         ui.label(format!("TCC: {}", tcc_status));
                     });
 
@@ -353,23 +499,24 @@ impl GpuManagerGui {
                     ui.add_space(4.0);
                 }
 
-                // Status indicator
                 let (status_text, status_color) =
                     if let Some(vm) = self.reservations.get(&gpu.address) {
                         (
                             format!("Assigned to VM: {}", vm),
                             egui::Color32::from_rgb(102, 220, 144),
                         )
-                    } else if gpu.driver.as_deref() == Some("vfio-pci") {
+                    } else if driver == Some("vfio-pci") {
                         (
-                            "Ready for passthrough".to_string(),
+                            "Bound to vfio-pci".to_string(),
                             egui::Color32::from_rgb(255, 200, 100),
                         )
-                    } else if let Some(driver) = &gpu.driver {
-                        (
-                            format!("Driver: {}", driver),
-                            egui::Color32::from_rgb(160, 160, 160),
-                        )
+                    } else if let Some(driver) = driver {
+                        let label = if gpu.in_use {
+                            format!("Driver: {} (active)", driver)
+                        } else {
+                            format!("Driver: {}", driver)
+                        };
+                        (label, egui::Color32::from_rgb(160, 160, 160))
                     } else {
                         (
                             "No driver".to_string(),
@@ -380,27 +527,42 @@ impl GpuManagerGui {
                 ui.colored_label(status_color, status_text);
                 ui.add_space(6.0);
 
-                // Action buttons
                 let address = gpu.address.clone();
                 let vm_name = self.selected_vm.clone();
 
                 ui.horizontal(|ui| {
                     if is_assigned {
                         if ui.button("Release").clicked() {
-                            self.release_gpu(address);
+                            self.release_gpu(address.clone());
                         }
-                    } else {
-                        if ui.button("Assign to VM").clicked() {
-                            if !vm_name.is_empty() {
-                                self.assign_gpu(address, vm_name);
-                            } else {
-                                self.last_error = Some("Please enter a VM name".to_string());
-                            }
+                    } else if ui.button("Assign to VM").clicked() {
+                        if !vm_name.is_empty() {
+                            self.assign_gpu(address.clone(), vm_name.clone());
+                        } else {
+                            self.last_error = Some("Please enter a VM name".to_string());
                         }
                     }
 
                     if ui.button("Select").clicked() {
                         self.selected_gpu = Some(gpu.address.clone());
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    if driver == Some("vfio-pci") {
+                        if ui.button("Reattach host driver").clicked() {
+                            self.reattach_host_driver(address.clone());
+                        }
+                    } else {
+                        if ui.button("Bind to VFIO").clicked() {
+                            self.bind_to_vfio(address.clone());
+                        }
+
+                        if ui.button("Force unbind").clicked() {
+                            self.force_unbind(address.clone());
+                        }
                     }
                 });
             });
@@ -650,6 +812,44 @@ impl GpuManagerWindow {
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+}
+
+fn binding_state_label(info: &DeviceBindingInfo) -> String {
+    match info.driver.as_deref() {
+        Some("vfio-pci") => "vfio-pci (guest-ready)".to_string(),
+        Some(driver) if info.in_use => format!("{} (host active)", driver),
+        Some(driver) => format!("{} (host idle)", driver),
+        None => "no driver bound".to_string(),
+    }
+}
+
+fn describe_binding(info: Option<&DeviceBindingInfo>) -> String {
+    match info {
+        Some(info) => {
+            let mut label = binding_state_label(info);
+            if let Some(vm) = &info.reserved_for {
+                label.push_str(&format!(", reserved for {}", vm));
+            }
+            label
+        }
+        None => "device not detected".to_string(),
+    }
+}
+
+fn compose_binding_transition(
+    verb: &str,
+    device: &str,
+    before: Option<DeviceBindingInfo>,
+    after: Option<DeviceBindingInfo>,
+) -> String {
+    let before_text = describe_binding(before.as_ref());
+    let after_text = describe_binding(after.as_ref());
+
+    if before_text == after_text {
+        format!("{} {}: state unchanged ({})", verb, device, after_text)
+    } else {
+        format!("{} {}: {} → {}", verb, device, before_text, after_text)
     }
 }
 

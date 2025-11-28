@@ -2,7 +2,9 @@ use crate::{
     NovaError, Result,
     bolt_runtime::BoltRuntime,
     config::ContainerConfig as NovaContainerConfig,
-    container_runtime::{ContainerConfig, ContainerRuntime as Runtime, RestartPolicy},
+    container_runtime::{
+        ContainerConfig, ContainerInfo, ContainerRuntime as Runtime, ContainerStats, RestartPolicy,
+    },
     docker_runtime::DockerRuntime,
     instance::Instance,
     log_error, log_info, log_warn,
@@ -220,6 +222,20 @@ impl ContainerManager {
             }
             Err(_) => None,
         }
+    }
+
+    pub async fn inspect_container(&self, name: &str) -> Result<ContainerInfo> {
+        self.runtime.inspect_container(name).await.map_err(|e| {
+            log_error!("Failed to inspect container '{}': {:?}", name, e);
+            NovaError::ContainerNotFound(name.to_string())
+        })
+    }
+
+    pub async fn container_stats(&self, name: &str) -> Result<ContainerStats> {
+        self.runtime.get_stats(name).await.map_err(|e| {
+            log_error!("Failed to collect stats for container '{}': {:?}", name, e);
+            NovaError::SystemCommandFailed
+        })
     }
 
     pub async fn get_container_status(

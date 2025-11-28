@@ -1,5 +1,6 @@
 use crate::{
     NovaError, Result, gpu_passthrough::GpuPassthroughConfig, looking_glass::LookingGlassConfig,
+    theme,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,6 +18,8 @@ pub struct NovaConfig {
     pub network: HashMap<String, NetworkConfig>,
     #[serde(default)]
     pub storage: HashMap<String, StoragePoolConfig>,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,30 @@ pub struct StoragePoolConfig {
     pub auto_create: bool,
     #[serde(default)]
     pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_ui_theme")]
+    pub theme: String,
+    #[serde(default = "default_ui_font_family")]
+    pub font_family: String,
+    #[serde(default = "default_ui_font_size")]
+    pub font_size: f32,
+    #[serde(default)]
+    pub compact_layout: bool,
+    #[serde(default = "default_ui_auto_refresh")]
+    pub auto_refresh: bool,
+    #[serde(default = "default_ui_refresh_interval_seconds")]
+    pub refresh_interval_seconds: u64,
+    #[serde(default = "default_ui_network_refresh_interval_seconds")]
+    pub network_refresh_interval_seconds: u64,
+    #[serde(default = "default_ui_show_event_log")]
+    pub show_event_log: bool,
+    #[serde(default = "default_ui_show_insights")]
+    pub show_insights: bool,
+    #[serde(default = "default_ui_confirm_instance_actions")]
+    pub confirm_instance_actions: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +188,7 @@ impl Default for NovaConfig {
             container: HashMap::new(),
             network: HashMap::new(),
             storage: HashMap::new(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -191,6 +219,23 @@ impl Default for StoragePoolConfig {
             default_format: default_disk_format(),
             auto_create: default_create_if_missing(),
             labels: Vec::new(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_ui_theme(),
+            font_family: default_ui_font_family(),
+            font_size: default_ui_font_size(),
+            compact_layout: false,
+            auto_refresh: default_ui_auto_refresh(),
+            refresh_interval_seconds: default_ui_refresh_interval_seconds(),
+            network_refresh_interval_seconds: default_ui_network_refresh_interval_seconds(),
+            show_event_log: default_ui_show_event_log(),
+            show_insights: default_ui_show_insights(),
+            confirm_instance_actions: default_ui_confirm_instance_actions(),
         }
     }
 }
@@ -274,6 +319,42 @@ fn default_disk_size() -> String {
 }
 
 fn default_create_if_missing() -> bool {
+    true
+}
+
+fn default_ui_theme() -> String {
+    theme::DEFAULT_THEME_NAME.to_string()
+}
+
+pub fn default_ui_font_family() -> String {
+    "fira-code-nerd".to_string()
+}
+
+pub fn default_ui_font_size() -> f32 {
+    15.0
+}
+
+fn default_ui_auto_refresh() -> bool {
+    true
+}
+
+fn default_ui_refresh_interval_seconds() -> u64 {
+    5
+}
+
+fn default_ui_network_refresh_interval_seconds() -> u64 {
+    15
+}
+
+fn default_ui_show_event_log() -> bool {
+    false
+}
+
+fn default_ui_show_insights() -> bool {
+    true
+}
+
+fn default_ui_confirm_instance_actions() -> bool {
     true
 }
 

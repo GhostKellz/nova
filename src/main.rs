@@ -4,7 +4,7 @@ use nova::{
     config::{DiskFormat, NovaConfig, StoragePoolConfig, StoragePoolType},
     container::ContainerManager,
     gpu_doctor::GpuDoctor,
-    gpu_passthrough::GpuManager,
+    gpu_passthrough::{DeviceBindingInfo, GpuManager, PciDevice},
     libvirt::LibvirtManager,
     logger,
     migration::{MigrationConfig, MigrationManager},
@@ -24,10 +24,14 @@ use nova::{
     usb_passthrough::UsbManager,
     vm::VmManager,
 };
+use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread::sleep;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "nova")]
@@ -410,6 +414,38 @@ enum GpuCommands {
         /// VM name
         vm_name: String,
     },
+    /// Show live GPU binding status
+    Status {
+        /// Optional PCI address filter (if omitted, show all)
+        #[arg(long)]
+        device: Option<String>,
+        /// Continuously refresh status output until interrupted
+        #[arg(long)]
+        watch: bool,
+        /// Refresh interval in seconds (used with --watch)
+        #[arg(long, default_value_t = 3, value_name = "SECONDS")]
+        interval: u64,
+    },
+    /// Run GPU quick-fix actions (load vfio, unbind drivers, etc.)
+    #[command(name = "quick-fix")]
+    QuickFix {
+        /// Quick-fix action to run
+        #[arg(value_enum)]
+        action: GpuQuickFixAction,
+        /// PCI address required for actions that operate on a device
+        #[arg(long)]
+        device: Option<String>,
+    },
+}
+
+#[derive(ValueEnum, Clone)]
+enum GpuQuickFixAction {
+    /// Load vfio/vfio_pci/vfio_iommu_type1 modules
+    LoadVfio,
+    /// Forcefully unbind a device from its current driver
+    Unbind,
+    /// Reattach a device to host drivers after vfio use
+    Reattach,
 }
 
 #[derive(Subcommand)]
@@ -1322,6 +1358,7 @@ Volumes:"
             GpuCommands::List => {
                 let mut gpu_manager = GpuManager::new();
                 gpu_manager.discover()?;
+                gpu_manager.refresh_device_status();
 
                 let gpus = gpu_manager.list_gpus();
 
@@ -1330,17 +1367,20 @@ Volumes:"
                     return Ok(());
                 }
 
+                let reservations_map = gpu_manager.get_reservations().clone();
+
                 println!(
-                    "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8}",
+                    "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8} {:<14}",
                     "PCI ADDRESS",
                     "GPU MODEL",
                     "IOMMU GROUP",
                     "DRIVER",
                     "GENERATION",
                     "MIN DRIVER",
-                    "TCC"
+                    "TCC",
+                    "STATUS"
                 );
-                println!("{}", "=".repeat(112));
+                println!("{}", "=".repeat(128));
 
                 for gpu in gpus {
                     let iommu = gpu
@@ -1362,17 +1402,36 @@ Volumes:"
                         "no"
                     };
 
+                    let status = if let Some(vm) = reservations_map.get(&gpu.address) {
+                        format!("reserved ({})", vm)
+                    } else if gpu.driver.as_deref() == Some("vfio-pci") {
+                        "vfio".to_string()
+                    } else if let Some(driver) = &gpu.driver {
+                        if gpu.in_use {
+                            format!("host ({driver})")
+                        } else {
+                            format!("available ({driver})")
+                        }
+                    } else {
+                        "unbound".to_string()
+                    };
+
                     println!(
-                        "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8}",
-                        gpu.address, gpu.device_name, iommu, driver, generation, min_driver, tcc
+                        "{:<18} {:<28} {:<12} {:<13} {:<14} {:<11} {:<8} {:<14}",
+                        gpu.address,
+                        gpu.device_name,
+                        iommu,
+                        driver,
+                        generation,
+                        min_driver,
+                        tcc,
+                        status,
                     );
                 }
 
-                // Show reservations
-                let reservations = gpu_manager.get_reservations();
-                if !reservations.is_empty() {
+                if !reservations_map.is_empty() {
                     println!("\nReserved GPUs:");
-                    for (device, vm) in reservations {
+                    for (device, vm) in reservations_map {
                         println!("  {} → {}", device, vm);
                     }
                 }
@@ -1385,6 +1444,7 @@ Volumes:"
             GpuCommands::Info { device } => {
                 let mut gpu_manager = GpuManager::new();
                 gpu_manager.discover()?;
+                gpu_manager.refresh_device_status();
 
                 if device == "all" {
                     for gpu in gpu_manager.list_gpus() {
@@ -1392,33 +1452,124 @@ Volumes:"
                         print_gpu_info(gpu, caps);
                         println!();
                     }
+                } else if let Some(gpu) =
+                    gpu_manager.list_gpus().iter().find(|g| g.address == device)
+                {
+                    let caps = gpu_manager.capabilities_for(&gpu.address);
+                    print_gpu_info(gpu, caps);
                 } else {
-                    if let Some(gpu) = gpu_manager.list_gpus().iter().find(|g| g.address == device)
-                    {
-                        let caps = gpu_manager.capabilities_for(&gpu.address);
-                        print_gpu_info(gpu, caps);
-                    } else {
-                        println!("GPU '{}' not found", device);
-                    }
+                    println!("GPU '{}' not found", device);
                 }
             }
             GpuCommands::Bind { device } => {
                 let mut gpu_manager = GpuManager::new();
                 gpu_manager.discover()?;
-
-                gpu_manager.configure_passthrough(&device, "manual")?;
-                println!("✅ GPU {} bound to vfio-pci", device);
+                gpu_manager.refresh_device_status();
+                let before = gpu_manager.binding_info(&device);
+                gpu_manager.bind_device_to_vfio(&device)?;
+                let after = gpu_manager.binding_info(&device);
+                println!(
+                    "{}",
+                    compose_binding_transition_cli("Bound", &device, before, after)
+                );
             }
             GpuCommands::Release { device } => {
                 let mut gpu_manager = GpuManager::new();
-                gpu_manager.release_gpu(&device)?;
-                println!("✅ GPU {} released from vfio-pci", device);
+                gpu_manager.discover()?;
+                gpu_manager.refresh_device_status();
+                let before = gpu_manager.binding_info(&device);
+                gpu_manager.reattach_device_driver(&device)?;
+                let after = gpu_manager.binding_info(&device);
+                println!(
+                    "{}",
+                    compose_binding_transition_cli("Reattached", &device, before, after)
+                );
             }
             GpuCommands::Reserve { device, vm_name } => {
                 let mut gpu_manager = GpuManager::new();
                 gpu_manager.discover()?;
+                gpu_manager.refresh_device_status();
+                let before = gpu_manager.binding_info(&device);
                 gpu_manager.configure_passthrough(&device, &vm_name)?;
-                println!("✅ GPU {} reserved for VM '{}'", device, vm_name);
+                let after = gpu_manager.binding_info(&device);
+                println!(
+                    "{}",
+                    compose_binding_transition_cli("Reserved", &device, before, after)
+                );
+                println!("  ↳ reserved for VM '{}'", vm_name);
+            }
+            GpuCommands::Status {
+                device,
+                watch,
+                interval,
+            } => {
+                if watch {
+                    let interval = interval.max(1);
+                    loop {
+                        print!("\x1B[2J\x1B[H");
+                        println!(
+                            "GPU status (refresh every {}s) — press Ctrl+C to exit\n",
+                            interval
+                        );
+                        let snapshot = gpu_status_snapshot(device.as_deref())?;
+                        println!("{}", snapshot);
+                        io::stdout().flush().ok();
+                        sleep(Duration::from_secs(interval));
+                    }
+                } else {
+                    let snapshot = gpu_status_snapshot(device.as_deref())?;
+                    println!("{}", snapshot);
+                }
+            }
+            GpuCommands::QuickFix { action, device } => {
+                let mut gpu_manager = GpuManager::new();
+                match action {
+                    GpuQuickFixAction::LoadVfio => {
+                        gpu_manager.load_vfio_stack()?;
+                        let missing = gpu_manager.missing_vfio_modules();
+                        if missing.is_empty() {
+                            println!("VFIO modules active: vfio, vfio_pci, vfio_iommu_type1");
+                        } else {
+                            println!(
+                                "Requested VFIO modules; still missing: {}",
+                                missing.join(", ")
+                            );
+                        }
+                    }
+                    GpuQuickFixAction::Unbind => {
+                        gpu_manager.discover()?;
+                        gpu_manager.refresh_device_status();
+                        let device = device.ok_or_else(|| {
+                            NovaError::ConfigError(
+                                "--device must be supplied for the unbind action".to_string(),
+                            )
+                        })?;
+                        let before = gpu_manager.binding_info(&device);
+                        gpu_manager.force_unbind_device(&device)?;
+                        gpu_manager.refresh_device_status();
+                        let after = gpu_manager.binding_info(&device);
+                        println!(
+                            "{}",
+                            compose_binding_transition_cli("Unbound", &device, before, after)
+                        );
+                    }
+                    GpuQuickFixAction::Reattach => {
+                        gpu_manager.discover()?;
+                        gpu_manager.refresh_device_status();
+                        let device = device.ok_or_else(|| {
+                            NovaError::ConfigError(
+                                "--device must be supplied for the reattach action".to_string(),
+                            )
+                        })?;
+                        let before = gpu_manager.binding_info(&device);
+                        gpu_manager.reattach_device_driver(&device)?;
+                        let after = gpu_manager.binding_info(&device);
+                        println!(
+                            "{}",
+                            compose_binding_transition_cli("Reattached", &device, before, after)
+                        );
+                    }
+                }
             }
         },
         Commands::Storage { storage_command } => match storage_command {
@@ -2029,6 +2180,179 @@ fn print_gpu_info(
         if caps.tcc_supported {
             println!("  TCC Mode: Supported (recommended for Looking Glass)");
         }
+    }
+}
+
+fn binding_state_label(info: &DeviceBindingInfo) -> String {
+    match info.driver.as_deref() {
+        Some("vfio-pci") => "vfio-pci (guest-ready)".to_string(),
+        Some(driver) if info.in_use => format!("{} (host active)", driver),
+        Some(driver) => format!("{} (host idle)", driver),
+        None => "no driver bound".to_string(),
+    }
+}
+
+fn describe_binding(info: Option<&DeviceBindingInfo>) -> String {
+    match info {
+        Some(info) => {
+            let mut label = binding_state_label(info);
+            if let Some(vm) = &info.reserved_for {
+                label.push_str(&format!(", reserved for {}", vm));
+            }
+            label
+        }
+        None => "device not detected".to_string(),
+    }
+}
+
+fn compose_binding_transition_cli(
+    verb: &str,
+    device: &str,
+    before: Option<DeviceBindingInfo>,
+    after: Option<DeviceBindingInfo>,
+) -> String {
+    let before_text = describe_binding(before.as_ref());
+    let after_text = describe_binding(after.as_ref());
+
+    if before_text == after_text {
+        format!("{} {}: state unchanged ({})", verb, device, after_text)
+    } else {
+        format!("{} {}: {} → {}", verb, device, before_text, after_text)
+    }
+}
+
+fn gpu_status_snapshot(device_filter: Option<&str>) -> Result<String> {
+    let mut gpu_manager = GpuManager::new();
+    gpu_manager.discover()?;
+    gpu_manager.refresh_device_status();
+
+    let mut gpus: Vec<PciDevice> = gpu_manager.list_gpus().iter().cloned().collect();
+    if let Some(filter) = device_filter {
+        gpus.retain(|gpu| gpu.address == filter);
+    }
+
+    let reservations = gpu_manager.get_reservations().clone();
+    Ok(build_gpu_status_output(&gpus, &reservations))
+}
+
+fn build_gpu_status_output(gpus: &[PciDevice], reservations: &HashMap<String, String>) -> String {
+    if gpus.is_empty() {
+        return "No GPUs matched the provided filter\n".to_string();
+    }
+
+    let mut buffer = String::new();
+
+    for gpu in gpus {
+        let driver = gpu.driver.as_deref().unwrap_or("-");
+        let status = if let Some(vm) = reservations.get(&gpu.address) {
+            format!("reserved for {}", vm)
+        } else if gpu.driver.as_deref() == Some("vfio-pci") {
+            "vfio (ready)".to_string()
+        } else if let Some(driver) = gpu.driver.as_deref() {
+            if gpu.in_use {
+                format!("host driver active ({driver})")
+            } else {
+                format!("host driver loaded ({driver})")
+            }
+        } else {
+            "unbound".to_string()
+        };
+
+        let _ = writeln!(&mut buffer, "{} — {}", gpu.address, gpu.device_name);
+        let _ = writeln!(&mut buffer, "  driver: {}", driver);
+        let _ = writeln!(&mut buffer, "  status: {}", status);
+
+        if gpu.driver.as_deref() != Some("vfio-pci") {
+            let _ = writeln!(&mut buffer, "  quick fixes:");
+            let _ = writeln!(&mut buffer, "    nova gpu bind {}", gpu.address);
+            let _ = writeln!(
+                &mut buffer,
+                "    nova gpu quick-fix unbind --device {} (force eject host driver)",
+                gpu.address
+            );
+        } else {
+            let _ = writeln!(
+                &mut buffer,
+                "  quick fixes:\n    nova gpu quick-fix reattach --device {}",
+                gpu.address
+            );
+        }
+
+        buffer.push('\n');
+    }
+
+    buffer
+}
+
+#[cfg(test)]
+mod gpu_cli_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn binding(driver: Option<&str>, in_use: bool, reservation: Option<&str>) -> DeviceBindingInfo {
+        DeviceBindingInfo {
+            driver: driver.map(|d| d.to_string()),
+            in_use,
+            reserved_for: reservation.map(|r| r.to_string()),
+        }
+    }
+
+    fn sample_gpu(address: &str, driver: Option<&str>, in_use: bool) -> PciDevice {
+        PciDevice {
+            address: address.to_string(),
+            vendor_id: "10de".to_string(),
+            device_id: "2684".to_string(),
+            vendor_name: "NVIDIA Corporation".to_string(),
+            device_name: "GeForce RTX".to_string(),
+            iommu_group: Some(1),
+            driver: driver.map(|d| d.to_string()),
+            in_use,
+        }
+    }
+
+    #[test]
+    fn transition_reports_binding_change() {
+        let before = binding(Some("nvidia"), true, None);
+        let after = binding(Some("vfio-pci"), false, Some("vm-dev"));
+        let message =
+            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
+
+        assert!(message.contains("Bound 0000:01:00.0"));
+        assert!(message.contains("nvidia (host active)"));
+        assert!(message.contains("vfio-pci (guest-ready)"));
+        assert!(message.contains("reserved for vm-dev"));
+    }
+
+    #[test]
+    fn transition_detects_no_change() {
+        let before = binding(Some("vfio-pci"), false, None);
+        let after = binding(Some("vfio-pci"), false, None);
+        let message =
+            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
+
+        assert_eq!(
+            message,
+            "Bound 0000:01:00.0: state unchanged (vfio-pci (guest-ready))"
+        );
+    }
+
+    #[test]
+    fn status_output_handles_no_matches() {
+        let output = build_gpu_status_output(&[], &HashMap::new());
+        assert_eq!(output, "No GPUs matched the provided filter\n");
+    }
+
+    #[test]
+    fn status_output_includes_quick_fix_guidance() {
+        let gpu = sample_gpu("0000:01:00.0", Some("nvidia"), true);
+        let mut reservations = HashMap::new();
+        reservations.insert("0000:02:00.0".to_string(), "vm-other".to_string());
+
+        let output = build_gpu_status_output(&[gpu], &reservations);
+
+        assert!(output.contains("0000:01:00.0 — GeForce RTX"));
+        assert!(output.contains("driver: nvidia"));
+        assert!(output.contains("quick-fix unbind"));
     }
 }
 

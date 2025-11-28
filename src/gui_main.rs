@@ -1,10 +1,11 @@
 use eframe::egui;
 use nova::{
-    config::NovaConfig,
+    config::{NovaConfig, default_ui_font_family, default_ui_font_size},
     console_enhanced::{
         ActiveProtocol, EnhancedConsoleConfig, EnhancedConsoleManager, UnifiedConsoleSession,
     },
     container::ContainerManager,
+    container_runtime::{ContainerInfo, ContainerStats},
     instance::{Instance, InstanceStatus, InstanceType},
     logger,
     network::{
@@ -17,7 +18,8 @@ use nova::{
 };
 
 use chrono::{DateTime, Local, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,11 +28,71 @@ use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const MAX_CONSOLE_LINES: usize = 200;
 const INSTANCE_REFRESH_SECONDS: u64 = 5;
 const NETWORK_REFRESH_SECONDS: u64 = 15;
+const MIN_FONT_SIZE: f32 = 12.0;
+const MAX_FONT_SIZE: f32 = 20.0;
+const MIN_INSTANCE_REFRESH_SECONDS: i32 = 3;
+const MAX_INSTANCE_REFRESH_SECONDS: i32 = 60;
+const MIN_NETWORK_REFRESH_SECONDS: i32 = 10;
+const MAX_NETWORK_REFRESH_SECONDS: i32 = 180;
+
+#[derive(Clone, Copy)]
+struct FontChoice {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+}
+
+const FONT_CHOICES: [FontChoice; 2] = [
+    FontChoice {
+        id: "fira-code-nerd",
+        label: "Fira Code Nerd (semi-bold)",
+        description: "Requires Nerd Font installation under ~/.local/share/fonts or /usr/share/fonts.",
+    },
+    FontChoice {
+        id: "system-default",
+        label: "System default",
+        description: "Use the platform's proportional UI fonts.",
+    },
+];
+
+#[derive(Clone)]
+struct UiPreferencesSnapshot {
+    theme: theme::GuiTheme,
+    font_family: String,
+    font_size: f32,
+    compact_layout: bool,
+    auto_refresh: bool,
+    refresh_interval_secs: u64,
+    network_refresh_secs: u64,
+    show_event_log: bool,
+    show_insights: bool,
+    confirm_actions: bool,
+}
+
+#[derive(Clone)]
+struct ContainerDetailCache {
+    info: ContainerInfo,
+    stats: Option<ContainerStats>,
+    fetched_at: Instant,
+}
+
+#[derive(Clone)]
+struct ContainerDetailError {
+    message: String,
+    recorded_at: Instant,
+}
+
+struct ContainerLogsState {
+    name: String,
+    lines: Vec<String>,
+    error: Option<String>,
+    fetched_at: Instant,
+}
 
 fn main() -> Result<(), eframe::Error> {
     logger::init_logger();
@@ -114,11 +176,17 @@ impl TemplateCatalogSummary {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum InstanceAction {
     Start,
     Stop,
     Restart,
+}
+
+#[derive(Clone)]
+struct PendingAction {
+    action: InstanceAction,
+    instance: Instance,
 }
 
 #[derive(Debug)]
@@ -151,6 +219,7 @@ struct NovaApp {
     template_manager: Arc<AsyncMutex<TemplateManager>>,
     session_events: Arc<Mutex<Vec<SessionEvent>>>,
     _config: NovaConfig,
+    config_path: PathBuf,
     runtime: Runtime,
     template_summary: TemplateCatalogSummary,
 
@@ -165,8 +234,12 @@ struct NovaApp {
     filter_text: String,
     only_running: bool,
 
+    auto_refresh: bool,
     show_insights: bool,
     detail_tab: DetailTab,
+    confirm_instance_actions: bool,
+    pending_action: Option<PendingAction>,
+    show_action_confirmation: bool,
 
     last_refresh: Option<Instant>,
     last_refresh_at: Option<DateTime<Utc>>,
@@ -188,11 +261,146 @@ struct NovaApp {
     new_switch_dhcp_end: String,
     network_last_error: Option<String>,
     network_last_info: Option<String>,
+    theme: theme::GuiTheme,
+    font_family: String,
+    font_size: f32,
+    compact_layout: bool,
+    fonts_dirty: bool,
+    font_cache: HashMap<String, Option<Arc<Vec<u8>>>>,
+    font_load_error: Option<String>,
+    show_preferences: bool,
+    preferences_dirty: bool,
+    preferences_backup: Option<UiPreferencesSnapshot>,
+    container_details: HashMap<String, ContainerDetailCache>,
+    container_detail_errors: HashMap<String, ContainerDetailError>,
+    container_logs: Option<ContainerLogsState>,
 }
 
 impl NovaApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::configure_ocean_theme(&cc.egui_ctx);
+        let config_path = PathBuf::from("NovaFile");
+        let mut config = match NovaConfig::from_file(&config_path) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                warn!(
+                    "Failed to load NovaFile at {} ({}); using defaults",
+                    config_path.display(),
+                    err
+                );
+                NovaConfig::default()
+            }
+        };
+
+        let theme = match theme::GuiTheme::from_name(config.ui.theme.as_str()) {
+            Some(theme) => theme,
+            None => {
+                if !config.ui.theme.is_empty() {
+                    warn!(
+                        "Unrecognized GUI theme '{}' in NovaFile; defaulting to Tokyo Night (Storm)",
+                        config.ui.theme
+                    );
+                }
+                let fallback = theme::GuiTheme::default();
+                config.ui.theme = fallback.name().to_string();
+                if let Err(err) = config.save_to_file(&config_path) {
+                    warn!(
+                        "Unable to update GUI theme in {}: {}",
+                        config_path.display(),
+                        err
+                    );
+                }
+                fallback
+            }
+        };
+
+        theme::apply_theme(&cc.egui_ctx, theme);
+
+        let mut config_dirty = false;
+
+        let default_font_family = default_ui_font_family();
+        let original_font_family = config.ui.font_family.clone();
+        let mut font_family = if config.ui.font_family.trim().is_empty() {
+            config_dirty = true;
+            default_font_family.clone()
+        } else {
+            config.ui.font_family.trim().to_ascii_lowercase()
+        };
+
+        if !FONT_CHOICES.iter().any(|choice| choice.id == font_family) {
+            warn!(
+                "Unsupported font family '{}' in NovaFile; reverting to {}",
+                config.ui.font_family, default_font_family
+            );
+            font_family = default_font_family.clone();
+            config_dirty = true;
+        }
+
+        config.ui.font_family = font_family.clone();
+        if config.ui.font_family != original_font_family {
+            config_dirty = true;
+        }
+
+        let default_font_size = default_ui_font_size();
+        let mut font_size = if config.ui.font_size.is_finite() {
+            config.ui.font_size
+        } else {
+            default_font_size
+        };
+
+        if !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&font_size) {
+            warn!(
+                "Out-of-range font size {:.1} detected; clamping to valid bounds",
+                font_size
+            );
+            font_size = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+            config_dirty = true;
+        }
+
+        if (font_size - config.ui.font_size).abs() > f32::EPSILON {
+            config.ui.font_size = font_size;
+            config_dirty = true;
+        }
+
+        let auto_refresh = config.ui.auto_refresh;
+        let min_refresh = MIN_INSTANCE_REFRESH_SECONDS as u64;
+        let max_refresh = MAX_INSTANCE_REFRESH_SECONDS as u64;
+        let mut refresh_secs = config.ui.refresh_interval_seconds;
+        if refresh_secs == 0 {
+            refresh_secs = INSTANCE_REFRESH_SECONDS;
+        }
+        let clamped_refresh = refresh_secs.clamp(min_refresh, max_refresh);
+        if clamped_refresh != refresh_secs {
+            config.ui.refresh_interval_seconds = clamped_refresh;
+            config_dirty = true;
+        }
+        let refresh_interval = Duration::from_secs(clamped_refresh);
+
+        let min_network = MIN_NETWORK_REFRESH_SECONDS as u64;
+        let max_network = MAX_NETWORK_REFRESH_SECONDS as u64;
+        let mut network_secs = config.ui.network_refresh_interval_seconds;
+        if network_secs == 0 {
+            network_secs = NETWORK_REFRESH_SECONDS;
+        }
+        let clamped_network = network_secs.clamp(min_network, max_network);
+        if clamped_network != network_secs {
+            config.ui.network_refresh_interval_seconds = clamped_network;
+            config_dirty = true;
+        }
+        let network_refresh_interval = Duration::from_secs(clamped_network);
+
+        let show_console = config.ui.show_event_log;
+        let show_insights = config.ui.show_insights;
+        let confirm_instance_actions = config.ui.confirm_instance_actions;
+
+        if config_dirty {
+            if let Err(err) = config.save_to_file(&config_path) {
+                warn!(
+                    "Unable to persist updated UI defaults in {}: {}",
+                    config_path.display(),
+                    err
+                );
+            }
+        }
 
         let vm_manager = Arc::new(VmManager::new());
         let container_manager = Arc::new(ContainerManager::new());
@@ -224,9 +432,9 @@ impl NovaApp {
         let template_manager = Arc::new(AsyncMutex::new(template_manager));
         let session_events = Arc::new(Mutex::new(Vec::new()));
 
-        let config = NovaConfig::from_file("NovaFile").unwrap_or_default();
-
         let runtime = Runtime::new().expect("failed to initialize Tokio runtime");
+
+        let compact_layout = config.ui.compact_layout;
 
         let mut app = Self {
             vm_manager,
@@ -236,10 +444,11 @@ impl NovaApp {
             template_manager,
             session_events,
             _config: config,
+            config_path,
             runtime,
             template_summary: TemplateCatalogSummary::default(),
             selected_instance: None,
-            show_console: false,
+            show_console,
             console_output: Vec::new(),
             active_sessions: Vec::new(),
             last_session_error: None,
@@ -247,13 +456,17 @@ impl NovaApp {
             summary: InstanceSummary::default(),
             filter_text: String::new(),
             only_running: false,
-            show_insights: true,
+            auto_refresh,
+            show_insights,
             detail_tab: DetailTab::Overview,
+            confirm_instance_actions,
+            pending_action: None,
+            show_action_confirmation: false,
             last_refresh: None,
             last_refresh_at: None,
-            refresh_interval: Duration::from_secs(INSTANCE_REFRESH_SECONDS),
+            refresh_interval,
             last_network_refresh: None,
-            network_refresh_interval: Duration::from_secs(NETWORK_REFRESH_SECONDS),
+            network_refresh_interval,
             network_summary: None,
             network_switches: Vec::new(),
             network_interfaces: Vec::new(),
@@ -268,8 +481,23 @@ impl NovaApp {
             new_switch_dhcp_end: String::new(),
             network_last_error: None,
             network_last_info: None,
+            theme,
+            font_family,
+            font_size,
+            compact_layout,
+            fonts_dirty: true,
+            font_cache: HashMap::new(),
+            font_load_error: None,
+            show_preferences: false,
+            preferences_dirty: false,
+            preferences_backup: None,
+            container_details: HashMap::new(),
+            container_detail_errors: HashMap::new(),
+            container_logs: None,
         };
 
+        app.ensure_font_definitions(&cc.egui_ctx);
+        app.apply_text_style_overrides(&cc.egui_ctx);
         app.reset_new_switch_form();
         app.log_console("Nova Manager v0.1.0 initialized");
         app.log_console("Ready for virtualization management");
@@ -281,6 +509,10 @@ impl NovaApp {
     }
 
     fn refresh_instances(&mut self, force: bool) {
+        if !self.auto_refresh && !force {
+            return;
+        }
+
         let should_refresh = force
             || self
                 .last_refresh
@@ -311,6 +543,24 @@ impl NovaApp {
 
         self.populate_instance_ips();
         self.refresh_template_summary();
+
+        let active_names: HashSet<String> = self
+            .instances_cache
+            .iter()
+            .map(|instance| instance.name.clone())
+            .collect();
+        self.container_details
+            .retain(|name, _| active_names.contains(name));
+        self.container_detail_errors
+            .retain(|name, _| active_names.contains(name));
+        if self
+            .container_logs
+            .as_ref()
+            .map(|state| !active_names.contains(&state.name))
+            .unwrap_or(false)
+        {
+            self.container_logs = None;
+        }
     }
 
     fn populate_instance_ips(&mut self) {
@@ -472,6 +722,473 @@ impl NovaApp {
         }
 
         self.log_console(payload);
+    }
+
+    fn set_theme(&mut self, theme: theme::GuiTheme) {
+        if self.theme == theme {
+            return;
+        }
+
+        self.theme = theme;
+        self._config.ui.theme = theme.name().to_string();
+        self.preferences_dirty = true;
+    }
+
+    fn theme_menu(&mut self, ui: &mut egui::Ui) {
+        for option in theme::ALL_THEMES.iter() {
+            let is_selected = self.theme == *option;
+            let response = ui.selectable_label(is_selected, option.label());
+            if response.clicked() && !is_selected {
+                self.set_theme(*option);
+                theme::apply_theme(ui.ctx(), self.theme);
+                self.apply_text_style_overrides(ui.ctx());
+                self.ensure_font_definitions(ui.ctx());
+                let _ = self.persist_ui_preferences(Some(format!(
+                    "Theme set to {} via menu",
+                    option.label()
+                )));
+                ui.close_menu();
+            }
+        }
+    }
+
+    fn ensure_font_definitions(&mut self, ctx: &egui::Context) {
+        if !self.fonts_dirty {
+            return;
+        }
+
+        let mut fonts = egui::FontDefinitions::default();
+
+        if self.font_family == FONT_CHOICES[0].id {
+            match self.resolve_font_bytes(FONT_CHOICES[0].id) {
+                Some(bytes) => {
+                    fonts.font_data.insert(
+                        "nova.pref.fira".to_string(),
+                        egui::FontData::from_owned((*bytes).clone()),
+                    );
+                    fonts
+                        .families
+                        .entry(egui::FontFamily::Proportional)
+                        .or_default()
+                        .insert(0, "nova.pref.fira".to_string());
+                    fonts
+                        .families
+                        .entry(egui::FontFamily::Monospace)
+                        .or_default()
+                        .insert(0, "nova.pref.fira".to_string());
+                    self.font_load_error = None;
+                }
+                None => {
+                    self.font_load_error = Some(
+                        "Fira Code Nerd Font not discovered. Install it under ~/.local/share/fonts or /usr/share/fonts and press Retry.".to_string(),
+                    );
+                }
+            }
+        } else {
+            self.font_load_error = None;
+        }
+
+        ctx.set_fonts(fonts);
+        self.fonts_dirty = false;
+    }
+
+    fn apply_text_style_overrides(&mut self, ctx: &egui::Context) {
+        let mut style = (*ctx.style()).clone();
+        let font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if (font_size - self.font_size).abs() > f32::EPSILON {
+            self.font_size = font_size;
+            self._config.ui.font_size = font_size;
+        }
+
+        let heading_family = if self.font_family == FONT_CHOICES[0].id {
+            egui::FontFamily::Monospace
+        } else {
+            egui::FontFamily::Proportional
+        };
+
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(font_size + 6.0, heading_family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::new(font_size, heading_family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(font_size, heading_family.clone()),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Small,
+            egui::FontId::new(
+                (font_size - 2.0).max(MIN_FONT_SIZE - 2.0),
+                heading_family.clone(),
+            ),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Monospace,
+            egui::FontId::new(font_size - 1.0, egui::FontFamily::Monospace),
+        );
+
+        if self.compact_layout {
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.button_padding = egui::vec2(12.0, 6.0);
+            style.spacing.menu_margin = egui::Margin::symmetric(8.0, 6.0);
+            style.spacing.indent = 18.0;
+            style.spacing.window_margin = egui::Margin::symmetric(10.0, 8.0);
+        } else {
+            style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+            style.spacing.button_padding = egui::vec2(16.0, 8.0);
+            style.spacing.menu_margin = egui::Margin::same(10.0);
+            style.spacing.indent = 24.0;
+            style.spacing.window_margin = egui::Margin::same(12.0);
+        }
+
+        ctx.set_style(style);
+    }
+
+    fn resolve_font_bytes(&mut self, font_id: &str) -> Option<Arc<Vec<u8>>> {
+        if let Some(cached) = self.font_cache.get(font_id) {
+            return cached.clone();
+        }
+
+        let result = match font_id {
+            "fira-code-nerd" => Self::load_fira_code_font(),
+            _ => None,
+        };
+
+        if let Some(bytes) = result.clone() {
+            self.font_cache.insert(font_id.to_string(), Some(bytes));
+        } else {
+            self.font_cache.insert(font_id.to_string(), None);
+        }
+
+        result
+    }
+
+    fn load_fira_code_font() -> Option<Arc<Vec<u8>>> {
+        let candidates = Self::fira_code_candidates();
+        for path in candidates {
+            if let Ok(bytes) = fs::read(&path) {
+                return Some(Arc::new(bytes));
+            }
+        }
+        None
+    }
+
+    fn fira_code_candidates() -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".local/share/fonts/NerdFonts/FiraCodeNerdFontMono-SemiBold.ttf"));
+            paths.push(home.join(".local/share/fonts/FiraCodeNerdFontMono-SemiBold.ttf"));
+            paths.push(home.join(".local/share/fonts/FiraCodeNerdFont-Regular.ttf"));
+        }
+
+        paths.push(PathBuf::from(
+            "/usr/share/fonts/truetype/nerd-fonts/FiraCodeNerdFontMono-SemiBold.ttf",
+        ));
+        paths.push(PathBuf::from(
+            "/usr/share/fonts/truetype/firacode/FiraCodeNerdFontMono-Regular.ttf",
+        ));
+        paths.push(PathBuf::from(
+            "/usr/share/fonts/truetype/firacode/FiraCode-Regular.ttf",
+        ));
+        paths.push(PathBuf::from("/usr/share/fonts/OTF/FiraCode-Regular.otf"));
+
+        paths
+    }
+
+    fn font_choice_label(&self) -> &'static str {
+        FONT_CHOICES
+            .iter()
+            .find(|choice| choice.id == self.font_family)
+            .map(|choice| choice.label)
+            .unwrap_or(FONT_CHOICES[1].label)
+    }
+
+    fn font_choice_description(&self) -> &'static str {
+        FONT_CHOICES
+            .iter()
+            .find(|choice| choice.id == self.font_family)
+            .map(|choice| choice.description)
+            .unwrap_or(FONT_CHOICES[1].description)
+    }
+
+    fn open_preferences(&mut self) {
+        if !self.show_preferences {
+            self.preferences_backup = Some(UiPreferencesSnapshot {
+                theme: self.theme,
+                font_family: self.font_family.clone(),
+                font_size: self.font_size,
+                compact_layout: self.compact_layout,
+                auto_refresh: self.auto_refresh,
+                refresh_interval_secs: self.refresh_interval.as_secs(),
+                network_refresh_secs: self.network_refresh_interval.as_secs(),
+                show_event_log: self.show_console,
+                show_insights: self.show_insights,
+                confirm_actions: self.confirm_instance_actions,
+            });
+            self.preferences_dirty = false;
+            self.show_preferences = true;
+        }
+    }
+
+    fn cancel_preferences(&mut self, ctx: &egui::Context) {
+        if let Some(snapshot) = self.preferences_backup.take() {
+            self.theme = snapshot.theme;
+            self._config.ui.theme = snapshot.theme.name().to_string();
+            self.font_family = snapshot.font_family;
+            self._config.ui.font_family = self.font_family.clone();
+            self.font_size = snapshot.font_size;
+            self._config.ui.font_size = snapshot.font_size;
+            self.compact_layout = snapshot.compact_layout;
+            self._config.ui.compact_layout = snapshot.compact_layout;
+            self.auto_refresh = snapshot.auto_refresh;
+            self._config.ui.auto_refresh = snapshot.auto_refresh;
+            let restored_refresh = snapshot.refresh_interval_secs.max(1);
+            self.refresh_interval = Duration::from_secs(restored_refresh);
+            self._config.ui.refresh_interval_seconds = restored_refresh;
+            let restored_network = snapshot.network_refresh_secs.max(5);
+            self.network_refresh_interval = Duration::from_secs(restored_network);
+            self._config.ui.network_refresh_interval_seconds = restored_network;
+            self.show_console = snapshot.show_event_log;
+            self._config.ui.show_event_log = snapshot.show_event_log;
+            self.show_insights = snapshot.show_insights;
+            self._config.ui.show_insights = snapshot.show_insights;
+            self.confirm_instance_actions = snapshot.confirm_actions;
+            self._config.ui.confirm_instance_actions = snapshot.confirm_actions;
+            self.last_refresh = None;
+            self.last_network_refresh = None;
+            self.fonts_dirty = true;
+            self.preferences_dirty = false;
+            self.show_preferences = false;
+            theme::apply_theme(ctx, self.theme);
+            self.ensure_font_definitions(ctx);
+            self.apply_text_style_overrides(ctx);
+        } else {
+            self.show_preferences = false;
+        }
+    }
+
+    fn persist_ui_preferences(&mut self, message: Option<String>) -> bool {
+        match self._config.save_to_file(&self.config_path) {
+            Ok(_) => {
+                if let Some(msg) = message {
+                    self.log_console(msg);
+                }
+                self.preferences_dirty = false;
+                true
+            }
+            Err(err) => {
+                let failure = format!(
+                    "Failed to write GUI preferences to {}: {}",
+                    self.config_path.display(),
+                    err
+                );
+                self.log_console(failure.clone());
+                error!("{}", failure);
+                false
+            }
+        }
+    }
+
+    fn draw_preferences_window(&mut self, ctx: &egui::Context) {
+        if !self.show_preferences {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("Preferences")
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.heading("Appearance");
+                ui.separator();
+                for option in theme::ALL_THEMES.iter() {
+                    let is_selected = self.theme == *option;
+                    if ui.selectable_label(is_selected, option.label()).clicked() && !is_selected {
+                        self.set_theme(*option);
+                        theme::apply_theme(ui.ctx(), self.theme);
+                        self.apply_text_style_overrides(ui.ctx());
+                        self.ensure_font_definitions(ui.ctx());
+                    }
+                }
+
+                ui.add_space(8.0);
+                egui::ComboBox::from_id_source("nova.pref.font.family")
+                    .selected_text(self.font_choice_label())
+                    .show_ui(ui, |ui| {
+                        for choice in FONT_CHOICES.iter() {
+                            let is_selected = self.font_family == choice.id;
+                            if ui.selectable_label(is_selected, choice.label).clicked()
+                                && !is_selected
+                            {
+                                self.font_family = choice.id.to_string();
+                                self._config.ui.font_family = self.font_family.clone();
+                                self.fonts_dirty = true;
+                                self.preferences_dirty = true;
+                                if choice.id != "fira-code-nerd" {
+                                    self.font_load_error = None;
+                                }
+                                self.font_cache.remove(choice.id);
+                                self.ensure_font_definitions(ui.ctx());
+                                self.apply_text_style_overrides(ui.ctx());
+                            }
+                        }
+                    });
+                ui.small(self.font_choice_description());
+
+                if self.font_family == FONT_CHOICES[0].id {
+                    if let Some(warning) = &self.font_load_error {
+                        ui.colored_label(theme::STATUS_WARNING, warning);
+                    }
+                    if ui.button("Retry font discovery").clicked() {
+                        self.font_cache.remove(FONT_CHOICES[0].id);
+                        self.fonts_dirty = true;
+                        self.ensure_font_definitions(ui.ctx());
+                        self.apply_text_style_overrides(ui.ctx());
+                    }
+                }
+
+                let mut size = self.font_size;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut size, MIN_FONT_SIZE..=MAX_FONT_SIZE)
+                            .text("Font size"),
+                    )
+                    .changed()
+                {
+                    self.font_size = size;
+                    self._config.ui.font_size = size;
+                    self.preferences_dirty = true;
+                    self.apply_text_style_overrides(ui.ctx());
+                }
+
+                if ui
+                    .checkbox(&mut self.compact_layout, "Compact layout spacing")
+                    .changed()
+                {
+                    self._config.ui.compact_layout = self.compact_layout;
+                    self.preferences_dirty = true;
+                    self.apply_text_style_overrides(ui.ctx());
+                }
+
+                ui.add_space(12.0);
+                ui.heading("Behaviour");
+                ui.separator();
+
+                if ui
+                    .checkbox(&mut self.auto_refresh, "Auto refresh instance state")
+                    .changed()
+                {
+                    self._config.ui.auto_refresh = self.auto_refresh;
+                    self.preferences_dirty = true;
+                    if self.auto_refresh {
+                        self.last_refresh = None;
+                    }
+                }
+
+                let mut refresh_secs = self.refresh_interval.as_secs() as i32;
+                let refresh_slider = egui::Slider::new(
+                    &mut refresh_secs,
+                    MIN_INSTANCE_REFRESH_SECONDS..=MAX_INSTANCE_REFRESH_SECONDS,
+                )
+                .text("Refresh cadence (seconds)");
+                if ui.add_enabled(self.auto_refresh, refresh_slider).changed() {
+                    let adjusted = refresh_secs.max(MIN_INSTANCE_REFRESH_SECONDS) as u64;
+                    self.refresh_interval = Duration::from_secs(adjusted);
+                    self._config.ui.refresh_interval_seconds = adjusted;
+                    self.preferences_dirty = true;
+                    self.last_refresh = None;
+                }
+
+                if !self.auto_refresh {
+                    ui.small("Manual refresh only – use the toolbar action when needed.");
+                }
+
+                if ui
+                    .checkbox(&mut self.show_console, "Show event log panel")
+                    .changed()
+                {
+                    self._config.ui.show_event_log = self.show_console;
+                    self.preferences_dirty = true;
+                }
+
+                if ui
+                    .checkbox(&mut self.show_insights, "Show insights panel")
+                    .changed()
+                {
+                    self._config.ui.show_insights = self.show_insights;
+                    self.preferences_dirty = true;
+                }
+
+                if ui
+                    .checkbox(
+                        &mut self.confirm_instance_actions,
+                        "Confirm before stopping or restarting workloads",
+                    )
+                    .changed()
+                {
+                    self._config.ui.confirm_instance_actions = self.confirm_instance_actions;
+                    self.preferences_dirty = true;
+                }
+
+                ui.add_space(12.0);
+                ui.heading("System");
+                ui.separator();
+
+                let mut network_secs = self.network_refresh_interval.as_secs() as i32;
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut network_secs,
+                            MIN_NETWORK_REFRESH_SECONDS..=MAX_NETWORK_REFRESH_SECONDS,
+                        )
+                        .text("Network telemetry cadence (seconds)"),
+                    )
+                    .changed()
+                {
+                    let adjusted = network_secs.max(MIN_NETWORK_REFRESH_SECONDS) as u64;
+                    self.network_refresh_interval = Duration::from_secs(adjusted);
+                    self._config.ui.network_refresh_interval_seconds = adjusted;
+                    self.preferences_dirty = true;
+                    self.last_network_refresh = None;
+                }
+
+                ui.small(format!("NovaFile: {}", self.config_path.display()));
+                ui.small("Network metrics refresh automatically when telemetry is available.");
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.preferences_dirty, egui::Button::new("Save & Close"))
+                        .clicked()
+                    {
+                        if self
+                            .persist_ui_preferences(Some("Saved Nova UI preferences".to_string()))
+                        {
+                            self.preferences_backup = None;
+                            self.show_preferences = false;
+                        }
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        self.cancel_preferences(ui.ctx());
+                    }
+                });
+            });
+
+        if !open {
+            if self.preferences_dirty {
+                self.cancel_preferences(ctx);
+            } else {
+                self.preferences_backup = None;
+                self.show_preferences = false;
+            }
+        }
     }
 
     fn pending_switch_profile(&self) -> std::result::Result<Option<SwitchProfile>, String> {
@@ -911,6 +1628,18 @@ impl NovaApp {
         let Some(instance) = self.selected_instance_owned() else {
             return;
         };
+        if self.confirm_instance_actions
+            && matches!(action, InstanceAction::Stop | InstanceAction::Restart)
+        {
+            self.pending_action = Some(PendingAction { action, instance });
+            self.show_action_confirmation = true;
+            return;
+        }
+
+        self.execute_instance_action(action, instance);
+    }
+
+    fn execute_instance_action(&mut self, action: InstanceAction, instance: Instance) {
         let name = instance.name.clone();
         let instance_type = instance.instance_type;
 
@@ -987,7 +1716,8 @@ impl NovaApp {
             }
         }
 
-        // Ensure UI picks up the latest state soon after actions
+        self.pending_action = None;
+        self.show_action_confirmation = false;
         self.refresh_instances(true);
         self.refresh_network_summary(true);
     }
@@ -1129,8 +1859,9 @@ impl NovaApp {
     }
 
     fn summary_chip(ui: &mut egui::Ui, label: &str, value: usize, color: egui::Color32) {
+        let visuals = ui.visuals().clone();
         egui::Frame::none()
-            .fill(theme::BG_ELEVATED)
+            .fill(visuals.widgets.noninteractive.bg_fill)
             .rounding(egui::Rounding::same(6.0))
             .stroke(egui::Stroke::new(1.0, color))
             .inner_margin(egui::Margin::symmetric(12.0, 8.0))
@@ -1181,7 +1912,7 @@ impl NovaApp {
             .map(|name| name == &instance.name)
             .unwrap_or(false);
 
-        let status_color = theme::get_status_color(&instance.status);
+        let status_color = theme::get_status_color(&instance.status, self.theme);
         let status_icon = theme::get_status_icon(&instance.status);
 
         let label = egui::RichText::new(format!("{} {}", status_icon, instance.name))
@@ -1217,7 +1948,7 @@ impl NovaApp {
         ui.add_space(6.0);
 
         if let Some(instance) = self.selected_instance() {
-            let status_color = theme::get_status_color(&instance.status);
+            let status_color = theme::get_status_color(&instance.status, self.theme);
             ui.group(|ui| {
                 ui.label(egui::RichText::new("Selected instance").strong());
                 ui.add_space(4.0);
@@ -1319,8 +2050,222 @@ impl NovaApp {
         ui.small("• Explore the polished network topology from the Networking tab");
     }
 
-    fn draw_overview(&self, ui: &mut egui::Ui, instance: &Instance) {
-        let status_color = theme::get_status_color(&instance.status);
+    fn container_detail(
+        &mut self,
+        name: &str,
+        force_refresh: bool,
+    ) -> Option<ContainerDetailCache> {
+        if force_refresh {
+            self.container_details.remove(name);
+            self.container_detail_errors.remove(name);
+        }
+
+        let needs_refresh = force_refresh
+            || self
+                .container_details
+                .get(name)
+                .map(|entry| entry.fetched_at.elapsed() > Duration::from_secs(30))
+                .unwrap_or(true);
+
+        if needs_refresh {
+            let should_attempt = force_refresh
+                || self
+                    .container_detail_errors
+                    .get(name)
+                    .map(|error| error.recorded_at.elapsed() > Duration::from_secs(15))
+                    .unwrap_or(true);
+
+            if should_attempt {
+                match self.fetch_container_detail(name.to_string()) {
+                    Ok(detail) => {
+                        self.container_details
+                            .insert(name.to_string(), detail.clone());
+                        self.container_detail_errors.remove(name);
+                        return Some(detail);
+                    }
+                    Err(message) => {
+                        self.container_detail_errors.insert(
+                            name.to_string(),
+                            ContainerDetailError {
+                                message,
+                                recorded_at: Instant::now(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        self.container_details.get(name).cloned()
+    }
+
+    fn fetch_container_detail(
+        &self,
+        name: String,
+    ) -> std::result::Result<ContainerDetailCache, String> {
+        let manager = self.container_manager.clone();
+        self.runtime.block_on(async move {
+            let info = manager
+                .inspect_container(&name)
+                .await
+                .map_err(|err| err.to_string())?;
+            let stats = match manager.container_stats(&name).await {
+                Ok(stats) => Some(stats),
+                Err(err) => {
+                    warn!("Failed to gather container stats for '{}': {}", name, err);
+                    None
+                }
+            };
+            Ok(ContainerDetailCache {
+                info,
+                stats,
+                fetched_at: Instant::now(),
+            })
+        })
+    }
+
+    fn fetch_container_logs(&self, name: &str, lines: usize) -> ContainerLogsState {
+        let manager = self.container_manager.clone();
+        let name_owned = name.to_string();
+        let fetch_name = name_owned.clone();
+        match self
+            .runtime
+            .block_on(async move { manager.get_container_logs(&fetch_name, lines).await })
+        {
+            Ok(lines_vec) => ContainerLogsState {
+                name: name_owned,
+                lines: lines_vec,
+                error: None,
+                fetched_at: Instant::now(),
+            },
+            Err(err) => ContainerLogsState {
+                name: name_owned,
+                lines: Vec::new(),
+                error: Some(err.to_string()),
+                fetched_at: Instant::now(),
+            },
+        }
+    }
+
+    fn draw_container_logs_window(&mut self, ctx: &egui::Context) {
+        if let Some(mut state) = self.container_logs.take() {
+            let mut open = true;
+            let mut refresh_requested = false;
+            egui::Window::new(format!("Container logs – {}", state.name))
+                .resizable(true)
+                .default_width(520.0)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("Refresh").clicked() {
+                            refresh_requested = true;
+                        }
+                        if ui.button("Copy to clipboard").clicked() {
+                            ui.output_mut(|out| out.copied_text = state.lines.join("\n"));
+                        }
+                        ui.add_space(12.0);
+                        ui.small(format!(
+                            "Fetched {}",
+                            Self::format_elapsed(state.fetched_at.elapsed())
+                        ));
+                    });
+
+                    if let Some(error) = &state.error {
+                        ui.colored_label(theme::STATUS_WARNING, error);
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .id_source(format!("nova.container.logs.{}", state.name))
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for line in &state.lines {
+                                ui.monospace(line);
+                            }
+                        });
+                });
+
+            if refresh_requested {
+                state = self.fetch_container_logs(&state.name, 200);
+            }
+
+            if open {
+                self.container_logs = Some(state);
+            }
+        }
+    }
+
+    fn draw_action_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.show_action_confirmation {
+            return;
+        }
+
+        let Some(pending) = self.pending_action.clone() else {
+            self.show_action_confirmation = false;
+            return;
+        };
+
+        let action_label = match pending.action {
+            InstanceAction::Start => "start",
+            InstanceAction::Stop => "stop",
+            InstanceAction::Restart => "restart",
+        };
+        let workload_label = match pending.instance.instance_type {
+            InstanceType::Vm => "virtual machine",
+            InstanceType::Container => "container",
+        };
+
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new("Confirm workload action")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.heading("Hold on a moment");
+                ui.label(format!(
+                    "You're about to {action_label} the {workload_label} '{}'.",
+                    pending.instance.name
+                ));
+                if pending.action == InstanceAction::Restart {
+                    ui.small("Nova will stop the workload before bringing it back online.");
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        cancelled = true;
+                    }
+                    let confirm_label = match pending.action {
+                        InstanceAction::Start => "Start workload",
+                        InstanceAction::Stop => "Stop workload",
+                        InstanceAction::Restart => "Restart workload",
+                    };
+                    let confirm_button = ui.button(confirm_label);
+                    if confirm_button.clicked() {
+                        confirmed = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.execute_instance_action(pending.action, pending.instance);
+        } else if cancelled || !open {
+            self.pending_action = None;
+            self.show_action_confirmation = false;
+        }
+    }
+
+    fn draw_overview(&mut self, ui: &mut egui::Ui, instance: &Instance) {
+        match instance.instance_type {
+            InstanceType::Vm => self.draw_vm_overview(ui, instance),
+            InstanceType::Container => self.draw_container_overview(ui, instance),
+        }
+    }
+
+    fn draw_vm_overview(&self, ui: &mut egui::Ui, instance: &Instance) {
+        let status_color = theme::get_status_color(&instance.status, self.theme);
         let uptime = Utc::now().signed_duration_since(instance.created_at);
         let time_since_update = Utc::now().signed_duration_since(instance.last_updated);
 
@@ -1415,6 +2360,274 @@ impl NovaApp {
                 ui.label("• Switch to the Snapshots tab to review restore points.");
             }
         });
+    }
+
+    fn draw_container_overview(&mut self, ui: &mut egui::Ui, instance: &Instance) {
+        let status_color = theme::get_status_color(&instance.status, self.theme);
+        let uptime = Utc::now().signed_duration_since(instance.created_at);
+        let time_since_update = Utc::now().signed_duration_since(instance.last_updated);
+        let runtime_name = self.container_manager.get_runtime_name().to_string();
+
+        let uptime_str = if uptime.num_days() > 0 {
+            format!("{}d {}h", uptime.num_days(), uptime.num_hours() % 24)
+        } else if uptime.num_hours() > 0 {
+            format!("{}h {}m", uptime.num_hours(), uptime.num_minutes() % 60)
+        } else {
+            format!("{}m", uptime.num_minutes().max(1))
+        };
+
+        let update_str = if time_since_update.num_minutes() < 1 {
+            "moments ago".to_string()
+        } else if time_since_update.num_hours() < 1 {
+            format!("{} minutes ago", time_since_update.num_minutes())
+        } else {
+            format!("{}h ago", time_since_update.num_hours())
+        };
+
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(&instance.name);
+                ui.colored_label(status_color, format!("{:?}", instance.status));
+                ui.label("Container");
+                ui.small(format!("Runtime: {runtime_name}"));
+                if let Some(pid) = instance.pid {
+                    ui.monospace(format!("PID {pid}"));
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(format!("Uptime {uptime_str}"));
+                ui.separator();
+                ui.label(format!(
+                    "Created {}",
+                    instance
+                        .created_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                ));
+                ui.separator();
+                ui.label(format!("Last update {update_str}"));
+            });
+        });
+
+        ui.add_space(12.0);
+
+        let mut detail_opt = self.container_detail(&instance.name, false);
+        let mut error_opt = self.container_detail_errors.get(&instance.name).cloned();
+
+        let mut refresh_requested = false;
+        let mut logs_requested = false;
+        let mut pull_image: Option<String> = None;
+
+        ui.horizontal(|ui| {
+            if ui.button("Refresh detail").clicked() {
+                refresh_requested = true;
+            }
+            if ui
+                .add_enabled(
+                    instance.status == InstanceStatus::Running,
+                    egui::Button::new("View logs"),
+                )
+                .clicked()
+            {
+                logs_requested = true;
+            }
+            if let Some(detail) = detail_opt.as_ref() {
+                if ui.button("Pull image").clicked() {
+                    pull_image = Some(detail.info.image.clone());
+                }
+            }
+        });
+
+        if refresh_requested {
+            detail_opt = self.container_detail(&instance.name, true);
+            error_opt = self.container_detail_errors.get(&instance.name).cloned();
+        }
+
+        if logs_requested {
+            let log_state = self.fetch_container_logs(&instance.name, 200);
+            self.container_logs = Some(log_state);
+        }
+
+        if let Some(image) = pull_image {
+            let manager = self.container_manager.clone();
+            let name = instance.name.clone();
+            self.log_console(format!("Pulling latest image '{image}' for {name}"));
+            self.runtime.spawn(async move {
+                if let Err(err) = manager.pull_image(&image).await {
+                    error!("Failed to pull image {image}: {err:?}");
+                }
+            });
+        }
+
+        match detail_opt {
+            Some(detail) => {
+                let info = &detail.info;
+                let fetched_label = Self::format_elapsed(detail.fetched_at.elapsed());
+
+                ui.add_space(10.0);
+                ui.columns(2, |columns| {
+                    columns[0].group(|ui| {
+                        ui.label(egui::RichText::new("Image & identity").strong());
+                        ui.separator();
+                        ui.label(format!("Image: {}", info.image));
+                        ui.small(format!("Container ID: {}", info.id));
+                        ui.label(format!(
+                            "Created {}",
+                            info.created.with_timezone(&Local).format("%Y-%m-%d %H:%M")
+                        ))
+                        .on_hover_text("Timestamp aligns with runtime inspect data");
+                        if let Some(pid) = info.pid {
+                            ui.monospace(format!("PID {pid}"));
+                        }
+                    });
+
+                    columns[1].group(|ui| {
+                        ui.label(egui::RichText::new("Connectivity").strong());
+                        ui.separator();
+                        if let Some(ip) = &info.ip_address {
+                            ui.label(format!("IP address: {ip}"));
+                        } else if let Some(ip) = &instance.ip_address {
+                            ui.label(format!("Guest IP (cached): {ip}"));
+                        } else {
+                            ui.label("No IP discovered yet");
+                        }
+
+                        if let Some(network) = &info.network {
+                            ui.label(format!("Network: {network}"));
+                        } else {
+                            ui.label("Network: default bridge");
+                        }
+
+                        if info.ports.is_empty() {
+                            ui.small("No port mappings declared");
+                        } else {
+                            ui.label("Ports:");
+                            for port in info.ports.iter() {
+                                let protocol = match port.protocol {
+                                    nova::container_runtime::PortProtocol::Tcp => "tcp",
+                                    nova::container_runtime::PortProtocol::Udp => "udp",
+                                };
+                                ui.monospace(format!(
+                                    "{} -> {}/{}",
+                                    port.host_port, port.container_port, protocol
+                                ));
+                            }
+                        }
+                    });
+                });
+
+                if let Some(stats) = detail.stats.as_ref() {
+                    ui.add_space(10.0);
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("Runtime metrics").strong());
+                        ui.separator();
+                        ui.label(format!("CPU usage: {:.1}%", stats.cpu_usage_percent));
+                        ui.label(format!(
+                            "Memory: {:.1} / {:.1} MiB",
+                            stats.memory_usage_mb as f64, stats.memory_limit_mb as f64
+                        ));
+                        ui.label(format!(
+                            "Network: {} ↓ / {} ↑",
+                            Self::format_bytes(stats.network_rx_bytes),
+                            Self::format_bytes(stats.network_tx_bytes)
+                        ));
+                        ui.label(format!(
+                            "Disk IO: {} read / {} write",
+                            Self::format_bytes(stats.disk_read_bytes),
+                            Self::format_bytes(stats.disk_write_bytes)
+                        ));
+                    });
+                }
+
+                if let Some(cfg) = self._config.container.get(&instance.name) {
+                    ui.add_space(10.0);
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("NovaFile profile").strong());
+                        ui.separator();
+                        if let Some(capsule) = &cfg.capsule {
+                            ui.label(format!("Capsule: {capsule}"));
+                        }
+                        if let Some(network) = &cfg.network {
+                            ui.small(format!("Preferred network: {network}"));
+                        }
+                        if cfg.bolt.gpu_access {
+                            ui.small("Bolt GPU passthrough: enabled");
+                        }
+                        if !cfg.volumes.is_empty() {
+                            ui.label("Volumes:");
+                            for volume in cfg.volumes.iter() {
+                                ui.monospace(volume);
+                            }
+                        }
+                        if !cfg.env.is_empty() {
+                            ui.label("Environment:");
+                            let mut env_pairs: Vec<_> = cfg.env.iter().collect();
+                            env_pairs.sort_by(|a, b| a.0.cmp(b.0));
+                            for (index, (key, value)) in env_pairs.iter().enumerate() {
+                                if index >= 8 {
+                                    ui.small(format!("… {} more", env_pairs.len() - index));
+                                    break;
+                                }
+                                ui.monospace(format!("{key}={value}"));
+                            }
+                        }
+                    });
+                }
+
+                ui.add_space(6.0);
+                ui.small(format!("Inspection cached {fetched_label}"));
+            }
+            None => {
+                if let Some(error) = error_opt {
+                    ui.colored_label(
+                        theme::STATUS_WARNING,
+                        format!("Inspection failed: {}", error.message),
+                    );
+                    ui.small(format!(
+                        "Last attempt {}",
+                        Self::format_elapsed(error.recorded_at.elapsed())
+                    ));
+                } else {
+                    ui.label("Collecting container metadata…");
+                }
+            }
+        }
+    }
+
+    fn format_bytes(bytes: u64) -> String {
+        const KB: f64 = 1024.0;
+        let value = bytes as f64;
+        if value >= KB * KB * KB {
+            format!("{:.1} GiB", value / (KB * KB * KB))
+        } else if value >= KB * KB {
+            format!("{:.1} MiB", value / (KB * KB))
+        } else if value >= KB {
+            format!("{:.1} KiB", value / KB)
+        } else {
+            format!("{bytes} B")
+        }
+    }
+
+    fn format_elapsed(duration: Duration) -> String {
+        if duration.as_secs() < 2 {
+            "just now".to_string()
+        } else if duration.as_secs() < 60 {
+            format!("{}s ago", duration.as_secs())
+        } else if duration.as_secs() < 3600 {
+            format!(
+                "{}m {}s ago",
+                duration.as_secs() / 60,
+                duration.as_secs() % 60
+            )
+        } else {
+            format!(
+                "{}h {}m ago",
+                duration.as_secs() / 3600,
+                (duration.as_secs() % 3600) / 60
+            )
+        }
     }
 
     fn draw_snapshots(&self, ui: &mut egui::Ui) {
@@ -1871,52 +3084,50 @@ impl NovaApp {
     }
 
     fn draw_header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("nova.header")
-            .frame(egui::Frame::default().fill(theme::BG_ELEVATED))
-            .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.heading("Nova Hypervisor Manager");
-                    if let Some(updated) = self.last_refresh_at {
-                        ui.label(format!(
-                            "Inventory synced {}",
-                            updated.with_timezone(&Local).format("%H:%M:%S")
-                        ));
+        egui::TopBottomPanel::top("nova.header").show(ctx, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading("Nova Hypervisor Manager");
+                if let Some(updated) = self.last_refresh_at {
+                    ui.label(format!(
+                        "Inventory synced {}",
+                        updated.with_timezone(&Local).format("%H:%M:%S")
+                    ));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("🔄 Refresh all").clicked() {
+                        self.refresh_instances(true);
+                        self.refresh_network_summary(true);
+                        self.log_console("Manual refresh triggered from header");
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🔄 Refresh all").clicked() {
-                            self.refresh_instances(true);
-                            self.refresh_network_summary(true);
-                            self.log_console("Manual refresh triggered from header");
-                        }
-                    });
                 });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    Self::summary_chip(ui, "Running", self.summary.running, theme::STATUS_RUNNING);
-                    Self::summary_chip(ui, "Stopped", self.summary.stopped, theme::STATUS_STOPPED);
-                    let container_count = self
-                        .instances_cache
-                        .iter()
-                        .filter(|inst| inst.instance_type == InstanceType::Container)
-                        .count();
-                    Self::summary_chip(ui, "Containers", container_count, theme::STATUS_SUSPENDED);
-
-                    let active_switches = self
-                        .network_summary
-                        .as_ref()
-                        .map(|summary| summary.active_switches)
-                        .unwrap_or(0);
-                    Self::summary_chip(
-                        ui,
-                        "Active switches",
-                        active_switches,
-                        theme::STATUS_WARNING,
-                    );
-                });
-                ui.add_space(4.0);
             });
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                Self::summary_chip(ui, "Running", self.summary.running, theme::STATUS_RUNNING);
+                Self::summary_chip(ui, "Stopped", self.summary.stopped, theme::STATUS_STOPPED);
+                let container_count = self
+                    .instances_cache
+                    .iter()
+                    .filter(|inst| inst.instance_type == InstanceType::Container)
+                    .count();
+                Self::summary_chip(ui, "Containers", container_count, theme::STATUS_SUSPENDED);
+
+                let active_switches = self
+                    .network_summary
+                    .as_ref()
+                    .map(|summary| summary.active_switches)
+                    .unwrap_or(0);
+                Self::summary_chip(
+                    ui,
+                    "Active switches",
+                    active_switches,
+                    theme::STATUS_WARNING,
+                );
+            });
+            ui.add_space(4.0);
+        });
     }
 
     fn draw_navigation_panel(&mut self, ctx: &egui::Context, filter: &str) {
@@ -2025,11 +3236,8 @@ impl NovaApp {
             {
                 self.log_console("Checkpoint workflow coming soon");
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("⚙ Settings"))
-                .clicked()
-            {
-                self.log_console("Settings panel under construction");
+            if ui.button("⚙ Preferences").clicked() {
+                self.open_preferences();
             }
         });
     }
@@ -2101,7 +3309,8 @@ impl NovaApp {
                                 InstanceType::Container => "Container",
                             });
 
-                            let status_color = theme::get_status_color(&instance.status);
+                            let status_color =
+                                theme::get_status_color(&instance.status, self.theme);
                             ui.colored_label(status_color, format!("{:?}", instance.status));
 
                             ui.label(format!("{} cores", instance.cpu_cores));
@@ -2137,7 +3346,9 @@ impl NovaApp {
 
 impl eframe::App for NovaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        theme::configure_ocean_theme(ctx);
+        theme::apply_theme(ctx, self.theme);
+        self.ensure_font_definitions(ctx);
+        self.apply_text_style_overrides(ctx);
 
         self.refresh_instances(false);
         self.refresh_network_summary(false);
@@ -2196,6 +3407,10 @@ impl eframe::App for NovaApp {
                         "Networking tab",
                     );
                     ui.radio_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions tab");
+                    ui.separator();
+                    ui.menu_button("Theme", |ui| {
+                        self.theme_menu(ui);
+                    });
                 });
 
                 ui.menu_button("Help", |ui| if ui.button("About Nova").clicked() {});
@@ -2228,40 +3443,44 @@ impl eframe::App for NovaApp {
 
         let selected_instance = self.selected_instance_owned();
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(theme::BG_PANEL))
-            .show(ctx, |ui| {
-                ui.add_space(8.0);
-                self.draw_action_toolbar(ui, can_start, can_stop, can_restart);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            self.draw_action_toolbar(ui, can_start, can_stop, can_restart);
 
-                ui.add_space(6.0);
-                ui.separator();
-                self.draw_filter_bar(ui);
-                ui.add_space(10.0);
+            ui.add_space(6.0);
+            ui.separator();
+            self.draw_filter_bar(ui);
+            ui.add_space(10.0);
 
-                ui.columns(2, |columns| {
-                    columns[0].heading("Managed instances");
-                    columns[0].small(format!(
-                        "{} total • {} running",
-                        self.instances_cache.len(),
-                        self.summary.running
-                    ));
-                    columns[0].separator();
-                    self.draw_instance_table(&mut columns[0], &filter);
+            ui.columns(2, |columns| {
+                columns[0].heading("Managed instances");
+                columns[0].small(format!(
+                    "{} total • {} running",
+                    self.instances_cache.len(),
+                    self.summary.running
+                ));
+                columns[0].separator();
+                self.draw_instance_table(&mut columns[0], &filter);
 
-                    columns[1].heading("Details & telemetry");
-                    columns[1].separator();
-                    if let Some(instance) = selected_instance.as_ref() {
-                        self.draw_instance_detail(&mut columns[1], instance);
-                    } else {
-                        columns[1].vertical_centered(|ui| {
-                            ui.add_space(60.0);
-                            ui.heading("Select an instance");
-                            ui.label("Choose a VM or container from the inventory to drill into metrics.");
-                        });
-                    }
-                });
+                columns[1].heading("Details & telemetry");
+                columns[1].separator();
+                if let Some(instance) = selected_instance.as_ref() {
+                    self.draw_instance_detail(&mut columns[1], instance);
+                } else {
+                    columns[1].vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        ui.heading("Select an instance");
+                        ui.label(
+                            "Choose a VM or container from the inventory to drill into metrics.",
+                        );
+                    });
+                }
             });
+        });
+
+        self.draw_preferences_window(ctx);
+        self.draw_container_logs_window(ctx);
+        self.draw_action_confirmation(ctx);
 
         ctx.request_repaint_after(self.refresh_interval.min(self.network_refresh_interval));
     }

@@ -28,6 +28,14 @@ pub struct PciDevice {
     pub in_use: bool,
 }
 
+/// Snapshot of a GPU's current binding state
+#[derive(Debug, Clone)]
+pub struct DeviceBindingInfo {
+    pub driver: Option<String>,
+    pub in_use: bool,
+    pub reserved_for: Option<String>,
+}
+
 /// GPU capabilities and features
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GpuCapabilities {
@@ -260,7 +268,7 @@ impl GpuManager {
         };
 
         // Check current driver
-        let driver = self.get_device_driver(&address);
+        let driver = Self::get_device_driver(&address);
 
         Some(PciDevice {
             address,
@@ -275,7 +283,7 @@ impl GpuManager {
     }
 
     /// Get the current driver for a PCI device
-    fn get_device_driver(&self, address: &str) -> Option<String> {
+    fn get_device_driver(address: &str) -> Option<String> {
         let driver_path = format!("/sys/bus/pci/devices/{}/driver", address);
 
         if let Ok(link) = fs::read_link(&driver_path) {
@@ -681,6 +689,104 @@ impl GpuManager {
         Ok(())
     }
 
+    /// Public helper to bind a device to vfio without reserving it to a VM
+    pub fn bind_device_to_vfio(&mut self, device_address: &str) -> Result<()> {
+        log_info!("Binding GPU {} to vfio-pci", device_address);
+        self.unbind_driver(device_address)?;
+        self.bind_vfio_pci(device_address)?;
+        self.refresh_device_status();
+        Ok(())
+    }
+
+    /// Refresh runtime state for discovered devices (driver bindings, in-use status)
+    pub fn refresh_device_status(&mut self) {
+        for gpu in &mut self.gpus {
+            gpu.driver = Self::get_device_driver(&gpu.address);
+            gpu.in_use = matches!(gpu.driver.as_deref(), Some(driver) if driver != "vfio-pci");
+        }
+    }
+
+    /// Forcefully unbind a device from its current driver without binding to vfio
+    pub fn force_unbind_device(&self, device_address: &str) -> Result<()> {
+        log_info!("Force unbinding host driver from {}", device_address);
+        self.unbind_driver(device_address)
+    }
+
+    /// Obtain the current binding snapshot for a device
+    pub fn binding_info(&self, address: &str) -> Option<DeviceBindingInfo> {
+        self.gpus
+            .iter()
+            .find(|gpu| gpu.address == address)
+            .map(|gpu| DeviceBindingInfo {
+                driver: gpu.driver.clone(),
+                in_use: gpu.in_use,
+                reserved_for: self.reservations.get(address).cloned(),
+            })
+    }
+
+    /// Return a list of VFIO-related kernel modules that are not currently loaded
+    pub fn missing_vfio_modules(&self) -> Vec<&'static str> {
+        ["vfio", "vfio_pci", "vfio_iommu_type1"]
+            .iter()
+            .copied()
+            .filter(|module| !Path::new(&format!("/sys/module/{}", module)).exists())
+            .collect()
+    }
+
+    /// Check whether all VFIO kernel modules are active
+    pub fn vfio_modules_ready(&self) -> bool {
+        self.missing_vfio_modules().is_empty()
+    }
+
+    /// Attempt to reattach a device to the host driver stack
+    pub fn reattach_device_driver(&mut self, device_address: &str) -> Result<()> {
+        log_info!("Reattaching GPU {} to host drivers", device_address);
+        self.unbind_driver(device_address)?;
+
+        let probe_path = Path::new("/sys/bus/pci/drivers_probe");
+        if probe_path.exists() {
+            if let Err(err) = fs::write(probe_path, format!("{}", device_address)) {
+                log_error!(
+                    "Failed to trigger drivers_probe for {}: {}",
+                    device_address,
+                    err
+                );
+                return Err(NovaError::SystemCommandFailed);
+            }
+        } else {
+            log_warn!("drivers_probe interface not available on this kernel");
+        }
+
+        self.reservations.remove(device_address);
+        self.refresh_device_status();
+        Ok(())
+    }
+
+    /// Load required VFIO kernel modules
+    pub fn load_vfio_stack(&self) -> Result<()> {
+        for module in ["vfio", "vfio_pci", "vfio_iommu_type1"] {
+            match Command::new("modprobe").arg(module).output() {
+                Ok(output) if output.status.success() => {
+                    log_debug!("Loaded module {}", module);
+                }
+                Ok(output) => {
+                    log_error!(
+                        "Failed to load module {}: {}",
+                        module,
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    return Err(NovaError::SystemCommandFailed);
+                }
+                Err(err) => {
+                    log_error!("Failed to execute modprobe {}: {}", module, err);
+                    return Err(NovaError::SystemCommandFailed);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Generate libvirt XML for GPU passthrough
     pub fn generate_libvirt_xml(&self, config: &GpuPassthroughConfig) -> Result<String> {
         let mut xml = String::new();
@@ -744,6 +850,7 @@ impl GpuManager {
         self.reservations.remove(device_address);
 
         log_info!("GPU {} released", device_address);
+        self.refresh_device_status();
         Ok(())
     }
 
@@ -788,15 +895,7 @@ impl GpuManager {
 
     /// Check if required kernel modules are loaded
     fn check_kernel_modules(&self) -> bool {
-        let required = ["vfio", "vfio_pci", "vfio_iommu_type1"];
-
-        for module in required {
-            if !Path::new(&format!("/sys/module/{}", module)).exists() {
-                return false;
-            }
-        }
-
-        true
+        self.vfio_modules_ready()
     }
 
     /// Identify system configuration issues
