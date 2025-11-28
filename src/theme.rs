@@ -99,6 +99,42 @@ pub const TN_MOON_TEAL: Color32 = Color32::from_rgb(76, 220, 221); // #4fd6be
 pub const TN_MOON_RED: Color32 = Color32::from_rgb(255, 117, 127); // #ff757f
 pub const TN_MOON_RED1: Color32 = Color32::from_rgb(201, 74, 83); // #c94f6d
 
+// ===== CATPPUCCIN - MOCHA VARIANT =====
+// Warm, modern palette with rich contrasts
+
+pub const CAT_BG: Color32 = Color32::from_rgb(24, 24, 37); // #181825
+pub const CAT_BG_DARK: Color32 = Color32::from_rgb(17, 17, 27); // #11111b
+pub const CAT_BG_HIGHLIGHT: Color32 = Color32::from_rgb(36, 37, 54); // #242438
+pub const CAT_TERMINAL_BLACK: Color32 = Color32::from_rgb(30, 32, 48); // #1e2030
+pub const CAT_FG: Color32 = Color32::from_rgb(205, 214, 244); // #cdd6f4
+pub const CAT_FG_DIM: Color32 = Color32::from_rgb(180, 190, 214); // #b4befe
+pub const CAT_COMMENT: Color32 = Color32::from_rgb(137, 145, 168); // #8991a8
+pub const CAT_LAVENDER: Color32 = Color32::from_rgb(180, 190, 254); // #b4befe
+pub const CAT_SKY: Color32 = Color32::from_rgb(137, 220, 235); // #89dceb
+pub const CAT_TEAL: Color32 = Color32::from_rgb(148, 226, 213); // #94e2d5
+pub const CAT_GREEN: Color32 = Color32::from_rgb(166, 227, 161); // #a6e3a1
+pub const CAT_YELLOW: Color32 = Color32::from_rgb(249, 226, 175); // #f9e2af
+pub const CAT_PEACH: Color32 = Color32::from_rgb(250, 179, 135); // #fab387
+pub const CAT_ROSEWATER: Color32 = Color32::from_rgb(245, 224, 220); // #f5e0dc
+pub const CAT_RED: Color32 = Color32::from_rgb(243, 139, 168); // #f38ba8
+
+// ===== DRACULA =====
+// Classic high-contrast purple/green palette
+
+pub const DRACULA_BG: Color32 = Color32::from_rgb(40, 42, 54); // #282a36
+pub const DRACULA_BG_DARK: Color32 = Color32::from_rgb(33, 34, 44); // #21222c
+pub const DRACULA_BG_HIGHLIGHT: Color32 = Color32::from_rgb(68, 71, 90); // #44475a
+pub const DRACULA_TERMINAL_BLACK: Color32 = Color32::from_rgb(24, 26, 35); // #181a23
+pub const DRACULA_FG: Color32 = Color32::from_rgb(248, 248, 242); // #f8f8f2
+pub const DRACULA_COMMENT: Color32 = Color32::from_rgb(98, 114, 164); // #6272a4
+pub const DRACULA_PINK: Color32 = Color32::from_rgb(255, 121, 198); // #ff79c6
+pub const DRACULA_CYAN: Color32 = Color32::from_rgb(139, 233, 253); // #8be9fd
+pub const DRACULA_BLUE: Color32 = Color32::from_rgb(189, 147, 249); // #bd93f9
+pub const DRACULA_GREEN: Color32 = Color32::from_rgb(80, 250, 123); // #50fa7b
+pub const DRACULA_ORANGE: Color32 = Color32::from_rgb(255, 184, 108); // #ffb86c
+pub const DRACULA_YELLOW: Color32 = Color32::from_rgb(241, 250, 140); // #f1fa8c
+pub const DRACULA_RED: Color32 = Color32::from_rgb(255, 85, 85); // #ff5555
+
 // ===== THEME VARIANT ENUM =====
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,7 +146,77 @@ pub enum TokyoNightVariant {
 
 impl Default for TokyoNightVariant {
     fn default() -> Self {
-        TokyoNightVariant::Night
+        TokyoNightVariant::Storm
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiTheme {
+    TokyoNight(TokyoNightVariant),
+    CatppuccinMocha,
+    Dracula,
+    Ocean,
+}
+
+impl Default for GuiTheme {
+    fn default() -> Self {
+        GuiTheme::TokyoNight(TokyoNightVariant::Storm)
+    }
+}
+
+pub const DEFAULT_THEME_NAME: &str = "tokyo-night-storm";
+
+pub const ALL_THEMES: [GuiTheme; 6] = [
+    GuiTheme::TokyoNight(TokyoNightVariant::Storm),
+    GuiTheme::TokyoNight(TokyoNightVariant::Night),
+    GuiTheme::TokyoNight(TokyoNightVariant::Moon),
+    GuiTheme::CatppuccinMocha,
+    GuiTheme::Dracula,
+    GuiTheme::Ocean,
+];
+
+impl GuiTheme {
+    pub const fn name(self) -> &'static str {
+        match self {
+            GuiTheme::TokyoNight(TokyoNightVariant::Night) => "tokyo-night-night",
+            GuiTheme::TokyoNight(TokyoNightVariant::Storm) => "tokyo-night-storm",
+            GuiTheme::TokyoNight(TokyoNightVariant::Moon) => "tokyo-night-moon",
+            GuiTheme::CatppuccinMocha => "catppuccin-mocha",
+            GuiTheme::Dracula => "dracula",
+            GuiTheme::Ocean => "ocean",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            GuiTheme::TokyoNight(TokyoNightVariant::Night) => "Tokyo Night (Night)",
+            GuiTheme::TokyoNight(TokyoNightVariant::Storm) => "Tokyo Night (Storm)",
+            GuiTheme::TokyoNight(TokyoNightVariant::Moon) => "Tokyo Night (Moon)",
+            GuiTheme::CatppuccinMocha => "Catppuccin (Mocha)",
+            GuiTheme::Dracula => "Dracula",
+            GuiTheme::Ocean => "Ocean (Legacy)",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "tokyo-night-night" => Some(GuiTheme::TokyoNight(TokyoNightVariant::Night)),
+            "tokyo-night-storm" => Some(GuiTheme::TokyoNight(TokyoNightVariant::Storm)),
+            "tokyo-night-moon" => Some(GuiTheme::TokyoNight(TokyoNightVariant::Moon)),
+            "catppuccin-mocha" => Some(GuiTheme::CatppuccinMocha),
+            "dracula" => Some(GuiTheme::Dracula),
+            "ocean" => Some(GuiTheme::Ocean),
+            _ => None,
+        }
+    }
+}
+
+pub fn apply_theme(ctx: &egui::Context, theme: GuiTheme) {
+    match theme {
+        GuiTheme::TokyoNight(variant) => configure_tokyo_night_theme(ctx, variant),
+        GuiTheme::CatppuccinMocha => configure_catppuccin_theme(ctx),
+        GuiTheme::Dracula => configure_dracula_theme(ctx),
+        GuiTheme::Ocean => configure_ocean_theme(ctx),
     }
 }
 
@@ -162,7 +268,7 @@ fn configure_tokyo_night_night(ctx: &egui::Context) {
     visuals.selection.bg_fill = TN_NIGHT_BLUE0;
     visuals.selection.stroke = egui::Stroke::new(1.5, TN_NIGHT_CYAN);
 
-    apply_common_tokyo_night_style(&mut visuals, &mut style, ctx);
+    apply_modern_theme_style(&mut visuals, &mut style, ctx);
 }
 
 fn configure_tokyo_night_storm(ctx: &egui::Context) {
@@ -203,7 +309,7 @@ fn configure_tokyo_night_storm(ctx: &egui::Context) {
     visuals.selection.bg_fill = TN_STORM_BLUE0;
     visuals.selection.stroke = egui::Stroke::new(1.5, TN_STORM_CYAN);
 
-    apply_common_tokyo_night_style(&mut visuals, &mut style, ctx);
+    apply_modern_theme_style(&mut visuals, &mut style, ctx);
 }
 
 fn configure_tokyo_night_moon(ctx: &egui::Context) {
@@ -244,10 +350,78 @@ fn configure_tokyo_night_moon(ctx: &egui::Context) {
     visuals.selection.bg_fill = TN_MOON_BLUE0;
     visuals.selection.stroke = egui::Stroke::new(1.5, TN_MOON_CYAN);
 
-    apply_common_tokyo_night_style(&mut visuals, &mut style, ctx);
+    apply_modern_theme_style(&mut visuals, &mut style, ctx);
 }
 
-fn apply_common_tokyo_night_style(
+pub fn configure_catppuccin_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    let mut visuals = egui::Visuals::dark();
+
+    visuals.window_fill = CAT_BG;
+    visuals.panel_fill = CAT_BG;
+    visuals.extreme_bg_color = CAT_BG_DARK;
+    visuals.faint_bg_color = CAT_BG_HIGHLIGHT;
+
+    visuals.override_text_color = Some(CAT_FG);
+    visuals.hyperlink_color = CAT_SKY;
+
+    visuals.widgets.noninteractive.bg_fill = CAT_BG_HIGHLIGHT;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, CAT_COMMENT);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, CAT_FG);
+
+    visuals.widgets.inactive.bg_fill = CAT_BG_HIGHLIGHT;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, CAT_LAVENDER);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, CAT_FG_DIM);
+
+    visuals.widgets.hovered.bg_fill = CAT_BG_HIGHLIGHT;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(2.0, CAT_TEAL);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, CAT_TEAL);
+
+    visuals.widgets.active.bg_fill = CAT_PEACH;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, CAT_TEAL);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.5, CAT_BG_DARK);
+
+    visuals.selection.bg_fill = CAT_TEAL;
+    visuals.selection.stroke = egui::Stroke::new(1.5, CAT_SKY);
+
+    apply_modern_theme_style(&mut visuals, &mut style, ctx);
+}
+
+pub fn configure_dracula_theme(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    let mut visuals = egui::Visuals::dark();
+
+    visuals.window_fill = DRACULA_BG;
+    visuals.panel_fill = DRACULA_BG;
+    visuals.extreme_bg_color = DRACULA_BG_DARK;
+    visuals.faint_bg_color = DRACULA_BG_HIGHLIGHT;
+
+    visuals.override_text_color = Some(DRACULA_FG);
+    visuals.hyperlink_color = DRACULA_PINK;
+
+    visuals.widgets.noninteractive.bg_fill = DRACULA_BG_HIGHLIGHT;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, DRACULA_COMMENT);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, DRACULA_FG);
+
+    visuals.widgets.inactive.bg_fill = DRACULA_BG_HIGHLIGHT;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, DRACULA_BLUE);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, DRACULA_COMMENT);
+
+    visuals.widgets.hovered.bg_fill = DRACULA_BG_HIGHLIGHT;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(2.0, DRACULA_CYAN);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, DRACULA_CYAN);
+
+    visuals.widgets.active.bg_fill = DRACULA_PINK;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, DRACULA_CYAN);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.5, DRACULA_BG);
+
+    visuals.selection.bg_fill = DRACULA_BLUE;
+    visuals.selection.stroke = egui::Stroke::new(1.5, DRACULA_CYAN);
+
+    apply_modern_theme_style(&mut visuals, &mut style, ctx);
+}
+
+fn apply_modern_theme_style(
     visuals: &mut egui::Visuals,
     style: &mut egui::Style,
     ctx: &egui::Context,
@@ -272,6 +446,9 @@ fn apply_common_tokyo_night_style(
     visuals.clip_rect_margin = 3.0;
 
     ctx.set_visuals(visuals.clone());
+
+    // Keep visuals in sync with style so later `set_style` calls retain the theme colors.
+    style.visuals = visuals.clone();
 
     // Spacing for modern, airy feel
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
@@ -316,6 +493,28 @@ pub fn get_status_color_tokyo_night(
             InstanceStatus::Error => TN_MOON_RED,
             InstanceStatus::Suspended => TN_MOON_ORANGE,
         },
+    }
+}
+
+pub fn get_status_color(status: &crate::instance::InstanceStatus, theme: GuiTheme) -> Color32 {
+    use crate::instance::InstanceStatus;
+    match theme {
+        GuiTheme::TokyoNight(variant) => get_status_color_tokyo_night(status, variant),
+        GuiTheme::CatppuccinMocha => match status {
+            InstanceStatus::Running => CAT_GREEN,
+            InstanceStatus::Stopped => CAT_RED,
+            InstanceStatus::Starting | InstanceStatus::Stopping => CAT_TEAL,
+            InstanceStatus::Error => CAT_RED,
+            InstanceStatus::Suspended => CAT_YELLOW,
+        },
+        GuiTheme::Dracula => match status {
+            InstanceStatus::Running => DRACULA_GREEN,
+            InstanceStatus::Stopped => DRACULA_RED,
+            InstanceStatus::Starting | InstanceStatus::Stopping => DRACULA_CYAN,
+            InstanceStatus::Error => DRACULA_RED,
+            InstanceStatus::Suspended => DRACULA_YELLOW,
+        },
+        GuiTheme::Ocean => get_status_color_ocean(status),
     }
 }
 
@@ -428,7 +627,7 @@ pub fn configure_ocean_theme(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
-pub fn get_status_color(status: &crate::instance::InstanceStatus) -> Color32 {
+pub fn get_status_color_ocean(status: &crate::instance::InstanceStatus) -> Color32 {
     use crate::instance::InstanceStatus;
     match status {
         InstanceStatus::Running => STATUS_RUNNING,

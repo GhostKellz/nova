@@ -8,6 +8,24 @@ gpu_passthrough = false
 network = "bridge0"
 autostart = false
 
+[vm.ubuntu-dev.storage]
+format = "qcow2"
+size = "20Gi"
+create_if_missing = true
+
+[vm.ubuntu-dev.looking_glass]
+enabled = false
+framebuffer_size = 64
+shmem_path = "/dev/shm/looking-glass"
+audio_enabled = true
+audio_buffer_latency = 13
+vsync_enabled = true
+mouse_input = "Relative"
+
+[vm.ubuntu-dev.looking_glass.resolution]
+width = 1920
+height = 1080
+
 [vm.windows-test]
 image = "/var/lib/nova/images/windows-11.qcow2"
 cpu = 8
@@ -16,58 +34,112 @@ gpu_passthrough = true
 network = "bridge0"
 autostart = false
 
-# High-performance container with Bolt
-[container.web-api]
-capsule = "ubuntu:22.04"
-volumes = ["./api:/srv/api", "./data:/var/lib/data"]
-network = "nova-net"
-runtime = "bolt"
-autostart = true
+[vm.windows-test.storage]
+format = "qcow2"
+size = "20Gi"
+create_if_missing = true
 
-[container.web-api.env]
-API_KEY = "development-key"
-DATABASE_URL = "postgresql://user:pass@db:5432/mydb"
+[vm.windows-test.looking_glass]
+enabled = false
+framebuffer_size = 64
+shmem_path = "/dev/shm/looking-glass"
+audio_enabled = true
+audio_buffer_latency = 13
+vsync_enabled = true
+mouse_input = "Relative"
 
-# Bolt-specific configuration
-[container.web-api.bolt]
-isolation = "strict"
-security_profile = "production"
-memory_limit = "2Gi"
-cpu_limit = "2"
+[vm.windows-test.looking_glass.resolution]
+width = 1920
+height = 1080
 
-# Database with Docker fallback
 [container.database]
 capsule = "postgres:15"
 volumes = ["./postgres-data:/var/lib/postgresql/data"]
 network = "nova-net"
-runtime = "docker"  # Explicit Docker usage
 autostart = true
+runtime = "docker"
 
 [container.database.env]
 POSTGRES_DB = "mydb"
-POSTGRES_USER = "user"
 POSTGRES_PASSWORD = "pass"
+POSTGRES_USER = "user"
 
-# GPU workload with Bolt
+[container.database.bolt]
+isolation = "standard"
+gpu_access = false
+gpu_devices = []
+security_profile = "default"
+network_mode = "bridge"
+read_only = false
+no_new_privileges = false
+
 [container.ml-training]
 capsule = "pytorch/pytorch:latest-gpu"
-runtime = "bolt"
+volumes = []
 network = "nova-net"
+autostart = false
+runtime = "bolt"
+
+[container.ml-training.env]
 
 [container.ml-training.bolt]
+isolation = "standard"
 gpu_access = true
 gpu_devices = ["nvidia0"]
 memory_limit = "8Gi"
-isolation = "standard"
 security_profile = "gpu"
+network_mode = ""
+read_only = false
+no_new_privileges = false
 
-[network.bridge0]
-type = "bridge"
-interfaces = ["enp6s0"]
+[container.web-api]
+capsule = "ubuntu:22.04"
+volumes = [
+    "./api:/srv/api",
+    "./data:/var/lib/data",
+]
+network = "nova-net"
+autostart = true
+runtime = "bolt"
+
+[container.web-api.env]
+DATABASE_URL = "postgresql://user:pass@db:5432/mydb"
+API_KEY = "development-key"
+
+[container.web-api.bolt]
+isolation = "strict"
+gpu_access = false
+gpu_devices = []
+memory_limit = "2Gi"
+cpu_limit = "2"
+security_profile = "production"
+network_mode = ""
+read_only = false
+no_new_privileges = false
 
 [network.nova-net]
 type = "overlay"
+interfaces = []
 driver = "quic"
 dns = true
 subnet = "10.100.0.0/24"
 gateway = "10.100.0.1"
+
+[network.bridge0]
+type = "bridge"
+interfaces = ["enp6s0"]
+dns = false
+
+[storage]
+
+[ui]
+theme = "tokyo-night-storm"
+font_family = "fira-code-nerd"
+font_size = 15.0
+compact_layout = false
+auto_refresh = true
+refresh_interval_seconds = 5
+network_refresh_interval_seconds = 15
+show_event_log = false
+show_insights = true
+confirm_instance_actions = true
