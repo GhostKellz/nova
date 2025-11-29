@@ -81,6 +81,10 @@ pub struct UiConfig {
     pub show_insights: bool,
     #[serde(default = "default_ui_confirm_instance_actions")]
     pub confirm_instance_actions: bool,
+    #[serde(default = "default_ui_container_logs_auto_refresh")]
+    pub container_logs_auto_refresh: bool,
+    #[serde(default = "default_ui_container_logs_refresh_interval_seconds")]
+    pub container_logs_refresh_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -236,6 +240,9 @@ impl Default for UiConfig {
             show_event_log: default_ui_show_event_log(),
             show_insights: default_ui_show_insights(),
             confirm_instance_actions: default_ui_confirm_instance_actions(),
+            container_logs_auto_refresh: default_ui_container_logs_auto_refresh(),
+            container_logs_refresh_interval_seconds:
+                default_ui_container_logs_refresh_interval_seconds(),
         }
     }
 }
@@ -356,6 +363,14 @@ fn default_ui_show_insights() -> bool {
 
 fn default_ui_confirm_instance_actions() -> bool {
     true
+}
+
+fn default_ui_container_logs_auto_refresh() -> bool {
+    false
+}
+
+fn default_ui_container_logs_refresh_interval_seconds() -> u64 {
+    15
 }
 
 fn default_storage_pool_type() -> StoragePoolType {

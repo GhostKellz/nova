@@ -52,27 +52,6 @@ mouse_input = "Relative"
 width = 1920
 height = 1080
 
-[container.database]
-capsule = "postgres:15"
-volumes = ["./postgres-data:/var/lib/postgresql/data"]
-network = "nova-net"
-autostart = true
-runtime = "docker"
-
-[container.database.env]
-POSTGRES_DB = "mydb"
-POSTGRES_PASSWORD = "pass"
-POSTGRES_USER = "user"
-
-[container.database.bolt]
-isolation = "standard"
-gpu_access = false
-gpu_devices = []
-security_profile = "default"
-network_mode = "bridge"
-read_only = false
-no_new_privileges = false
-
 [container.ml-training]
 capsule = "pytorch/pytorch:latest-gpu"
 volumes = []
@@ -92,6 +71,27 @@ network_mode = ""
 read_only = false
 no_new_privileges = false
 
+[container.database]
+capsule = "postgres:15"
+volumes = ["./postgres-data:/var/lib/postgresql/data"]
+network = "nova-net"
+autostart = true
+runtime = "docker"
+
+[container.database.env]
+POSTGRES_DB = "mydb"
+POSTGRES_USER = "user"
+POSTGRES_PASSWORD = "pass"
+
+[container.database.bolt]
+isolation = "standard"
+gpu_access = false
+gpu_devices = []
+security_profile = "default"
+network_mode = "bridge"
+read_only = false
+no_new_privileges = false
+
 [container.web-api]
 capsule = "ubuntu:22.04"
 volumes = [
@@ -103,8 +103,8 @@ autostart = true
 runtime = "bolt"
 
 [container.web-api.env]
-DATABASE_URL = "postgresql://user:pass@db:5432/mydb"
 API_KEY = "development-key"
+DATABASE_URL = "postgresql://user:pass@db:5432/mydb"
 
 [container.web-api.bolt]
 isolation = "strict"
@@ -117,6 +117,11 @@ network_mode = ""
 read_only = false
 no_new_privileges = false
 
+[network.bridge0]
+type = "bridge"
+interfaces = ["enp6s0"]
+dns = false
+
 [network.nova-net]
 type = "overlay"
 interfaces = []
@@ -125,15 +130,10 @@ dns = true
 subnet = "10.100.0.0/24"
 gateway = "10.100.0.1"
 
-[network.bridge0]
-type = "bridge"
-interfaces = ["enp6s0"]
-dns = false
-
 [storage]
 
 [ui]
-theme = "tokyo-night-storm"
+theme = "dracula"
 font_family = "fira-code-nerd"
 font_size = 15.0
 compact_layout = false
@@ -143,3 +143,5 @@ network_refresh_interval_seconds = 15
 show_event_log = false
 show_insights = true
 confirm_instance_actions = true
+container_logs_auto_refresh = false
+container_logs_refresh_interval_seconds = 15

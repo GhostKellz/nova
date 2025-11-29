@@ -6,6 +6,7 @@ use nova::{
     },
     container::ContainerManager,
     container_runtime::{ContainerInfo, ContainerStats},
+    gui_gpu::GpuManagerWindow,
     instance::{Instance, InstanceStatus, InstanceType},
     logger,
     network::{
@@ -13,7 +14,7 @@ use nova::{
         SwitchProfile, SwitchStatus, SwitchType, VirtualSwitch,
     },
     templates_snapshots::{OperatingSystem, TemplateManager, VmTemplate},
-    theme,
+    theme::{self, ButtonIntent, ButtonRole},
     vm::VmManager,
 };
 
@@ -39,6 +40,9 @@ const MIN_INSTANCE_REFRESH_SECONDS: i32 = 3;
 const MAX_INSTANCE_REFRESH_SECONDS: i32 = 60;
 const MIN_NETWORK_REFRESH_SECONDS: i32 = 10;
 const MAX_NETWORK_REFRESH_SECONDS: i32 = 180;
+const MIN_LOG_REFRESH_SECONDS: i32 = 5;
+const MAX_LOG_REFRESH_SECONDS: i32 = 120;
+const DEFAULT_LOG_REFRESH_SECONDS: u64 = 15;
 
 #[derive(Clone, Copy)]
 struct FontChoice {
@@ -72,6 +76,8 @@ struct UiPreferencesSnapshot {
     show_event_log: bool,
     show_insights: bool,
     confirm_actions: bool,
+    container_logs_auto_refresh: bool,
+    container_logs_refresh_secs: u64,
 }
 
 #[derive(Clone)]
@@ -228,6 +234,7 @@ struct NovaApp {
     console_output: Vec<String>,
     active_sessions: Vec<UnifiedConsoleSession>,
     last_session_error: Option<String>,
+    gpu_window: Option<GpuManagerWindow>,
 
     instances_cache: Vec<Instance>,
     summary: InstanceSummary,
@@ -274,6 +281,9 @@ struct NovaApp {
     container_details: HashMap<String, ContainerDetailCache>,
     container_detail_errors: HashMap<String, ContainerDetailError>,
     container_logs: Option<ContainerLogsState>,
+    container_logs_filter: String,
+    container_logs_auto_refresh: bool,
+    container_logs_refresh_interval: Duration,
 }
 
 impl NovaApp {
@@ -388,6 +398,20 @@ impl NovaApp {
         }
         let network_refresh_interval = Duration::from_secs(clamped_network);
 
+        let container_logs_auto_refresh = config.ui.container_logs_auto_refresh;
+        let min_log_refresh = MIN_LOG_REFRESH_SECONDS as u64;
+        let max_log_refresh = MAX_LOG_REFRESH_SECONDS as u64;
+        let mut log_refresh_secs = config.ui.container_logs_refresh_interval_seconds;
+        if log_refresh_secs == 0 {
+            log_refresh_secs = DEFAULT_LOG_REFRESH_SECONDS;
+        }
+        let clamped_log_refresh = log_refresh_secs.clamp(min_log_refresh, max_log_refresh);
+        if clamped_log_refresh != log_refresh_secs {
+            config.ui.container_logs_refresh_interval_seconds = clamped_log_refresh;
+            config_dirty = true;
+        }
+        let container_logs_refresh_interval = Duration::from_secs(clamped_log_refresh);
+
         let show_console = config.ui.show_event_log;
         let show_insights = config.ui.show_insights;
         let confirm_instance_actions = config.ui.confirm_instance_actions;
@@ -452,6 +476,7 @@ impl NovaApp {
             console_output: Vec::new(),
             active_sessions: Vec::new(),
             last_session_error: None,
+            gpu_window: None,
             instances_cache: Vec::new(),
             summary: InstanceSummary::default(),
             filter_text: String::new(),
@@ -494,6 +519,9 @@ impl NovaApp {
             container_details: HashMap::new(),
             container_detail_errors: HashMap::new(),
             container_logs: None,
+            container_logs_filter: String::new(),
+            container_logs_auto_refresh,
+            container_logs_refresh_interval,
         };
 
         app.ensure_font_definitions(&cc.egui_ctx);
@@ -732,6 +760,10 @@ impl NovaApp {
         self.theme = theme;
         self._config.ui.theme = theme.name().to_string();
         self.preferences_dirty = true;
+
+        if let Some(window) = self.gpu_window.as_mut() {
+            window.set_theme(self.theme);
+        }
     }
 
     fn theme_menu(&mut self, ui: &mut egui::Ui) {
@@ -927,6 +959,8 @@ impl NovaApp {
                 show_event_log: self.show_console,
                 show_insights: self.show_insights,
                 confirm_actions: self.confirm_instance_actions,
+                container_logs_auto_refresh: self.container_logs_auto_refresh,
+                container_logs_refresh_secs: self.container_logs_refresh_interval.as_secs(),
             });
             self.preferences_dirty = false;
             self.show_preferences = true;
@@ -957,6 +991,13 @@ impl NovaApp {
             self._config.ui.show_insights = snapshot.show_insights;
             self.confirm_instance_actions = snapshot.confirm_actions;
             self._config.ui.confirm_instance_actions = snapshot.confirm_actions;
+            self.container_logs_auto_refresh = snapshot.container_logs_auto_refresh;
+            self._config.ui.container_logs_auto_refresh = snapshot.container_logs_auto_refresh;
+            let min_log = MIN_LOG_REFRESH_SECONDS as u64;
+            let max_log = MAX_LOG_REFRESH_SECONDS as u64;
+            let restored_log_refresh = snapshot.container_logs_refresh_secs.clamp(min_log, max_log);
+            self.container_logs_refresh_interval = Duration::from_secs(restored_log_refresh);
+            self._config.ui.container_logs_refresh_interval_seconds = restored_log_refresh;
             self.last_refresh = None;
             self.last_network_refresh = None;
             self.fonts_dirty = true;
@@ -1044,7 +1085,10 @@ impl NovaApp {
                     if let Some(warning) = &self.font_load_error {
                         ui.colored_label(theme::STATUS_WARNING, warning);
                     }
-                    if ui.button("Retry font discovery").clicked() {
+                    if self
+                        .themed_button(ui, "Retry font discovery", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.font_cache.remove(FONT_CHOICES[0].id);
                         self.fonts_dirty = true;
                         self.ensure_font_definitions(ui.ctx());
@@ -1136,6 +1180,43 @@ impl NovaApp {
                 }
 
                 ui.add_space(12.0);
+                ui.heading("Logs");
+                ui.separator();
+
+                if ui
+                    .checkbox(
+                        &mut self.container_logs_auto_refresh,
+                        "Auto refresh container logs",
+                    )
+                    .changed()
+                {
+                    self._config.ui.container_logs_auto_refresh = self.container_logs_auto_refresh;
+                    self.preferences_dirty = true;
+                }
+
+                let mut log_refresh_secs = self.container_logs_refresh_interval.as_secs() as i32;
+                let log_slider = egui::Slider::new(
+                    &mut log_refresh_secs,
+                    MIN_LOG_REFRESH_SECONDS..=MAX_LOG_REFRESH_SECONDS,
+                )
+                .text("Log refresh cadence (seconds)");
+                if ui
+                    .add_enabled(self.container_logs_auto_refresh, log_slider)
+                    .changed()
+                {
+                    let adjusted = log_refresh_secs
+                        .clamp(MIN_LOG_REFRESH_SECONDS, MAX_LOG_REFRESH_SECONDS)
+                        as u64;
+                    self.container_logs_refresh_interval = Duration::from_secs(adjusted);
+                    self._config.ui.container_logs_refresh_interval_seconds = adjusted;
+                    self.preferences_dirty = true;
+                }
+
+                if !self.container_logs_auto_refresh {
+                    ui.small("Manual refresh only – use the logs window actions when needed.");
+                }
+
+                ui.add_space(12.0);
                 ui.heading("System");
                 ui.separator();
 
@@ -1163,8 +1244,13 @@ impl NovaApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.preferences_dirty, egui::Button::new("Save & Close"))
+                    if self
+                        .themed_button(
+                            ui,
+                            "Save & Close",
+                            ButtonRole::Primary,
+                            self.preferences_dirty,
+                        )
                         .clicked()
                     {
                         if self
@@ -1175,7 +1261,10 @@ impl NovaApp {
                         }
                     }
 
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.cancel_preferences(ui.ctx());
                     }
                 });
@@ -1555,10 +1644,16 @@ impl NovaApp {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Create switch").clicked() {
+                    if self
+                        .themed_button(ui, "Create switch", ButtonRole::Primary, true)
+                        .clicked()
+                    {
                         self.handle_create_switch();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.show_create_switch_modal = false;
                     }
                 });
@@ -2147,6 +2242,60 @@ impl NovaApp {
         }
     }
 
+    fn export_container_logs(&mut self, state: &ContainerLogsState, lines: &[&String]) {
+        if lines.is_empty() {
+            self.log_console(format!(
+                "No log lines available to export for {}",
+                state.name
+            ));
+            return;
+        }
+
+        let sanitized_name = Self::sanitize_filename(&state.name);
+        let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+        let filename = format!("nova-logs-{}-{}.log", sanitized_name, timestamp);
+        let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let path = base_dir.join(filename);
+
+        let payload = lines
+            .iter()
+            .map(|line| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        match fs::write(&path, payload) {
+            Ok(_) => self.log_console(format!(
+                "Exported logs for {} to {}",
+                state.name,
+                path.display()
+            )),
+            Err(err) => {
+                self.log_console(format!("Failed to export logs for {}: {}", state.name, err))
+            }
+        }
+    }
+
+    fn sanitize_filename(input: &str) -> String {
+        let mut sanitized: String = input
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+                _ => '-',
+            })
+            .collect();
+
+        while sanitized.contains("--") {
+            sanitized = sanitized.replace("--", "-");
+        }
+
+        let trimmed = sanitized.trim_matches('-').to_string();
+        if trimmed.is_empty() {
+            "container".to_string()
+        } else {
+            trimmed
+        }
+    }
+
     fn draw_container_logs_window(&mut self, ctx: &egui::Context) {
         if let Some(mut state) = self.container_logs.take() {
             let mut open = true;
@@ -2157,17 +2306,92 @@ impl NovaApp {
                 .open(&mut open)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("Refresh").clicked() {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.container_logs_filter)
+                                .hint_text("Search logs…")
+                                .desired_width(220.0),
+                        );
+
+                        if !self.container_logs_filter.is_empty() {
+                            if self
+                                .themed_button(ui, "Clear", ButtonRole::Secondary, true)
+                                .clicked()
+                            {
+                                self.container_logs_filter.clear();
+                            }
+                        }
+                    });
+
+                    let filter_trimmed = self.container_logs_filter.trim();
+                    let filter_lower = filter_trimmed.to_lowercase();
+                    let filtered_lines: Vec<&String> = if filter_trimmed.is_empty() {
+                        state.lines.iter().collect()
+                    } else {
+                        state
+                            .lines
+                            .iter()
+                            .filter(|line| line.to_lowercase().contains(&filter_lower))
+                            .collect()
+                    };
+
+                    ui.small(format!(
+                        "Showing {} of {} lines",
+                        filtered_lines.len(),
+                        state.lines.len()
+                    ));
+                    ui.add_space(4.0);
+
+                    ui.horizontal(|ui| {
+                        if self
+                            .themed_button(ui, "Refresh", ButtonRole::Secondary, true)
+                            .clicked()
+                        {
                             refresh_requested = true;
                         }
-                        if ui.button("Copy to clipboard").clicked() {
-                            ui.output_mut(|out| out.copied_text = state.lines.join("\n"));
+                        if self
+                            .themed_button(ui, "Copy to clipboard", ButtonRole::Secondary, true)
+                            .clicked()
+                        {
+                            let joined: String = filtered_lines
+                                .iter()
+                                .map(|line| line.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.output_mut(|out| out.copied_text = joined);
+                        }
+                        if self
+                            .themed_button(
+                                ui,
+                                "Save to file",
+                                ButtonRole::Secondary,
+                                !filtered_lines.is_empty(),
+                            )
+                            .clicked()
+                        {
+                            self.export_container_logs(&state, &filtered_lines);
                         }
                         ui.add_space(12.0);
-                        ui.small(format!(
-                            "Fetched {}",
-                            Self::format_elapsed(state.fetched_at.elapsed())
+                        ui.label(format!(
+                            "Auto refresh: {} ({}s)",
+                            if self.container_logs_auto_refresh {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            },
+                            self.container_logs_refresh_interval.as_secs()
                         ));
+                        if self
+                            .themed_button(ui, "Preferences…", ButtonRole::Secondary, true)
+                            .clicked()
+                        {
+                            self.open_preferences();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.small(format!(
+                                "Fetched {}",
+                                Self::format_elapsed(state.fetched_at.elapsed())
+                            ));
+                        });
                     });
 
                     if let Some(error) = &state.error {
@@ -2178,11 +2402,19 @@ impl NovaApp {
                         .id_source(format!("nova.container.logs.{}", state.name))
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            for line in &state.lines {
+                            for line in filtered_lines {
                                 ui.monospace(line);
                             }
                         });
                 });
+
+            if !refresh_requested
+                && self.container_logs_auto_refresh
+                && state.error.is_none()
+                && state.fetched_at.elapsed() >= self.container_logs_refresh_interval
+            {
+                refresh_requested = true;
+            }
 
             if refresh_requested {
                 state = self.fetch_container_logs(&state.name, 200);
@@ -2234,16 +2466,21 @@ impl NovaApp {
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         cancelled = true;
                     }
-                    let confirm_label = match pending.action {
-                        InstanceAction::Start => "Start workload",
-                        InstanceAction::Stop => "Stop workload",
-                        InstanceAction::Restart => "Restart workload",
+                    let (confirm_label, confirm_role) = match pending.action {
+                        InstanceAction::Start => ("Start workload", ButtonRole::Start),
+                        InstanceAction::Stop => ("Stop workload", ButtonRole::Stop),
+                        InstanceAction::Restart => ("Restart workload", ButtonRole::Restart),
                     };
-                    let confirm_button = ui.button(confirm_label);
-                    if confirm_button.clicked() {
+                    if self
+                        .themed_button(ui, confirm_label, confirm_role, true)
+                        .clicked()
+                    {
                         confirmed = true;
                     }
                 });
@@ -2384,31 +2621,49 @@ impl NovaApp {
             format!("{}h ago", time_since_update.num_hours())
         };
 
+        let created_local = instance
+            .created_at
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.heading(&instance.name);
+                ui.add_space(6.0);
                 ui.colored_label(status_color, format!("{:?}", instance.status));
-                ui.label("Container");
-                ui.small(format!("Runtime: {runtime_name}"));
-                if let Some(pid) = instance.pid {
-                    ui.monospace(format!("PID {pid}"));
-                }
             });
+            ui.small(format!("Container runtime: {runtime_name}"));
 
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(format!("Uptime {uptime_str}"));
-                ui.separator();
-                ui.label(format!(
-                    "Created {}",
-                    instance
-                        .created_at
-                        .with_timezone(&Local)
-                        .format("%Y-%m-%d %H:%M")
-                ));
-                ui.separator();
-                ui.label(format!("Last update {update_str}"));
-            });
+            ui.add_space(6.0);
+            egui::Grid::new("nova.container.overview.lifecycle")
+                .num_columns(2)
+                .spacing(egui::vec2(12.0, 4.0))
+                .show(ui, |grid| {
+                    grid.label(egui::RichText::new("Uptime").strong());
+                    grid.label(uptime_str.clone());
+                    grid.end_row();
+
+                    grid.label(egui::RichText::new("Created").strong());
+                    grid.label(created_local.clone());
+                    grid.end_row();
+
+                    grid.label(egui::RichText::new("Last update").strong());
+                    grid.label(update_str.clone());
+                    grid.end_row();
+
+                    grid.label(egui::RichText::new("Type").strong());
+                    grid.label("Container");
+                    grid.end_row();
+
+                    grid.label(egui::RichText::new("PID").strong());
+                    if let Some(pid) = instance.pid {
+                        grid.monospace(format!("{pid}"));
+                    } else {
+                        grid.small("N/A");
+                    }
+                    grid.end_row();
+                });
         });
 
         ui.add_space(12.0);
@@ -2421,20 +2676,28 @@ impl NovaApp {
         let mut pull_image: Option<String> = None;
 
         ui.horizontal(|ui| {
-            if ui.button("Refresh detail").clicked() {
+            if self
+                .themed_button(ui, "Refresh detail", ButtonRole::Secondary, true)
+                .clicked()
+            {
                 refresh_requested = true;
             }
-            if ui
-                .add_enabled(
+            if self
+                .themed_button(
+                    ui,
+                    "View logs",
+                    ButtonRole::Secondary,
                     instance.status == InstanceStatus::Running,
-                    egui::Button::new("View logs"),
                 )
                 .clicked()
             {
                 logs_requested = true;
             }
             if let Some(detail) = detail_opt.as_ref() {
-                if ui.button("Pull image").clicked() {
+                if self
+                    .themed_button(ui, "Pull image", ButtonRole::Secondary, true)
+                    .clicked()
+                {
                     pull_image = Some(detail.info.image.clone());
                 }
             }
@@ -2648,7 +2911,12 @@ impl NovaApp {
                 ui.label("No snapshots captured yet.");
                 ui.small("Kick off automation once the workflow lands.");
                 ui.add_space(12.0);
-                let _ = ui.button("Create snapshot (preview)");
+                let _ = self.themed_button(
+                    ui,
+                    "Create snapshot (preview)",
+                    ButtonRole::Secondary,
+                    false,
+                );
             });
         });
     }
@@ -2718,11 +2986,17 @@ impl NovaApp {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Refresh topology").clicked() {
+            if self
+                .themed_button(ui, "Refresh topology", ButtonRole::Secondary, true)
+                .clicked()
+            {
                 self.refresh_network_summary(true);
             }
 
-            if ui.button("Create virtual switch").clicked() {
+            if self
+                .themed_button(ui, "Create virtual switch", ButtonRole::Primary, true)
+                .clicked()
+            {
                 self.show_create_switch_modal = true;
                 self.reconcile_uplink_selection();
             }
@@ -2875,15 +3149,23 @@ impl NovaApp {
                                 }
 
                                 let can_attach = !entry.is_empty();
-                                if ui
-                                    .add_enabled(can_attach, egui::Button::new("Attach interface"))
+                                if self
+                                    .themed_button(
+                                        ui,
+                                        "Attach interface",
+                                        ButtonRole::Secondary,
+                                        can_attach,
+                                    )
                                     .clicked()
                                 {
                                     self.handle_attach_interface(&switch.name);
                                 }
 
                                 ui.add_space(12.0);
-                                if ui.button("Delete switch").clicked() {
+                                if self
+                                    .themed_button(ui, "Delete switch", ButtonRole::Stop, true)
+                                    .clicked()
+                                {
                                     self.handle_delete_switch(&switch.name);
                                 }
                             });
@@ -2924,7 +3206,10 @@ impl NovaApp {
                                             }
                                         }
 
-                                        if ui.button("Detach").clicked() {
+                                        if self
+                                            .themed_button(ui, "Detach", ButtonRole::Stop, true)
+                                            .clicked()
+                                        {
                                             self.handle_detach_interface(
                                                 &switch.name,
                                                 iface_name.as_str(),
@@ -2991,10 +3276,16 @@ impl NovaApp {
         ui.separator();
 
         ui.horizontal(|ui| {
-            if ui.button("🚀 Launch session").clicked() {
+            if self
+                .themed_button(ui, "🚀 Launch session", ButtonRole::Primary, true)
+                .clicked()
+            {
                 self.request_session_launch(instance);
             }
-            if ui.button("🔄 Refresh list").clicked() {
+            if self
+                .themed_button(ui, "🔄 Refresh list", ButtonRole::Secondary, true)
+                .clicked()
+            {
                 self.refresh_session_cache();
             }
         });
@@ -3070,10 +3361,16 @@ impl NovaApp {
 
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.button("🪟 Open viewer").clicked() {
+                            if self
+                                .themed_button(ui, "🪟 Open viewer", ButtonRole::Secondary, true)
+                                .clicked()
+                            {
                                 self.request_session_launch_client(session.session_id.clone());
                             }
-                            if ui.button("⏹ Close session").clicked() {
+                            if self
+                                .themed_button(ui, "⏹ Close session", ButtonRole::Stop, true)
+                                .clicked()
+                            {
                                 self.request_session_close(session.session_id.clone());
                             }
                         });
@@ -3095,7 +3392,10 @@ impl NovaApp {
                     ));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("🔄 Refresh all").clicked() {
+                    if self
+                        .themed_button(ui, "🔄 Refresh all", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.refresh_instances(true);
                         self.refresh_network_summary(true);
                         self.log_console("Manual refresh triggered from header");
@@ -3177,29 +3477,35 @@ impl NovaApp {
                 .map(|session| session.session_id.clone())
         });
         ui.horizontal(|ui| {
-            if ui.button("➕ New VM").clicked() {
+            if self
+                .themed_button(ui, "➕ New VM", ButtonRole::Primary, true)
+                .clicked()
+            {
                 self.log_console("VM creation wizard coming soon");
             }
-            if ui.button("📦 New Container").clicked() {
+            if self
+                .themed_button(ui, "📦 New Container", ButtonRole::Primary, true)
+                .clicked()
+            {
                 self.log_console("Container creation wizard coming soon");
             }
 
             ui.separator();
 
-            if ui
-                .add_enabled(can_start, egui::Button::new("▶ Start"))
+            if self
+                .themed_button(ui, "▶ Start", ButtonRole::Start, can_start)
                 .clicked()
             {
                 self.handle_action(InstanceAction::Start);
             }
-            if ui
-                .add_enabled(can_stop, egui::Button::new("⏹ Stop"))
+            if self
+                .themed_button(ui, "⏹ Stop", ButtonRole::Stop, can_stop)
                 .clicked()
             {
                 self.handle_action(InstanceAction::Stop);
             }
-            if ui
-                .add_enabled(can_restart, egui::Button::new("🔁 Restart"))
+            if self
+                .themed_button(ui, "🔁 Restart", ButtonRole::Restart, can_restart)
                 .clicked()
             {
                 self.handle_action(InstanceAction::Restart);
@@ -3207,39 +3513,95 @@ impl NovaApp {
 
             ui.separator();
 
-            if ui
-                .add_enabled(has_selection, egui::Button::new("🖥 Console"))
+            if self
+                .themed_button(ui, "🖥 Console", ButtonRole::Secondary, has_selection)
                 .clicked()
             {
                 self.show_console = true;
                 self.log_console("Opening interactive console view");
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("🚀 Session"))
+            if self
+                .themed_button(ui, "🚀 Session", ButtonRole::Secondary, has_selection)
                 .clicked()
             {
                 if let Some(instance) = self.selected_instance_owned() {
                     self.request_session_launch(&instance);
                 }
             }
-            if ui
-                .add_enabled(ready_session.is_some(), egui::Button::new("🪟 Viewer"))
+            if self
+                .themed_button(
+                    ui,
+                    "🪟 Viewer",
+                    ButtonRole::Secondary,
+                    ready_session.is_some(),
+                )
                 .clicked()
             {
                 if let Some(session_id) = ready_session.clone() {
                     self.request_session_launch_client(session_id);
                 }
             }
-            if ui
-                .add_enabled(has_selection, egui::Button::new("🛡 Checkpoint"))
+            if self
+                .themed_button(ui, "🛡 Checkpoint", ButtonRole::Secondary, has_selection)
                 .clicked()
             {
                 self.log_console("Checkpoint workflow coming soon");
             }
-            if ui.button("⚙ Preferences").clicked() {
+            if self
+                .themed_button(ui, "⚙ Preferences", ButtonRole::Secondary, true)
+                .clicked()
+            {
                 self.open_preferences();
             }
+            if self
+                .preset_button(ui, ButtonIntent::Launch, Some("GPU Manager"), true)
+                .clicked()
+            {
+                self.open_gpu_manager();
+            }
         });
+    }
+
+    fn themed_button(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        role: ButtonRole,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button(ui, label, self.theme, role, enabled)
+    }
+
+    fn preset_button(
+        &self,
+        ui: &mut egui::Ui,
+        intent: ButtonIntent,
+        subject: Option<&str>,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button_preset(ui, self.theme, intent, subject, enabled)
+    }
+
+    fn open_gpu_manager(&mut self) {
+        if let Some(window) = self.gpu_window.as_mut() {
+            window.reopen();
+            window.set_theme(self.theme);
+            return;
+        }
+
+        let gpu_manager = self.vm_manager.gpu_manager_handle();
+        let mut window = GpuManagerWindow::new(gpu_manager);
+        window.set_theme(self.theme);
+        self.gpu_window = Some(window);
+    }
+
+    fn draw_gpu_window(&mut self, ctx: &egui::Context) {
+        if let Some(window) = self.gpu_window.as_mut() {
+            window.show(ctx);
+            if !window.is_open() {
+                self.gpu_window = None;
+            }
+        }
     }
 
     fn draw_filter_bar(&mut self, ui: &mut egui::Ui) {
@@ -3251,7 +3613,10 @@ impl NovaApp {
                     .desired_width(220.0),
             );
             ui.checkbox(&mut self.only_running, "Running only");
-            if ui.button("Clear").clicked() {
+            if self
+                .themed_button(ui, "Clear", ButtonRole::Secondary, true)
+                .clicked()
+            {
                 self.filter_text.clear();
                 self.only_running = false;
             }
@@ -3357,6 +3722,28 @@ impl eframe::App for NovaApp {
         let filter = self.filter_text.trim().to_lowercase();
         let (can_start, can_stop, can_restart) = self.compute_action_state();
 
+        let (refresh_shortcut, open_gpu_shortcut, open_prefs_shortcut) = ctx.input(|input| {
+            let ctrl = input.modifiers.ctrl;
+            let shift = input.modifiers.shift;
+            let refresh =
+                input.key_pressed(egui::Key::F5) || (ctrl && input.key_pressed(egui::Key::R));
+            let open_gpu = ctrl && shift && input.key_pressed(egui::Key::G);
+            let open_prefs = ctrl && input.key_pressed(egui::Key::P);
+            (refresh, open_gpu, open_prefs)
+        });
+
+        if refresh_shortcut {
+            self.refresh_instances(true);
+            self.refresh_network_summary(true);
+            self.log_console("Manual refresh triggered via shortcut");
+        }
+        if open_gpu_shortcut {
+            self.open_gpu_manager();
+        }
+        if open_prefs_shortcut {
+            self.open_preferences();
+        }
+
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -3408,6 +3795,11 @@ impl eframe::App for NovaApp {
                     );
                     ui.radio_value(&mut self.detail_tab, DetailTab::Sessions, "Sessions tab");
                     ui.separator();
+                    if ui.button("GPU Manager").clicked() {
+                        self.open_gpu_manager();
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     ui.menu_button("Theme", |ui| {
                         self.theme_menu(ui);
                     });
@@ -3416,7 +3808,10 @@ impl eframe::App for NovaApp {
                 ui.menu_button("Help", |ui| if ui.button("About Nova").clicked() {});
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("🔄 Refresh").clicked() {
+                    if self
+                        .themed_button(ui, "🔄 Refresh", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.refresh_instances(true);
                         self.refresh_network_summary(true);
                         self.log_console("Manual refresh triggered");
@@ -3481,6 +3876,7 @@ impl eframe::App for NovaApp {
         self.draw_preferences_window(ctx);
         self.draw_container_logs_window(ctx);
         self.draw_action_confirmation(ctx);
+        self.draw_gpu_window(ctx);
 
         ctx.request_repaint_after(self.refresh_interval.min(self.network_refresh_interval));
     }
