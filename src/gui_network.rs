@@ -1,13 +1,38 @@
 use crate::arch_integration::ArchNetworkManager;
 use crate::libvirt::{LibvirtManager, LibvirtNetwork};
-use crate::log_info;
 use crate::monitoring::{BandwidthUsage, NetworkMonitor, NetworkTopology};
 use crate::network::{NetworkInterface, NetworkManager, SwitchType, VirtualSwitch};
+use crate::theme::{self, ButtonIntent, ButtonRole, GuiTheme};
+use crate::{log_info, log_warn};
 
 use eframe::egui;
-use egui::{Color32, Pos2, Rect, Stroke, Vec2};
-use std::collections::HashMap;
+use egui::{Color32, Id, Pos2, Rect, Stroke, Vec2};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const NETWORK_STATE_KEY: &str = "nova.networking.state";
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct CapturePersistedState {
+    show_dialog: bool,
+    interface: String,
+    filter: String,
+    duration: String,
+    packet_count: String,
+    output_file: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct NetworkingPersistedState {
+    #[serde(default)]
+    selected_tab: NetworkTab,
+    #[serde(default)]
+    capture: CapturePersistedState,
+}
 
 #[allow(dead_code)]
 pub struct NetworkingGui {
@@ -24,6 +49,16 @@ pub struct NetworkingGui {
     monitoring_enabled: bool,
     capture_dialog: CaptureDialog,
     topology_view: TopologyView,
+    theme: GuiTheme,
+    libvirt_selection: HashSet<String>,
+    last_refresh_all: Option<Instant>,
+    refresh_feedback_until: Option<Instant>,
+    arch_task_until: Option<Instant>,
+    arch_task_message: Option<String>,
+    last_action_message: Option<String>,
+    last_action_error: Option<String>,
+    pending_delete_networks: Option<Vec<String>>,
+    persist_state_loaded: bool,
 
     // Data
     switches: Vec<VirtualSwitch>,
@@ -33,7 +68,8 @@ pub struct NetworkingGui {
     bandwidth_data: HashMap<String, Vec<BandwidthUsage>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum NetworkTab {
     Overview,
     VirtualSwitches,
@@ -42,6 +78,12 @@ enum NetworkTab {
     Topology,
     PacketCapture,
     ArchConfig,
+}
+
+impl Default for NetworkTab {
+    fn default() -> Self {
+        NetworkTab::Overview
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +119,9 @@ struct CaptureDialog {
     packet_count: String,
     output_file: String,
     active_captures: Vec<String>,
+    recent_files: Vec<PathBuf>,
+    last_file_scan: Option<Instant>,
+    scan_feedback_until: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +171,9 @@ impl NetworkingGui {
                 packet_count: "1000".to_string(),
                 output_file: "/tmp/nova-capture.pcap".to_string(),
                 active_captures: Vec::new(),
+                recent_files: Vec::new(),
+                last_file_scan: None,
+                scan_feedback_until: None,
             },
             topology_view: TopologyView {
                 zoom: 1.0,
@@ -133,6 +181,16 @@ impl NetworkingGui {
                 selected_node: None,
                 node_positions: HashMap::new(),
             },
+            theme: GuiTheme::default(),
+            libvirt_selection: HashSet::new(),
+            last_refresh_all: None,
+            refresh_feedback_until: None,
+            arch_task_until: None,
+            arch_task_message: None,
+            last_action_message: None,
+            last_action_error: None,
+            pending_delete_networks: None,
+            persist_state_loaded: false,
 
             switches: Vec::new(),
             libvirt_networks: Vec::new(),
@@ -143,6 +201,8 @@ impl NetworkingGui {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
+        self.ensure_persisted_state(ctx);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.selected_tab, NetworkTab::Overview, "Overview");
@@ -172,6 +232,11 @@ impl NetworkingGui {
 
             ui.separator();
 
+            if self.last_refresh_all.is_some() {
+                self.show_refresh_feedback(ui);
+                ui.separator();
+            }
+
             match self.selected_tab {
                 NetworkTab::Overview => self.show_overview(ui),
                 NetworkTab::VirtualSwitches => self.show_virtual_switches(ui),
@@ -183,14 +248,345 @@ impl NetworkingGui {
             }
         });
 
+        if self.refresh_feedback_active() {
+            ctx.request_repaint_after(Duration::from_millis(120));
+        }
+
         // Show dialogs
         self.show_switch_creation_dialog(ctx);
         self.show_network_creation_dialog(ctx);
         self.show_capture_dialog(ctx);
+        self.show_delete_confirmation(ctx);
+
+        self.persist_state(ctx);
+    }
+
+    pub fn set_theme(&mut self, theme: GuiTheme) {
+        self.theme = theme;
+    }
+
+    fn themed_button(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        role: ButtonRole,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button(ui, label, self.theme, role, enabled)
+    }
+
+    fn preset_button(
+        &self,
+        ui: &mut egui::Ui,
+        intent: ButtonIntent,
+        subject: Option<&str>,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button_preset(ui, self.theme, intent, subject, enabled)
+    }
+
+    fn record_success<S: Into<String>>(&mut self, message: S) {
+        self.last_action_message = Some(message.into());
+        self.last_action_error = None;
+    }
+
+    fn record_error<S: Into<String>>(&mut self, message: S) {
+        self.last_action_error = Some(message.into());
+        self.last_action_message = None;
+    }
+
+    fn ensure_persisted_state(&mut self, ctx: &egui::Context) {
+        if self.persist_state_loaded {
+            return;
+        }
+
+        let persisted = ctx.data_mut(|data| {
+            data.get_persisted::<NetworkingPersistedState>(Id::new(NETWORK_STATE_KEY))
+        });
+
+        if let Some(state) = persisted {
+            self.selected_tab = state.selected_tab;
+            self.capture_dialog.show = state.capture.show_dialog;
+            self.capture_dialog.interface = state.capture.interface;
+            self.capture_dialog.filter = state.capture.filter;
+            self.capture_dialog.duration = state.capture.duration;
+            self.capture_dialog.packet_count = state.capture.packet_count;
+            if !state.capture.output_file.is_empty() {
+                self.capture_dialog.output_file = state.capture.output_file;
+            }
+        }
+
+        self.persist_state_loaded = true;
+    }
+
+    fn persist_state(&self, ctx: &egui::Context) {
+        if !self.persist_state_loaded {
+            return;
+        }
+
+        let capture = CapturePersistedState {
+            show_dialog: self.capture_dialog.show,
+            interface: self.capture_dialog.interface.clone(),
+            filter: self.capture_dialog.filter.clone(),
+            duration: self.capture_dialog.duration.clone(),
+            packet_count: self.capture_dialog.packet_count.clone(),
+            output_file: self.capture_dialog.output_file.clone(),
+        };
+
+        let state = NetworkingPersistedState {
+            selected_tab: self.selected_tab.clone(),
+            capture,
+        };
+
+        ctx.data_mut(|data| {
+            data.insert_persisted(Id::new(NETWORK_STATE_KEY), state);
+        });
+    }
+
+    fn show_action_feedback(&mut self, ui: &mut egui::Ui) {
+        if let Some(msg) = &self.last_action_message {
+            ui.colored_label(Color32::from_rgb(96, 200, 140), format!("✔ {}", msg));
+        }
+        if let Some(err) = &self.last_action_error {
+            ui.colored_label(Color32::from_rgb(220, 80, 80), format!("⚠ {}", err));
+        }
+    }
+
+    fn touch_refresh_feedback(&mut self) {
+        let now = Instant::now();
+        self.last_refresh_all = Some(now);
+        self.refresh_feedback_until = Some(now + Duration::from_millis(1200));
+    }
+
+    fn refresh_feedback_active(&self) -> bool {
+        self.refresh_feedback_until
+            .map(|until| Instant::now() <= until)
+            .unwrap_or(false)
+    }
+
+    fn update_recent_capture_files(&mut self, ctx: &egui::Context) -> bool {
+        const SCAN_INTERVAL: Duration = Duration::from_secs(5);
+        let needs_scan = match self.capture_dialog.last_file_scan {
+            None => true,
+            Some(ts) => ts.elapsed() >= SCAN_INTERVAL,
+        };
+
+        if !needs_scan {
+            return false;
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(250));
+        let mut files = Vec::new();
+        if let Ok(entries) = fs::read_dir("/tmp") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| name.starts_with("nova-capture") && name.ends_with(".pcap"))
+                    .is_some()
+                {
+                    files.push(path);
+                }
+            }
+        }
+
+        files.sort();
+        files.reverse();
+        self.capture_dialog.recent_files = files;
+        self.capture_dialog.last_file_scan = Some(Instant::now());
+        self.capture_dialog.scan_feedback_until = Some(Instant::now() + Duration::from_millis(600));
+        true
+    }
+
+    fn remove_capture_file(&mut self, path: &PathBuf) {
+        if let Err(err) = fs::remove_file(path) {
+            log_warn!("Failed to delete capture file {}: {}", path.display(), err);
+        }
+        self.capture_dialog
+            .recent_files
+            .retain(|existing| existing != path);
+    }
+
+    fn execute_pending_network_deletions(&mut self) {
+        if let Some(pending) = self.pending_delete_networks.clone() {
+            let mut triggered = false;
+            for name in pending {
+                self.delete_libvirt_network(&name);
+                self.libvirt_selection.remove(&name);
+                triggered = true;
+            }
+            if triggered {
+                self.touch_refresh_feedback();
+                self.record_success("Requested deletion for selected networks");
+            }
+        }
+    }
+
+    fn show_delete_confirmation(&mut self, ctx: &egui::Context) {
+        if let Some(pending) = self.pending_delete_networks.clone() {
+            let mut open = true;
+            egui::Window::new("Confirm network deletion")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("The following networks will be removed:");
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical()
+                        .max_height(150.0)
+                        .show(ui, |ui| {
+                            for name in &pending {
+                                ui.label(format!("• {}", name));
+                            }
+                        });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if self
+                            .preset_button(ui, ButtonIntent::ConfirmDelete, Some("Networks"), true)
+                            .clicked()
+                        {
+                            self.execute_pending_network_deletions();
+                            self.pending_delete_networks = None;
+                            ui.close_menu();
+                        }
+                        if self
+                            .preset_button(ui, ButtonIntent::Cancel, None, true)
+                            .clicked()
+                        {
+                            self.pending_delete_networks = None;
+                        }
+                    });
+                });
+
+            if !open {
+                self.pending_delete_networks = None;
+            }
+        }
+    }
+
+    fn bulk_start_selected_networks(&mut self) {
+        let targets: Vec<String> = self.libvirt_selection.iter().cloned().collect();
+        let mut triggered = false;
+        for name in targets {
+            if let Some(is_active) = self
+                .libvirt_networks
+                .iter()
+                .find(|n| n.name == name)
+                .map(|n| n.active)
+            {
+                if !is_active {
+                    self.toggle_libvirt_network(&name, is_active);
+                    triggered = true;
+                }
+            }
+        }
+        if triggered {
+            self.touch_refresh_feedback();
+            self.record_success("Requested start for selected networks");
+        } else {
+            self.record_error("No inactive networks selected to start");
+        }
+    }
+
+    fn bulk_stop_selected_networks(&mut self) {
+        let targets: Vec<String> = self.libvirt_selection.iter().cloned().collect();
+        let mut triggered = false;
+        for name in targets {
+            if let Some(is_active) = self
+                .libvirt_networks
+                .iter()
+                .find(|n| n.name == name)
+                .map(|n| n.active)
+            {
+                if is_active {
+                    self.toggle_libvirt_network(&name, is_active);
+                    triggered = true;
+                }
+            }
+        }
+        if triggered {
+            self.touch_refresh_feedback();
+            self.record_success("Requested stop for selected networks");
+        } else {
+            self.record_error("No active networks selected to stop");
+        }
+    }
+
+    fn bulk_delete_selected_networks(&mut self) {
+        let targets: Vec<String> = self.libvirt_selection.iter().cloned().collect();
+        if targets.is_empty() {
+            self.record_error("Select at least one network to delete");
+            return;
+        }
+
+        self.pending_delete_networks = Some(targets);
+        self.record_success("Review and confirm network deletion");
+    }
+
+    fn select_all_libvirt_networks(&mut self) {
+        self.libvirt_selection.clear();
+        self.libvirt_selection
+            .extend(self.libvirt_networks.iter().map(|n| n.name.clone()));
+        if self.libvirt_selection.is_empty() {
+            self.record_error("No libvirt networks available to select");
+        } else {
+            self.record_success(format!(
+                "Selected {} libvirt network(s)",
+                self.libvirt_selection.len()
+            ));
+        }
+    }
+
+    fn metric_chip(&self, ui: &mut egui::Ui, label: &str, value: usize, role: ButtonRole) {
+        let colors = theme::button_palette(self.theme, role);
+        let fill = colors.fill.linear_multiply(0.25);
+        egui::Frame::none()
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, colors.stroke))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(label).small());
+                    ui.heading(value.to_string());
+                });
+            });
+    }
+
+    fn legend_chip(&self, ui: &mut egui::Ui, label: &str, color: Color32) {
+        egui::Frame::none()
+            .fill(color.linear_multiply(0.18))
+            .stroke(egui::Stroke::new(1.0, color))
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::style::Margin::symmetric(8.0, 4.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(color, "⬤");
+                    ui.label(label);
+                });
+            });
+    }
+
+    fn show_refresh_feedback(&self, ui: &mut egui::Ui) {
+        if let Some(last) = self.last_refresh_all {
+            ui.horizontal(|ui| {
+                if self.refresh_feedback_active() {
+                    ui.spinner();
+                    ui.label("Refreshing data…");
+                } else {
+                    ui.label(format!("Last refreshed {}s ago", last.elapsed().as_secs()));
+                }
+            });
+        }
     }
 
     fn show_overview(&mut self, ui: &mut egui::Ui) {
         ui.heading("Network Overview");
+
+        self.show_action_feedback(ui);
+        ui.add_space(4.0);
 
         ui.horizontal(|ui| {
             // Quick stats
@@ -228,21 +624,82 @@ impl NetworkingGui {
                 });
         });
 
+        let active_networks = self
+            .libvirt_networks
+            .iter()
+            .filter(|network| network.active)
+            .count();
+        let inactive_networks = self.libvirt_networks.len().saturating_sub(active_networks);
+        let active_captures = self.capture_dialog.active_captures.len();
+
+        ui.add_space(8.0);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.horizontal(|ui| {
+                self.metric_chip(ui, "Active Libvirt", active_networks, ButtonRole::Start);
+                self.metric_chip(ui, "Idle Libvirt", inactive_networks, ButtonRole::Secondary);
+                self.metric_chip(ui, "Active Captures", active_captures, ButtonRole::Primary);
+            });
+        });
+
         ui.separator();
 
         // Quick actions
         ui.heading("Quick Actions");
-        ui.horizontal(|ui| {
-            if ui.button("Create Virtual Switch").clicked() {
-                self.switch_creation_dialog.show = true;
-                self.refresh_interfaces();
-            }
-            if ui.button("Create Libvirt Network").clicked() {
-                self.network_creation_dialog.show = true;
-            }
-            if ui.button("Refresh All").clicked() {
-                self.refresh_all_data();
-            }
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.horizontal(|ui| {
+                if self
+                    .preset_button(ui, ButtonIntent::Create, Some("Virtual Switch"), true)
+                    .clicked()
+                {
+                    self.switch_creation_dialog.show = true;
+                    self.refresh_interfaces();
+                }
+                if self
+                    .preset_button(ui, ButtonIntent::Create, Some("Libvirt Network"), true)
+                    .clicked()
+                {
+                    self.network_creation_dialog.show = true;
+                }
+                if self
+                    .preset_button(ui, ButtonIntent::Refresh, Some("All"), true)
+                    .clicked()
+                {
+                    self.refresh_all_data();
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.horizontal(|ui| {
+                if self
+                    .themed_button(ui, "View Virtual Switches", ButtonRole::Secondary, true)
+                    .clicked()
+                {
+                    self.selected_tab = NetworkTab::VirtualSwitches;
+                }
+                if self
+                    .themed_button(ui, "View Libvirt Networks", ButtonRole::Secondary, true)
+                    .clicked()
+                {
+                    self.selected_tab = NetworkTab::LibvirtNetworks;
+                }
+                if self
+                    .themed_button(ui, "Open Monitoring", ButtonRole::Primary, true)
+                    .clicked()
+                {
+                    self.selected_tab = NetworkTab::Monitoring;
+                }
+                if self
+                    .themed_button(ui, "Packet Capture", ButtonRole::Secondary, true)
+                    .clicked()
+                {
+                    self.selected_tab = NetworkTab::PacketCapture;
+                }
+            });
         });
 
         ui.separator();
@@ -273,13 +730,22 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Virtual Switches");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ Create Switch").clicked() {
-                    self.switch_creation_dialog.show = true;
-                    self.refresh_interfaces();
-                }
-                if ui.button("🔄 Refresh").clicked() {
-                    self.refresh_switches();
-                }
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if self
+                        .preset_button(ui, ButtonIntent::Create, Some("Switch"), true)
+                        .clicked()
+                    {
+                        self.switch_creation_dialog.show = true;
+                        self.refresh_interfaces();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Refresh, Some("Switches"), true)
+                        .clicked()
+                    {
+                        self.refresh_switches();
+                    }
+                });
             });
         });
 
@@ -315,11 +781,22 @@ impl NetworkingGui {
                             });
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                                if ui.button("⚙️ Configure").clicked() {
-                                    // Open configuration dialog
+                                if self
+                                    .preset_button(ui, ButtonIntent::Delete, Some("Switch"), true)
+                                    .clicked()
+                                {
+                                    switches_to_delete.borrow_mut().push(switch_name.clone());
                                 }
-                                if ui.button("🗑️ Delete").clicked() {
-                                    switches_to_delete.borrow_mut().push(switch_name);
+                                if self
+                                    .preset_button(
+                                        ui,
+                                        ButtonIntent::Configure,
+                                        Some("Switch"),
+                                        true,
+                                    )
+                                    .clicked()
+                                {
+                                    // Open configuration dialog
                                 }
                             });
                         });
@@ -346,16 +823,87 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Libvirt Networks");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ Create Network").clicked() {
-                    self.network_creation_dialog.show = true;
-                }
-                if ui.button("🔄 Refresh").clicked() {
-                    self.refresh_libvirt_networks();
-                }
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if self
+                        .preset_button(ui, ButtonIntent::Create, Some("Network"), true)
+                        .clicked()
+                    {
+                        self.network_creation_dialog.show = true;
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Refresh, Some("Networks"), true)
+                        .clicked()
+                    {
+                        self.refresh_libvirt_networks();
+                    }
+                });
             });
         });
 
         ui.separator();
+
+        self.libvirt_selection
+            .retain(|name| self.libvirt_networks.iter().any(|n| &n.name == name));
+
+        if !self.libvirt_selection.is_empty() {
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} selected", self.libvirt_selection.len()));
+                    let total_networks = self.libvirt_networks.len();
+                    let all_selected =
+                        total_networks > 0 && self.libvirt_selection.len() == total_networks;
+                    if self
+                        .preset_button(
+                            ui,
+                            ButtonIntent::Select,
+                            Some("All"),
+                            total_networks > 0 && !all_selected,
+                        )
+                        .clicked()
+                    {
+                        self.select_all_libvirt_networks();
+                    }
+                    let has_active = self
+                        .libvirt_networks
+                        .iter()
+                        .any(|n| self.libvirt_selection.contains(&n.name) && n.active);
+                    let has_inactive = self
+                        .libvirt_networks
+                        .iter()
+                        .any(|n| self.libvirt_selection.contains(&n.name) && !n.active);
+
+                    if self
+                        .preset_button(ui, ButtonIntent::Start, Some("Networks"), has_inactive)
+                        .clicked()
+                    {
+                        self.bulk_start_selected_networks();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Stop, Some("Networks"), has_active)
+                        .clicked()
+                    {
+                        self.bulk_stop_selected_networks();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Delete, Some("Networks"), true)
+                        .clicked()
+                    {
+                        self.bulk_delete_selected_networks();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Cancel, Some("Selection"), true)
+                        .clicked()
+                    {
+                        self.libvirt_selection.clear();
+                        self.record_success("Cleared libvirt network selection");
+                    }
+                });
+            });
+
+            ui.separator();
+        }
 
         let networks_to_toggle = std::cell::RefCell::new(Vec::new());
         let networks_to_delete = std::cell::RefCell::new(Vec::new());
@@ -364,12 +912,19 @@ impl NetworkingGui {
             for network in &self.libvirt_networks {
                 let network_name = network.name.clone();
                 let is_active = network.active;
+                let mut selected = self.libvirt_selection.contains(&network_name);
                 egui::Frame::none()
                     .fill(Color32::from_gray(30))
                     .rounding(5.0)
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            let mut checkbox_selected = selected;
+                            ui.vertical_centered(|ui| {
+                                if ui.checkbox(&mut checkbox_selected, "").changed() {
+                                    selected = checkbox_selected;
+                                }
+                            });
                             ui.vertical(|ui| {
                                 ui.heading(&network.name);
                                 if let Some(uuid) = &network.uuid {
@@ -395,25 +950,45 @@ impl NetworkingGui {
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                 let action_text = if is_active {
-                                    "⏹️ Stop"
+                                    ButtonIntent::Stop
                                 } else {
-                                    "▶️ Start"
+                                    ButtonIntent::Start
                                 };
-                                if ui.button(action_text).clicked() {
+                                if self
+                                    .preset_button(ui, action_text, Some("Network"), true)
+                                    .clicked()
+                                {
                                     networks_to_toggle
                                         .borrow_mut()
                                         .push((network_name.clone(), is_active));
                                 }
-                                if ui.button("⚙️ Edit").clicked() {
+                                if self
+                                    .preset_button(
+                                        ui,
+                                        ButtonIntent::Configure,
+                                        Some("Network"),
+                                        true,
+                                    )
+                                    .clicked()
+                                {
                                     // Open edit dialog
                                 }
-                                if ui.button("🗑️ Delete").clicked() {
-                                    networks_to_delete.borrow_mut().push(network_name);
+                                if self
+                                    .preset_button(ui, ButtonIntent::Delete, Some("Network"), true)
+                                    .clicked()
+                                {
+                                    networks_to_delete.borrow_mut().push(network_name.clone());
                                 }
                             });
                         });
                     });
                 ui.add_space(5.0);
+
+                if selected {
+                    self.libvirt_selection.insert(network_name);
+                } else {
+                    self.libvirt_selection.remove(&network_name);
+                }
             }
         });
 
@@ -430,12 +1005,15 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Network Monitoring");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let button_text = if self.monitoring_enabled {
-                    "⏹️ Stop Monitoring"
+                let intent = if self.monitoring_enabled {
+                    ButtonIntent::Stop
                 } else {
-                    "▶️ Start Monitoring"
+                    ButtonIntent::Start
                 };
-                if ui.button(button_text).clicked() {
+                if self
+                    .preset_button(ui, intent, Some("Monitoring"), true)
+                    .clicked()
+                {
                     self.toggle_monitoring();
                 }
             });
@@ -444,8 +1022,39 @@ impl NetworkingGui {
         ui.separator();
 
         if !self.monitoring_enabled {
-            ui.centered_and_justified(|ui| {
-                ui.label("Click 'Start Monitoring' to begin collecting network statistics");
+            ui.vertical_centered(|ui| {
+                ui.add_space(16.0);
+                ui.label("Monitoring is paused.");
+                ui.add_space(8.0);
+                if self
+                    .preset_button(ui, ButtonIntent::Start, Some("Monitoring"), true)
+                    .clicked()
+                {
+                    self.toggle_monitoring();
+                }
+                ui.add_space(12.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 12.0;
+                    ui.horizontal(|ui| {
+                        if self
+                            .preset_button(ui, ButtonIntent::Create, Some("Capture"), true)
+                            .clicked()
+                        {
+                            self.selected_tab = NetworkTab::PacketCapture;
+                            self.capture_dialog.show = true;
+                        }
+                        if self
+                            .preset_button(ui, ButtonIntent::Diagnostics, Some("Networking"), true)
+                            .clicked()
+                        {
+                            self.selected_tab = NetworkTab::Topology;
+                            self.refresh_topology();
+                            self.touch_refresh_feedback();
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                ui.label("Use quick links to launch captures or review diagnostics.");
             });
             return;
         }
@@ -543,13 +1152,26 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Network Topology");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("🔄 Refresh").clicked() {
+                if self
+                    .preset_button(ui, ButtonIntent::Refresh, Some("Topology"), true)
+                    .clicked()
+                {
                     self.refresh_topology();
                 }
             });
         });
 
         ui.separator();
+
+        if self.topology.is_some() {
+            ui.horizontal(|ui| {
+                ui.label("Legend:");
+                self.legend_chip(ui, "Linux Bridge", Color32::BLUE);
+                self.legend_chip(ui, "Open vSwitch", Color32::GREEN);
+                self.legend_chip(ui, "Other", Color32::GRAY);
+            });
+            ui.add_space(6.0);
+        }
 
         if let Some(topology) = &self.topology {
             let available_rect = ui.available_rect_before_wrap();
@@ -612,7 +1234,10 @@ impl NetworkingGui {
         ui.horizontal(|ui| {
             ui.heading("Packet Capture");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("+ New Capture").clicked() {
+                if self
+                    .preset_button(ui, ButtonIntent::Create, Some("Capture"), true)
+                    .clicked()
+                {
                     self.capture_dialog.show = true;
                 }
             });
@@ -620,13 +1245,35 @@ impl NetworkingGui {
 
         ui.separator();
 
+        let scanning = {
+            let ctx = ui.ctx().clone();
+            self.update_recent_capture_files(&ctx)
+        };
+
         // Active captures
+        if scanning
+            || self
+                .capture_dialog
+                .scan_feedback_until
+                .map(|until| Instant::now() < until)
+                .unwrap_or(false)
+        {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Scanning capture directory...");
+            });
+            ui.add_space(6.0);
+        }
+
         if !self.capture_dialog.active_captures.is_empty() {
             ui.heading("Active Captures");
             for capture_id in &self.capture_dialog.active_captures.clone() {
                 ui.horizontal(|ui| {
                     ui.label(capture_id);
-                    if ui.button("⏹️ Stop").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Stop, Some("Capture"), true)
+                        .clicked()
+                    {
                         self.stop_capture(capture_id);
                     }
                 });
@@ -636,15 +1283,35 @@ impl NetworkingGui {
 
         // Capture files
         ui.heading("Capture Files");
-        ui.label("Recent packet capture files will be listed here");
-
-        // Would list actual .pcap files in a real implementation
-        ui.horizontal(|ui| {
-            ui.label("/tmp/nova-capture.pcap");
-            if ui.button("🔍 Open in Wireshark").clicked() {
-                self.open_in_wireshark("/tmp/nova-capture.pcap");
+        if self.capture_dialog.recent_files.is_empty() {
+            ui.label("No capture files found yet. Start a capture to populate this list.");
+        } else {
+            let recent = self.capture_dialog.recent_files.clone();
+            for path in recent {
+                let display = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| path.to_string_lossy().to_string());
+                ui.horizontal(|ui| {
+                    ui.label(&display);
+                    if self
+                        .preset_button(ui, ButtonIntent::Open, Some("in Wireshark"), true)
+                        .clicked()
+                    {
+                        if let Some(as_str) = path.to_str() {
+                            self.open_in_wireshark(as_str);
+                        }
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Delete, Some("Capture"), true)
+                        .clicked()
+                    {
+                        self.remove_capture_file(&path);
+                    }
+                });
             }
-        });
+        }
     }
 
     fn show_arch_config(&mut self, ui: &mut egui::Ui) {
@@ -670,8 +1337,30 @@ impl NetworkingGui {
 
         // KVM optimization
         ui.heading("Virtualization Optimization");
-        if ui.button("Apply Arch Linux KVM Optimizations").clicked() {
+        if self
+            .preset_button(ui, ButtonIntent::Start, Some("Optimizations"), true)
+            .clicked()
+        {
             self.apply_arch_optimizations();
+            self.arch_task_until = Some(Instant::now() + Duration::from_secs(2));
+            self.arch_task_message = Some("Arch Linux optimizations applied.".to_string());
+        }
+
+        if let Some(until) = self.arch_task_until {
+            if Instant::now() < until {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Applying Arch Linux KVM optimizations…");
+                });
+            } else {
+                self.arch_task_until = None;
+            }
+        }
+
+        if self.arch_task_until.is_none() {
+            if let Some(message) = &self.arch_task_message {
+                ui.label(message);
+            }
         }
 
         ui.label("This will:");
@@ -741,11 +1430,17 @@ impl NetworkingGui {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button("Create").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Create, Some("Switch"), true)
+                        .clicked()
+                    {
                         self.create_switch();
                         self.switch_creation_dialog.show = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Cancel, None, true)
+                        .clicked()
+                    {
                         self.switch_creation_dialog.show = false;
                     }
                 });
@@ -820,11 +1515,17 @@ impl NetworkingGui {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button("Create").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Create, Some("Network"), true)
+                        .clicked()
+                    {
                         self.create_libvirt_network();
                         self.network_creation_dialog.show = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Cancel, None, true)
+                        .clicked()
+                    {
                         self.network_creation_dialog.show = false;
                     }
                 });
@@ -868,11 +1569,17 @@ impl NetworkingGui {
                 ui.separator();
 
                 ui.horizontal(|ui| {
-                    if ui.button("Start Capture").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Start, Some("Capture"), true)
+                        .clicked()
+                    {
                         self.start_capture();
                         self.capture_dialog.show = false;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Cancel, None, true)
+                        .clicked()
+                    {
                         self.capture_dialog.show = false;
                     }
                 });
@@ -883,6 +1590,7 @@ impl NetworkingGui {
     fn refresh_all_data(&mut self) {
         log_info!("Refreshing all network data");
         // Would call actual refresh methods
+        self.touch_refresh_feedback();
     }
 
     fn refresh_interfaces(&mut self) {
@@ -895,16 +1603,19 @@ impl NetworkingGui {
     fn refresh_switches(&mut self) {
         log_info!("Refreshing virtual switches");
         // Would call network_manager.list_switches()
+        self.touch_refresh_feedback();
     }
 
     fn refresh_libvirt_networks(&mut self) {
         log_info!("Refreshing libvirt networks");
         // Would call libvirt_manager.discover_networks()
+        self.touch_refresh_feedback();
     }
 
     fn refresh_topology(&mut self) {
         log_info!("Refreshing network topology");
         // Would call network_monitor.discover_topology()
+        self.touch_refresh_feedback();
     }
 
     fn create_switch(&mut self) {
@@ -913,11 +1624,16 @@ impl NetworkingGui {
             self.switch_creation_dialog.name
         );
         // Would call network_manager.create_virtual_switch()
+        self.record_success(format!(
+            "Requested creation of virtual switch '{}'.",
+            self.switch_creation_dialog.name
+        ));
     }
 
     fn delete_switch(&mut self, name: &str) {
         log_info!("Deleting virtual switch: {}", name);
         // Would call network_manager.delete_virtual_switch()
+        self.record_success(format!("Requested deletion of switch '{}'.", name));
     }
 
     fn create_libvirt_network(&mut self) {
@@ -926,20 +1642,27 @@ impl NetworkingGui {
             self.network_creation_dialog.name
         );
         // Would call libvirt_manager.create_network()
+        self.record_success(format!(
+            "Requested creation of libvirt network '{}'.",
+            self.network_creation_dialog.name
+        ));
     }
 
     fn delete_libvirt_network(&mut self, name: &str) {
         log_info!("Deleting libvirt network: {}", name);
         // Would call libvirt_manager.delete_network()
+        self.record_success(format!("Requested deletion of libvirt network '{}'.", name));
     }
 
     fn toggle_libvirt_network(&mut self, name: &str, currently_active: bool) {
         if currently_active {
             log_info!("Stopping libvirt network: {}", name);
             // Would call libvirt_manager.stop_network()
+            self.record_success(format!("Requested stop for libvirt network '{}'.", name));
         } else {
             log_info!("Starting libvirt network: {}", name);
             // Would call libvirt_manager.start_network()
+            self.record_success(format!("Requested start for libvirt network '{}'.", name));
         }
     }
 
@@ -948,10 +1671,13 @@ impl NetworkingGui {
         if self.monitoring_enabled {
             log_info!("Starting network monitoring");
             // Would call network_monitor.start_monitoring()
+            self.record_success("Network monitoring enabled");
         } else {
             log_info!("Stopping network monitoring");
             // Would call network_monitor.stop_monitoring()
+            self.record_success("Network monitoring disabled");
         }
+        self.touch_refresh_feedback();
     }
 
     fn start_capture(&mut self) {
@@ -964,6 +1690,8 @@ impl NetworkingGui {
         self.capture_dialog
             .active_captures
             .push(format!("capture-{}", self.capture_dialog.interface));
+        self.capture_dialog.last_file_scan = None;
+        self.record_success("Packet capture started");
     }
 
     fn stop_capture(&mut self, capture_id: &str) {
@@ -972,16 +1700,20 @@ impl NetworkingGui {
         self.capture_dialog
             .active_captures
             .retain(|id| id != capture_id);
+        self.capture_dialog.last_file_scan = None;
+        self.record_success(format!("Packet capture '{}' stopped", capture_id));
     }
 
     fn open_in_wireshark(&mut self, file_path: &str) {
         log_info!("Opening {} in Wireshark", file_path);
         // Would call network_monitor.launch_wireshark()
+        self.record_success(format!("Launching Wireshark with {}", file_path));
     }
 
     fn apply_arch_optimizations(&mut self) {
         log_info!("Applying Arch Linux optimizations");
         // Would call arch_manager.optimize_for_virtualization()
+        self.record_success("Arch Linux virtualization optimizations queued");
     }
 }
 

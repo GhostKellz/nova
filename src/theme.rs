@@ -1,4 +1,4 @@
-use egui::Color32;
+use egui::{self, Color32};
 
 // ===== TOKYO NIGHT - NIGHT VARIANT (Default) =====
 // The classic Tokyo Night with deep blue backgrounds
@@ -164,6 +164,38 @@ impl Default for GuiTheme {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonRole {
+    Primary,
+    Start,
+    Stop,
+    Restart,
+    Secondary,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ButtonPalette {
+    pub fill: Color32,
+    pub hover: Color32,
+    pub stroke: Color32,
+    pub text: Color32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ButtonOptions {
+    pub min_width: f32,
+    pub min_height: f32,
+}
+
+impl Default for ButtonOptions {
+    fn default() -> Self {
+        Self {
+            min_width: 120.0,
+            min_height: 30.0,
+        }
+    }
+}
+
 pub const DEFAULT_THEME_NAME: &str = "tokyo-night-storm";
 
 pub const ALL_THEMES: [GuiTheme; 6] = [
@@ -312,6 +344,499 @@ fn configure_tokyo_night_storm(ctx: &egui::Context) {
     apply_modern_theme_style(&mut visuals, &mut style, ctx);
 }
 
+fn tokyo_button_palette(variant: TokyoNightVariant, role: ButtonRole) -> ButtonPalette {
+    match variant {
+        TokyoNightVariant::Night => match role {
+            ButtonRole::Primary => ButtonPalette {
+                fill: TN_NIGHT_BLUE7,
+                hover: TN_NIGHT_CYAN,
+                stroke: TN_NIGHT_BLUE5,
+                text: TN_NIGHT_TERMINAL_BLACK,
+            },
+            ButtonRole::Start => ButtonPalette {
+                fill: TN_NIGHT_GREEN,
+                hover: TN_NIGHT_GREEN1,
+                stroke: TN_NIGHT_BLUE1,
+                text: TN_NIGHT_TERMINAL_BLACK,
+            },
+            ButtonRole::Stop => ButtonPalette {
+                fill: TN_NIGHT_RED,
+                hover: TN_NIGHT_RED1,
+                stroke: TN_NIGHT_BLUE1,
+                text: TN_NIGHT_TERMINAL_BLACK,
+            },
+            ButtonRole::Restart => ButtonPalette {
+                fill: TN_NIGHT_ORANGE,
+                hover: TN_NIGHT_YELLOW,
+                stroke: TN_NIGHT_BLUE1,
+                text: TN_NIGHT_TERMINAL_BLACK,
+            },
+            ButtonRole::Secondary => ButtonPalette {
+                fill: TN_NIGHT_BG_HIGHLIGHT,
+                hover: TN_NIGHT_BLUE0,
+                stroke: TN_NIGHT_DARK3,
+                text: TN_NIGHT_FG,
+            },
+        },
+        TokyoNightVariant::Storm => match role {
+            ButtonRole::Primary => ButtonPalette {
+                fill: TN_STORM_BLUE7,
+                hover: TN_STORM_CYAN,
+                stroke: TN_STORM_BLUE5,
+                text: TN_STORM_BG_DARK,
+            },
+            ButtonRole::Start => ButtonPalette {
+                fill: TN_STORM_GREEN,
+                hover: TN_STORM_GREEN1,
+                stroke: TN_STORM_BLUE1,
+                text: TN_STORM_BG_DARK,
+            },
+            ButtonRole::Stop => ButtonPalette {
+                fill: TN_STORM_RED,
+                hover: TN_STORM_RED1,
+                stroke: TN_STORM_BLUE1,
+                text: TN_STORM_BG_DARK,
+            },
+            ButtonRole::Restart => ButtonPalette {
+                fill: TN_STORM_ORANGE,
+                hover: TN_STORM_YELLOW,
+                stroke: TN_STORM_BLUE1,
+                text: TN_STORM_BG_DARK,
+            },
+            ButtonRole::Secondary => ButtonPalette {
+                fill: TN_STORM_BG_HIGHLIGHT,
+                hover: TN_STORM_BLUE0,
+                stroke: TN_STORM_DARK3,
+                text: TN_STORM_FG,
+            },
+        },
+        TokyoNightVariant::Moon => match role {
+            ButtonRole::Primary => ButtonPalette {
+                fill: TN_MOON_BLUE7,
+                hover: TN_MOON_CYAN,
+                stroke: TN_MOON_BLUE5,
+                text: TN_MOON_TERMINAL_BLACK,
+            },
+            ButtonRole::Start => ButtonPalette {
+                fill: TN_MOON_GREEN,
+                hover: TN_MOON_GREEN1,
+                stroke: TN_MOON_BLUE1,
+                text: TN_MOON_TERMINAL_BLACK,
+            },
+            ButtonRole::Stop => ButtonPalette {
+                fill: TN_MOON_RED,
+                hover: TN_MOON_RED1,
+                stroke: TN_MOON_BLUE1,
+                text: TN_MOON_TERMINAL_BLACK,
+            },
+            ButtonRole::Restart => ButtonPalette {
+                fill: TN_MOON_ORANGE,
+                hover: TN_MOON_YELLOW,
+                stroke: TN_MOON_BLUE1,
+                text: TN_MOON_TERMINAL_BLACK,
+            },
+            ButtonRole::Secondary => ButtonPalette {
+                fill: TN_MOON_BG_HIGHLIGHT,
+                hover: TN_MOON_BLUE0,
+                stroke: TN_MOON_DARK3,
+                text: TN_MOON_FG,
+            },
+        },
+    }
+}
+
+fn catppuccin_button_palette(role: ButtonRole) -> ButtonPalette {
+    match role {
+        ButtonRole::Primary => ButtonPalette {
+            fill: CAT_TEAL,
+            hover: CAT_SKY,
+            stroke: CAT_TEAL,
+            text: CAT_BG_DARK,
+        },
+        ButtonRole::Start => ButtonPalette {
+            fill: CAT_GREEN,
+            hover: CAT_TEAL,
+            stroke: CAT_TEAL,
+            text: CAT_BG_DARK,
+        },
+        ButtonRole::Stop => ButtonPalette {
+            fill: CAT_RED,
+            hover: CAT_PEACH,
+            stroke: CAT_TEAL,
+            text: CAT_BG_DARK,
+        },
+        ButtonRole::Restart => ButtonPalette {
+            fill: CAT_PEACH,
+            hover: CAT_YELLOW,
+            stroke: CAT_TEAL,
+            text: CAT_BG_DARK,
+        },
+        ButtonRole::Secondary => ButtonPalette {
+            fill: CAT_BG_HIGHLIGHT,
+            hover: CAT_TEAL,
+            stroke: CAT_TEAL,
+            text: CAT_FG,
+        },
+    }
+}
+
+fn dracula_button_palette(role: ButtonRole) -> ButtonPalette {
+    match role {
+        ButtonRole::Primary => ButtonPalette {
+            fill: DRACULA_PINK,
+            hover: DRACULA_CYAN,
+            stroke: DRACULA_CYAN,
+            text: DRACULA_BG,
+        },
+        ButtonRole::Start => ButtonPalette {
+            fill: DRACULA_GREEN,
+            hover: DRACULA_CYAN,
+            stroke: DRACULA_CYAN,
+            text: DRACULA_BG,
+        },
+        ButtonRole::Stop => ButtonPalette {
+            fill: DRACULA_RED,
+            hover: DRACULA_ORANGE,
+            stroke: DRACULA_CYAN,
+            text: DRACULA_BG,
+        },
+        ButtonRole::Restart => ButtonPalette {
+            fill: DRACULA_ORANGE,
+            hover: DRACULA_YELLOW,
+            stroke: DRACULA_CYAN,
+            text: DRACULA_BG,
+        },
+        ButtonRole::Secondary => ButtonPalette {
+            fill: DRACULA_BG_HIGHLIGHT,
+            hover: DRACULA_CYAN,
+            stroke: DRACULA_CYAN,
+            text: DRACULA_FG,
+        },
+    }
+}
+
+fn ocean_button_palette(role: ButtonRole) -> ButtonPalette {
+    match role {
+        ButtonRole::Primary => ButtonPalette {
+            fill: ACTION_PRIMARY,
+            hover: ACTION_PRIMARY_HOVER,
+            stroke: ACTION_PRIMARY,
+            text: BG_MAIN,
+        },
+        ButtonRole::Start => ButtonPalette {
+            fill: ACTION_SUCCESS,
+            hover: GRAPH_NETWORK,
+            stroke: ACTION_PRIMARY,
+            text: BG_MAIN,
+        },
+        ButtonRole::Stop => ButtonPalette {
+            fill: ACTION_DANGER,
+            hover: STATUS_STOPPED,
+            stroke: ACTION_PRIMARY,
+            text: BG_MAIN,
+        },
+        ButtonRole::Restart => ButtonPalette {
+            fill: STATUS_WARNING,
+            hover: STATUS_SUSPENDED,
+            stroke: ACTION_PRIMARY,
+            text: BG_MAIN,
+        },
+        ButtonRole::Secondary => ButtonPalette {
+            fill: BG_SECONDARY,
+            hover: ACTION_PRIMARY,
+            stroke: ACTION_PRIMARY,
+            text: TEXT_PRIMARY,
+        },
+    }
+}
+
+pub fn button_palette(theme: GuiTheme, role: ButtonRole) -> ButtonPalette {
+    match theme {
+        GuiTheme::TokyoNight(variant) => tokyo_button_palette(variant, role),
+        GuiTheme::CatppuccinMocha => catppuccin_button_palette(role),
+        GuiTheme::Dracula => dracula_button_palette(role),
+        GuiTheme::Ocean => ocean_button_palette(role),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonIntent {
+    Create,
+    Refresh,
+    Delete,
+    Configure,
+    Start,
+    Stop,
+    Open,
+    Cancel,
+    Diagnostics,
+    Load,
+    Assign,
+    Release,
+    Select,
+    Bind,
+    Unbind,
+    Preferences,
+    Launch,
+    ConfirmDelete,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ButtonIntentSpec {
+    icon: &'static str,
+    verb: &'static str,
+    tooltip_prefix: &'static str,
+    role: ButtonRole,
+    min_width: f32,
+}
+
+impl ButtonIntentSpec {
+    fn label(&self, subject: Option<&str>) -> String {
+        let core = match subject {
+            Some(value) if !value.is_empty() => format!("{} {}", self.verb, value),
+            _ => self.verb.to_string(),
+        };
+
+        if self.icon.is_empty() {
+            core
+        } else {
+            format!("{} {}", self.icon, core)
+        }
+    }
+
+    fn tooltip(&self, subject: Option<&str>) -> String {
+        match (self.tooltip_prefix, subject) {
+            (prefix, Some(value)) if !prefix.is_empty() => {
+                format!("{} {}", prefix, value)
+            }
+            (_, Some(value)) => format!("{} {}", self.verb, value),
+            (prefix, None) if !prefix.is_empty() => prefix.to_string(),
+            _ => self.verb.to_string(),
+        }
+    }
+}
+
+fn intent_spec(intent: ButtonIntent) -> ButtonIntentSpec {
+    match intent {
+        ButtonIntent::Create => ButtonIntentSpec {
+            icon: "➕",
+            verb: "Create",
+            tooltip_prefix: "Create new",
+            role: ButtonRole::Primary,
+            min_width: 150.0,
+        },
+        ButtonIntent::Refresh => ButtonIntentSpec {
+            icon: "🔄",
+            verb: "Refresh",
+            tooltip_prefix: "Refresh",
+            role: ButtonRole::Secondary,
+            min_width: 150.0,
+        },
+        ButtonIntent::Delete => ButtonIntentSpec {
+            icon: "🗑️",
+            verb: "Delete",
+            tooltip_prefix: "Permanently remove",
+            role: ButtonRole::Stop,
+            min_width: 150.0,
+        },
+        ButtonIntent::Configure => ButtonIntentSpec {
+            icon: "⚙️",
+            verb: "Configure",
+            tooltip_prefix: "Configure",
+            role: ButtonRole::Secondary,
+            min_width: 160.0,
+        },
+        ButtonIntent::Start => ButtonIntentSpec {
+            icon: "▶️",
+            verb: "Start",
+            tooltip_prefix: "Start",
+            role: ButtonRole::Start,
+            min_width: 150.0,
+        },
+        ButtonIntent::Stop => ButtonIntentSpec {
+            icon: "⏹️",
+            verb: "Stop",
+            tooltip_prefix: "Stop",
+            role: ButtonRole::Stop,
+            min_width: 150.0,
+        },
+        ButtonIntent::Open => ButtonIntentSpec {
+            icon: "🔍",
+            verb: "Open",
+            tooltip_prefix: "Open",
+            role: ButtonRole::Secondary,
+            min_width: 150.0,
+        },
+        ButtonIntent::Cancel => ButtonIntentSpec {
+            icon: "✖",
+            verb: "Cancel",
+            tooltip_prefix: "Cancel",
+            role: ButtonRole::Secondary,
+            min_width: 130.0,
+        },
+        ButtonIntent::Diagnostics => ButtonIntentSpec {
+            icon: "🩺",
+            verb: "Run diagnostics",
+            tooltip_prefix: "Run diagnostics for",
+            role: ButtonRole::Secondary,
+            min_width: 190.0,
+        },
+        ButtonIntent::Load => ButtonIntentSpec {
+            icon: "📦",
+            verb: "Load",
+            tooltip_prefix: "Load",
+            role: ButtonRole::Primary,
+            min_width: 160.0,
+        },
+        ButtonIntent::Assign => ButtonIntentSpec {
+            icon: "🎯",
+            verb: "Assign",
+            tooltip_prefix: "Assign",
+            role: ButtonRole::Primary,
+            min_width: 170.0,
+        },
+        ButtonIntent::Release => ButtonIntentSpec {
+            icon: "🔓",
+            verb: "Release",
+            tooltip_prefix: "Release",
+            role: ButtonRole::Secondary,
+            min_width: 150.0,
+        },
+        ButtonIntent::Bind => ButtonIntentSpec {
+            icon: "🔗",
+            verb: "Bind",
+            tooltip_prefix: "Bind",
+            role: ButtonRole::Primary,
+            min_width: 170.0,
+        },
+        ButtonIntent::Unbind => ButtonIntentSpec {
+            icon: "✂",
+            verb: "Unbind",
+            tooltip_prefix: "Unbind",
+            role: ButtonRole::Stop,
+            min_width: 170.0,
+        },
+        ButtonIntent::Select => ButtonIntentSpec {
+            icon: "☑",
+            verb: "Select",
+            tooltip_prefix: "Select",
+            role: ButtonRole::Secondary,
+            min_width: 140.0,
+        },
+        ButtonIntent::Preferences => ButtonIntentSpec {
+            icon: "⚙️",
+            verb: "Preferences",
+            tooltip_prefix: "Open preferences",
+            role: ButtonRole::Secondary,
+            min_width: 180.0,
+        },
+        ButtonIntent::Launch => ButtonIntentSpec {
+            icon: "🖥️",
+            verb: "Open",
+            tooltip_prefix: "Open",
+            role: ButtonRole::Secondary,
+            min_width: 180.0,
+        },
+        ButtonIntent::ConfirmDelete => ButtonIntentSpec {
+            icon: "⚠",
+            verb: "Confirm delete",
+            tooltip_prefix: "Confirm deletion for",
+            role: ButtonRole::Stop,
+            min_width: 200.0,
+        },
+    }
+}
+
+pub fn themed_button_preset(
+    ui: &mut egui::Ui,
+    theme: GuiTheme,
+    intent: ButtonIntent,
+    subject: Option<&str>,
+    enabled: bool,
+) -> egui::Response {
+    let spec = intent_spec(intent);
+    let label = spec.label(subject);
+    let options = ButtonOptions {
+        min_width: spec.min_width,
+        ..ButtonOptions::default()
+    };
+
+    let response = themed_button_with_options(ui, &label, theme, spec.role, enabled, options);
+    let tooltip = spec.tooltip(subject);
+
+    if enabled {
+        response.on_hover_text(tooltip)
+    } else {
+        response.on_disabled_hover_text(tooltip)
+    }
+}
+
+pub fn themed_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    theme: GuiTheme,
+    role: ButtonRole,
+    enabled: bool,
+) -> egui::Response {
+    let options = ButtonOptions::default();
+    themed_button_with_options(ui, label, theme, role, enabled, options)
+}
+
+pub fn themed_button_with_options(
+    ui: &mut egui::Ui,
+    label: &str,
+    theme: GuiTheme,
+    role: ButtonRole,
+    enabled: bool,
+    options: ButtonOptions,
+) -> egui::Response {
+    let palette = button_palette(theme, role);
+    let rounding = egui::Rounding::same(6.0);
+
+    let (fill, hover, stroke, text) = if enabled {
+        (palette.fill, palette.hover, palette.stroke, palette.text)
+    } else {
+        (
+            palette.fill.gamma_multiply(0.6),
+            palette.hover.gamma_multiply(0.6),
+            palette.stroke.gamma_multiply(0.5),
+            palette.text.gamma_multiply(0.7),
+        )
+    };
+
+    ui.scope(|ui| {
+        let visuals = &mut ui.style_mut().visuals;
+
+        visuals.widgets.inactive.bg_fill = fill;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.inactive.rounding = rounding;
+
+        visuals.widgets.hovered.bg_fill = hover;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, stroke);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.hovered.rounding = rounding;
+
+        visuals.widgets.active.bg_fill = hover;
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, stroke);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, text);
+        visuals.widgets.active.rounding = rounding;
+
+        let button = egui::Button::new(egui::RichText::new(label).color(text))
+            .min_size(egui::vec2(options.min_width, options.min_height))
+            .stroke(egui::Stroke::new(1.0, stroke))
+            .rounding(rounding)
+            .fill(fill);
+
+        if enabled {
+            ui.add(button)
+        } else {
+            ui.add_enabled(false, button)
+        }
+    })
+    .inner
+}
+
 fn configure_tokyo_night_moon(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let mut visuals = egui::Visuals::dark();
@@ -385,6 +910,41 @@ pub fn configure_catppuccin_theme(ctx: &egui::Context) {
     visuals.selection.stroke = egui::Stroke::new(1.5, CAT_SKY);
 
     apply_modern_theme_style(&mut visuals, &mut style, ctx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_spec_generates_expected_labels() {
+        let create_spec = intent_spec(ButtonIntent::Create);
+        assert_eq!(
+            create_spec.label(Some("Virtual Switch")),
+            "➕ Create Virtual Switch"
+        );
+        assert_eq!(
+            create_spec.tooltip(Some("Virtual Switch")),
+            "Create new Virtual Switch"
+        );
+
+        let delete_spec = intent_spec(ButtonIntent::Delete);
+        assert_eq!(delete_spec.label(None), "🗑️ Delete");
+        assert_eq!(
+            delete_spec.tooltip(Some("Network")),
+            "Permanently remove Network"
+        );
+
+        let confirm_spec = intent_spec(ButtonIntent::ConfirmDelete);
+        assert_eq!(
+            confirm_spec.label(Some("Networks")),
+            "⚠ Confirm delete Networks"
+        );
+        assert_eq!(
+            confirm_spec.tooltip(Some("Networks")),
+            "Confirm deletion for Networks"
+        );
+    }
 }
 
 pub fn configure_dracula_theme(ctx: &egui::Context) {

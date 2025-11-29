@@ -1,6 +1,7 @@
 use crate::NovaError;
 use crate::gpu_doctor::{CheckStatus, DiagnosticReport as DoctorReport, GpuDoctor, SystemStatus};
 use crate::gpu_passthrough::{DeviceBindingInfo, GpuCapabilities, GpuManager, PciDevice};
+use crate::theme::{self, ButtonIntent, ButtonRole, GuiTheme};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,7 @@ pub struct GpuManagerGui {
     // UI state
     selected_gpu: Option<String>,
     selected_vm: String,
+    gpu_filter: String,
     active_tab: GpuTab,
 
     // GPU list cache
@@ -40,6 +42,7 @@ pub struct GpuManagerGui {
     last_error: Option<String>,
     status_poll_interval: Duration,
     last_status_refresh: Option<Instant>,
+    theme: GuiTheme,
 }
 
 impl GpuManagerGui {
@@ -48,6 +51,7 @@ impl GpuManagerGui {
             gpu_manager,
             selected_gpu: None,
             selected_vm: String::new(),
+            gpu_filter: String::new(),
             active_tab: GpuTab::Manager,
             gpus: Vec::new(),
             iommu_groups: HashMap::new(),
@@ -59,7 +63,12 @@ impl GpuManagerGui {
             last_error: None,
             status_poll_interval: Duration::from_secs(3),
             last_status_refresh: None,
+            theme: GuiTheme::default(),
         }
+    }
+
+    pub fn set_theme(&mut self, theme: GuiTheme) {
+        self.theme = theme;
     }
 
     /// Refresh GPU list and IOMMU groups
@@ -172,6 +181,49 @@ impl GpuManagerGui {
         }
 
         self.last_status_refresh = Some(Instant::now());
+    }
+
+    fn themed_button(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        role: ButtonRole,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button(ui, label, self.theme, role, enabled)
+    }
+
+    fn preset_button(
+        &self,
+        ui: &mut egui::Ui,
+        intent: ButtonIntent,
+        subject: Option<&str>,
+        enabled: bool,
+    ) -> egui::Response {
+        theme::themed_button_preset(ui, self.theme, intent, subject, enabled)
+    }
+
+    fn matches_gpu_filter(&self, gpu: &PciDevice, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+
+        let q = query.to_lowercase();
+        let reservation = self
+            .reservations
+            .get(&gpu.address)
+            .map(|vm| vm.to_lowercase());
+
+        let fields = [
+            gpu.address.to_lowercase(),
+            gpu.vendor_name.to_lowercase(),
+            gpu.device_name.to_lowercase(),
+            gpu.vendor_id.to_lowercase(),
+            gpu.device_id.to_lowercase(),
+            reservation.unwrap_or_default(),
+        ];
+
+        fields.iter().any(|field| field.contains(&q))
     }
 
     fn bind_to_vfio(&mut self, device_address: String) {
@@ -338,11 +390,17 @@ impl GpuManagerGui {
 
         // Refresh button
         ui.horizontal(|ui| {
-            if ui.button("🔄 Refresh GPU List").clicked() {
+            if self
+                .preset_button(ui, ButtonIntent::Refresh, Some("GPU List"), true)
+                .clicked()
+            {
                 self.refresh();
             }
 
-            if ui.button("🩺 Run Diagnostics").clicked() {
+            if self
+                .preset_button(ui, ButtonIntent::Diagnostics, Some("GPU Stack"), true)
+                .clicked()
+            {
                 self.run_diagnostics();
                 self.active_tab = GpuTab::Diagnostics;
             }
@@ -365,10 +423,62 @@ impl GpuManagerGui {
         ui.heading("Available GPUs");
         ui.separator();
 
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.horizontal(|ui| {
+                if self
+                    .themed_button(ui, "View IOMMU Groups", ButtonRole::Secondary, true)
+                    .clicked()
+                {
+                    self.active_tab = GpuTab::IommuGroups;
+                }
+                if self
+                    .themed_button(ui, "Run Diagnostics", ButtonRole::Primary, true)
+                    .clicked()
+                {
+                    self.active_tab = GpuTab::Diagnostics;
+                    self.run_diagnostics();
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            let edit = egui::TextEdit::singleline(&mut self.gpu_filter)
+                .hint_text("vendor, address, VM")
+                .desired_width(220.0);
+            let response = ui.add(edit);
+            if response.changed() {
+                ui.ctx().request_repaint();
+            }
+            if !self.gpu_filter.is_empty() && ui.small_button("Clear").clicked() {
+                self.gpu_filter.clear();
+            }
+        });
+
+        ui.add_space(4.0);
+
         if self.gpus.is_empty() {
             ui.group(|ui| {
                 ui.label("No GPUs detected");
                 ui.small("Click 'Refresh GPU List' to scan for GPUs");
+            });
+            return;
+        }
+
+        let filtered_gpus: Vec<PciDevice> = self
+            .gpus
+            .iter()
+            .cloned()
+            .filter(|gpu| self.matches_gpu_filter(gpu, &self.gpu_filter))
+            .collect();
+
+        if filtered_gpus.is_empty() {
+            ui.group(|ui| {
+                ui.label("No GPUs match the current filter");
+                ui.small("Adjust the filter or clear it to show all devices");
             });
             return;
         }
@@ -386,11 +496,16 @@ impl GpuManagerGui {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
-            if ui.button("Load VFIO modules").clicked() {
+            if self
+                .preset_button(ui, ButtonIntent::Load, Some("VFIO modules"), true)
+                .clicked()
+            {
                 self.load_vfio_modules();
             }
-
-            if ui.button("Refresh status").clicked() {
+            if self
+                .preset_button(ui, ButtonIntent::Refresh, Some("Status"), true)
+                .clicked()
+            {
                 self.refresh_binding_status();
             }
         });
@@ -401,7 +516,7 @@ impl GpuManagerGui {
         egui::ScrollArea::vertical()
             .max_height(400.0)
             .show(ui, |ui| {
-                for gpu in self.gpus.clone().iter() {
+                for gpu in filtered_gpus.iter() {
                     self.draw_gpu_card(ui, gpu);
                     ui.add_space(8.0);
                 }
@@ -532,18 +647,28 @@ impl GpuManagerGui {
 
                 ui.horizontal(|ui| {
                     if is_assigned {
-                        if ui.button("Release").clicked() {
+                        if self
+                            .preset_button(ui, ButtonIntent::Release, Some("GPU"), true)
+                            .clicked()
+                        {
                             self.release_gpu(address.clone());
                         }
-                    } else if ui.button("Assign to VM").clicked() {
-                        if !vm_name.is_empty() {
+                    } else {
+                        let can_assign = !vm_name.is_empty();
+                        let assign =
+                            self.preset_button(ui, ButtonIntent::Assign, Some("to VM"), can_assign);
+                        if assign.clicked() {
                             self.assign_gpu(address.clone(), vm_name.clone());
-                        } else {
-                            self.last_error = Some("Please enter a VM name".to_string());
+                        }
+                        if !can_assign {
+                            assign.on_disabled_hover_text("Enter a VM name above to assign");
                         }
                     }
 
-                    if ui.button("Select").clicked() {
+                    if self
+                        .preset_button(ui, ButtonIntent::Select, Some("GPU"), true)
+                        .clicked()
+                    {
                         self.selected_gpu = Some(gpu.address.clone());
                     }
                 });
@@ -552,15 +677,24 @@ impl GpuManagerGui {
 
                 ui.horizontal(|ui| {
                     if driver == Some("vfio-pci") {
-                        if ui.button("Reattach host driver").clicked() {
+                        if self
+                            .preset_button(ui, ButtonIntent::Configure, Some("Host Driver"), true)
+                            .clicked()
+                        {
                             self.reattach_host_driver(address.clone());
                         }
                     } else {
-                        if ui.button("Bind to VFIO").clicked() {
+                        if self
+                            .preset_button(ui, ButtonIntent::Bind, Some("to VFIO"), true)
+                            .clicked()
+                        {
                             self.bind_to_vfio(address.clone());
                         }
 
-                        if ui.button("Force unbind").clicked() {
+                        if self
+                            .preset_button(ui, ButtonIntent::Unbind, Some("Driver"), true)
+                            .clicked()
+                        {
                             self.force_unbind(address.clone());
                         }
                     }
@@ -586,22 +720,46 @@ impl GpuManagerGui {
             return;
         }
 
+        let filter_active = !self.gpu_filter.is_empty();
+
         egui::ScrollArea::vertical()
             .max_height(500.0)
             .show(ui, |ui| {
                 let mut groups: Vec<_> = self.iommu_groups.iter().collect();
                 groups.sort_by_key(|(group_id, _)| *group_id);
 
+                let mut rendered_any = false;
+
                 for (group_id, devices) in groups {
+                    let visible_devices: Vec<String> = devices
+                        .iter()
+                        .filter(|addr| {
+                            self.gpus
+                                .iter()
+                                .find(|g| g.address.as_str() == addr.as_str())
+                                .map(|gpu| self.matches_gpu_filter(gpu, &self.gpu_filter))
+                                .unwrap_or(!filter_active)
+                        })
+                        .cloned()
+                        .collect();
+
+                    if filter_active && visible_devices.is_empty() {
+                        continue;
+                    }
+
+                    rendered_any = true;
+
                     egui::CollapsingHeader::new(format!("IOMMU Group {}", group_id))
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.group(|ui| {
                                 ui.label(format!("{} device(s) in group", devices.len()));
 
-                                for pci_address in devices {
-                                    if let Some(gpu) =
-                                        self.gpus.iter().find(|g| &g.address == pci_address)
+                                for pci_address in visible_devices.iter() {
+                                    if let Some(gpu) = self
+                                        .gpus
+                                        .iter()
+                                        .find(|g| g.address.as_str() == pci_address.as_str())
                                     {
                                         ui.horizontal(|ui| {
                                             ui.monospace(pci_address);
@@ -650,6 +808,13 @@ impl GpuManagerGui {
                         });
 
                     ui.add_space(6.0);
+                }
+
+                if filter_active && !rendered_any {
+                    ui.group(|ui| {
+                        ui.label("No IOMMU groups match the current filter");
+                        ui.small("Adjust the filter or clear it on the GPU Manager tab");
+                    });
                 }
             });
     }
@@ -810,8 +975,16 @@ impl GpuManagerWindow {
             });
     }
 
+    pub fn set_theme(&mut self, theme: GuiTheme) {
+        self.gui.set_theme(theme);
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn reopen(&mut self) {
+        self.open = true;
     }
 }
 
@@ -826,14 +999,8 @@ fn binding_state_label(info: &DeviceBindingInfo) -> String {
 
 fn describe_binding(info: Option<&DeviceBindingInfo>) -> String {
     match info {
-        Some(info) => {
-            let mut label = binding_state_label(info);
-            if let Some(vm) = &info.reserved_for {
-                label.push_str(&format!(", reserved for {}", vm));
-            }
-            label
-        }
-        None => "device not detected".to_string(),
+        Some(binding) => binding_state_label(binding),
+        None => "unbound".to_string(),
     }
 }
 

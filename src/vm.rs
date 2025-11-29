@@ -31,6 +31,10 @@ impl VmManager {
         }
     }
 
+    pub fn gpu_manager_handle(&self) -> Arc<Mutex<GpuManager>> {
+        Arc::clone(&self.gpu_manager)
+    }
+
     pub async fn start_vm(&self, name: &str, config: Option<&VmConfig>) -> Result<()> {
         log_info!("Starting VM: {}", name);
 
