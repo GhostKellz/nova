@@ -1,20 +1,25 @@
 use crate::arch_integration::ArchNetworkManager;
 use crate::libvirt::{LibvirtManager, LibvirtNetwork};
-use crate::monitoring::{BandwidthUsage, NetworkMonitor, NetworkTopology};
+use crate::monitoring::{self, BandwidthUsage, NetworkMonitor, NetworkTopology};
 use crate::network::{NetworkInterface, NetworkManager, SwitchType, VirtualSwitch};
 use crate::theme::{self, ButtonIntent, ButtonRole, GuiTheme};
 use crate::{log_info, log_warn};
 
+use chrono::{DateTime, Local};
 use eframe::egui;
 use egui::{Color32, Id, Pos2, Rect, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const NETWORK_STATE_KEY: &str = "nova.networking.state";
+const CAPTURE_SCAN_FEEDBACK_WINDOW: Duration = Duration::from_millis(900);
+const CAPTURE_PREVIEW_BYTES: usize = 64;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct CapturePersistedState {
@@ -24,6 +29,10 @@ struct CapturePersistedState {
     duration: String,
     packet_count: String,
     output_file: String,
+    #[serde(default = "default_capture_auto_scan")]
+    auto_scan_enabled: bool,
+    #[serde(default = "default_capture_scan_interval")]
+    scan_interval_secs: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -32,6 +41,32 @@ struct NetworkingPersistedState {
     selected_tab: NetworkTab,
     #[serde(default)]
     capture: CapturePersistedState,
+    #[serde(default = "default_monitoring_poll_secs")]
+    monitoring_poll_secs: u64,
+    #[serde(default = "default_monitoring_offline_threshold_secs")]
+    monitoring_offline_threshold_secs: u64,
+    #[serde(default = "default_monitoring_notifications")]
+    monitoring_notifications_enabled: bool,
+}
+
+const fn default_capture_auto_scan() -> bool {
+    true
+}
+
+const fn default_capture_scan_interval() -> u64 {
+    5
+}
+
+const fn default_monitoring_poll_secs() -> u64 {
+    5
+}
+
+const fn default_monitoring_offline_threshold_secs() -> u64 {
+    20
+}
+
+const fn default_monitoring_notifications() -> bool {
+    true
 }
 
 #[allow(dead_code)]
@@ -47,6 +82,10 @@ pub struct NetworkingGui {
     switch_creation_dialog: SwitchCreationDialog,
     network_creation_dialog: NetworkCreationDialog,
     monitoring_enabled: bool,
+    monitoring_poll_secs: u64,
+    monitoring_offline_threshold_secs: u64,
+    monitoring_notifications_enabled: bool,
+    last_monitoring_poll: Option<Instant>,
     capture_dialog: CaptureDialog,
     topology_view: TopologyView,
     theme: GuiTheme,
@@ -59,6 +98,8 @@ pub struct NetworkingGui {
     last_action_error: Option<String>,
     pending_delete_networks: Option<Vec<String>>,
     persist_state_loaded: bool,
+    toasts: Vec<NetworkToast>,
+    offline_interfaces: HashSet<String>,
 
     // Data
     switches: Vec<VirtualSwitch>,
@@ -66,6 +107,20 @@ pub struct NetworkingGui {
     interfaces: Vec<NetworkInterface>,
     topology: Option<NetworkTopology>,
     bandwidth_data: HashMap<String, Vec<BandwidthUsage>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ToastKind {
+    Success,
+    Error,
+    Info,
+}
+
+#[derive(Debug, Clone)]
+struct NetworkToast {
+    message: String,
+    kind: ToastKind,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +177,11 @@ struct CaptureDialog {
     recent_files: Vec<PathBuf>,
     last_file_scan: Option<Instant>,
     scan_feedback_until: Option<Instant>,
+    auto_scan_enabled: bool,
+    force_rescan: bool,
+    scan_interval_secs: u64,
+    preview: Option<CapturePreview>,
+    pending_delete: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,13 +193,36 @@ struct TopologyView {
     node_positions: HashMap<String, Pos2>,
 }
 
+#[derive(Debug, Clone)]
+struct CapturePreview {
+    path: PathBuf,
+    size_bytes: u64,
+    modified: SystemTime,
+    header_hex: String,
+    sampled_bytes: usize,
+}
+
 impl NetworkingGui {
     pub fn new() -> Self {
+        Self::with_managers(
+            Arc::new(Mutex::new(NetworkManager::new())),
+            Arc::new(Mutex::new(LibvirtManager::new())),
+            Arc::new(Mutex::new(NetworkMonitor::new())),
+            Arc::new(Mutex::new(ArchNetworkManager::new())),
+        )
+    }
+
+    pub fn with_managers(
+        network_manager: Arc<Mutex<NetworkManager>>,
+        libvirt_manager: Arc<Mutex<LibvirtManager>>,
+        network_monitor: Arc<Mutex<NetworkMonitor>>,
+        arch_manager: Arc<Mutex<ArchNetworkManager>>,
+    ) -> Self {
         Self {
-            network_manager: Arc::new(Mutex::new(NetworkManager::new())),
-            libvirt_manager: Arc::new(Mutex::new(LibvirtManager::new())),
-            network_monitor: Arc::new(Mutex::new(NetworkMonitor::new())),
-            arch_manager: Arc::new(Mutex::new(ArchNetworkManager::new())),
+            network_manager,
+            libvirt_manager,
+            network_monitor,
+            arch_manager,
 
             selected_tab: NetworkTab::Overview,
             switch_creation_dialog: SwitchCreationDialog {
@@ -163,6 +246,10 @@ impl NetworkingGui {
                 autostart: true,
             },
             monitoring_enabled: false,
+            monitoring_poll_secs: default_monitoring_poll_secs(),
+            monitoring_offline_threshold_secs: default_monitoring_offline_threshold_secs(),
+            monitoring_notifications_enabled: default_monitoring_notifications(),
+            last_monitoring_poll: None,
             capture_dialog: CaptureDialog {
                 show: false,
                 interface: String::new(),
@@ -174,6 +261,11 @@ impl NetworkingGui {
                 recent_files: Vec::new(),
                 last_file_scan: None,
                 scan_feedback_until: None,
+                auto_scan_enabled: true,
+                force_rescan: false,
+                scan_interval_secs: default_capture_scan_interval(),
+                preview: None,
+                pending_delete: None,
             },
             topology_view: TopologyView {
                 zoom: 1.0,
@@ -191,6 +283,8 @@ impl NetworkingGui {
             last_action_error: None,
             pending_delete_networks: None,
             persist_state_loaded: false,
+            toasts: Vec::new(),
+            offline_interfaces: HashSet::new(),
 
             switches: Vec::new(),
             libvirt_networks: Vec::new(),
@@ -201,53 +295,25 @@ impl NetworkingGui {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
-        self.ensure_persisted_state(ctx);
-
+        self.begin_frame(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::Overview, "Overview");
-                ui.selectable_value(
-                    &mut self.selected_tab,
-                    NetworkTab::VirtualSwitches,
-                    "Virtual Switches",
-                );
-                ui.selectable_value(
-                    &mut self.selected_tab,
-                    NetworkTab::LibvirtNetworks,
-                    "Libvirt Networks",
-                );
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::Monitoring, "Monitoring");
-                ui.selectable_value(&mut self.selected_tab, NetworkTab::Topology, "Topology");
-                ui.selectable_value(
-                    &mut self.selected_tab,
-                    NetworkTab::PacketCapture,
-                    "Packet Capture",
-                );
-                ui.selectable_value(
-                    &mut self.selected_tab,
-                    NetworkTab::ArchConfig,
-                    "Arch Config",
-                );
-            });
-
-            ui.separator();
-
-            if self.last_refresh_all.is_some() {
-                self.show_refresh_feedback(ui);
-                ui.separator();
-            }
-
-            match self.selected_tab {
-                NetworkTab::Overview => self.show_overview(ui),
-                NetworkTab::VirtualSwitches => self.show_virtual_switches(ui),
-                NetworkTab::LibvirtNetworks => self.show_libvirt_networks(ui),
-                NetworkTab::Monitoring => self.show_monitoring(ui),
-                NetworkTab::Topology => self.show_topology(ui),
-                NetworkTab::PacketCapture => self.show_packet_capture(ui),
-                NetworkTab::ArchConfig => self.show_arch_config(ui),
-            }
+            self.render_contents(ui);
         });
+        self.end_frame(ctx);
+    }
 
+    pub fn show_embedded(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        self.begin_frame(&ctx);
+        self.render_contents(ui);
+        self.end_frame(&ctx);
+    }
+
+    fn begin_frame(&mut self, ctx: &egui::Context) {
+        self.ensure_persisted_state(ctx);
+    }
+
+    fn end_frame(&mut self, ctx: &egui::Context) {
         if self.refresh_feedback_active() {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -256,9 +322,56 @@ impl NetworkingGui {
         self.show_switch_creation_dialog(ctx);
         self.show_network_creation_dialog(ctx);
         self.show_capture_dialog(ctx);
+        self.show_capture_delete_confirmation(ctx);
         self.show_delete_confirmation(ctx);
+        self.draw_toasts(ctx);
 
         self.persist_state(ctx);
+    }
+
+    fn render_contents(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.selected_tab, NetworkTab::Overview, "Overview");
+            ui.selectable_value(
+                &mut self.selected_tab,
+                NetworkTab::VirtualSwitches,
+                "Virtual Switches",
+            );
+            ui.selectable_value(
+                &mut self.selected_tab,
+                NetworkTab::LibvirtNetworks,
+                "Libvirt Networks",
+            );
+            ui.selectable_value(&mut self.selected_tab, NetworkTab::Monitoring, "Monitoring");
+            ui.selectable_value(&mut self.selected_tab, NetworkTab::Topology, "Topology");
+            ui.selectable_value(
+                &mut self.selected_tab,
+                NetworkTab::PacketCapture,
+                "Packet Capture",
+            );
+            ui.selectable_value(
+                &mut self.selected_tab,
+                NetworkTab::ArchConfig,
+                "Arch Config",
+            );
+        });
+
+        ui.separator();
+
+        if self.last_refresh_all.is_some() {
+            self.show_refresh_feedback(ui);
+            ui.separator();
+        }
+
+        match self.selected_tab {
+            NetworkTab::Overview => self.show_overview(ui),
+            NetworkTab::VirtualSwitches => self.show_virtual_switches(ui),
+            NetworkTab::LibvirtNetworks => self.show_libvirt_networks(ui),
+            NetworkTab::Monitoring => self.show_monitoring(ui),
+            NetworkTab::Topology => self.show_topology(ui),
+            NetworkTab::PacketCapture => self.show_packet_capture(ui),
+            NetworkTab::ArchConfig => self.show_arch_config(ui),
+        }
     }
 
     pub fn set_theme(&mut self, theme: GuiTheme) {
@@ -286,13 +399,33 @@ impl NetworkingGui {
     }
 
     fn record_success<S: Into<String>>(&mut self, message: S) {
-        self.last_action_message = Some(message.into());
+        let msg = message.into();
+        self.last_action_message = Some(msg.clone());
         self.last_action_error = None;
+        self.push_toast(msg, ToastKind::Success);
+    }
+
+    fn record_info<S: Into<String>>(&mut self, message: S) {
+        let msg = message.into();
+        self.last_action_message = Some(msg.clone());
+        self.last_action_error = None;
+        self.push_toast(msg, ToastKind::Info);
     }
 
     fn record_error<S: Into<String>>(&mut self, message: S) {
-        self.last_action_error = Some(message.into());
+        let msg = message.into();
+        self.last_action_error = Some(msg.clone());
         self.last_action_message = None;
+        self.push_toast(msg, ToastKind::Error);
+    }
+
+    fn push_toast(&mut self, message: String, kind: ToastKind) {
+        let expires_at = Instant::now() + Duration::from_secs(4);
+        self.toasts.push(NetworkToast {
+            message,
+            kind,
+            expires_at,
+        });
     }
 
     fn ensure_persisted_state(&mut self, ctx: &egui::Context) {
@@ -314,6 +447,17 @@ impl NetworkingGui {
             if !state.capture.output_file.is_empty() {
                 self.capture_dialog.output_file = state.capture.output_file;
             }
+            self.capture_dialog.auto_scan_enabled = state.capture.auto_scan_enabled;
+            if state.capture.scan_interval_secs > 0 {
+                self.capture_dialog.scan_interval_secs = state.capture.scan_interval_secs;
+            }
+            if state.monitoring_poll_secs > 0 {
+                self.monitoring_poll_secs = state.monitoring_poll_secs;
+            }
+            if state.monitoring_offline_threshold_secs > 0 {
+                self.monitoring_offline_threshold_secs = state.monitoring_offline_threshold_secs;
+            }
+            self.monitoring_notifications_enabled = state.monitoring_notifications_enabled;
         }
 
         self.persist_state_loaded = true;
@@ -331,16 +475,195 @@ impl NetworkingGui {
             duration: self.capture_dialog.duration.clone(),
             packet_count: self.capture_dialog.packet_count.clone(),
             output_file: self.capture_dialog.output_file.clone(),
+            auto_scan_enabled: self.capture_dialog.auto_scan_enabled,
+            scan_interval_secs: self.capture_dialog.scan_interval_secs,
         };
 
         let state = NetworkingPersistedState {
             selected_tab: self.selected_tab.clone(),
             capture,
+            monitoring_poll_secs: self.monitoring_poll_secs,
+            monitoring_offline_threshold_secs: self.monitoring_offline_threshold_secs,
+            monitoring_notifications_enabled: self.monitoring_notifications_enabled,
         };
 
         ctx.data_mut(|data| {
             data.insert_persisted(Id::new(NETWORK_STATE_KEY), state);
         });
+    }
+
+    fn maybe_poll_monitoring(&mut self, ctx: &egui::Context) {
+        if !self.monitoring_enabled {
+            return;
+        }
+
+        let interval = Duration::from_secs(self.monitoring_poll_secs.max(1));
+        let needs_poll = match self.last_monitoring_poll {
+            None => true,
+            Some(last) => last.elapsed() >= interval,
+        };
+
+        if needs_poll {
+            self.last_monitoring_poll = Some(Instant::now());
+            self.synthesize_bandwidth_samples();
+            self.evaluate_offline_interfaces();
+        }
+
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    fn synthesize_bandwidth_samples(&mut self) {
+        if !self.monitoring_enabled {
+            return;
+        }
+
+        let reference_epoch = Self::epoch_secs();
+        let mut interfaces: Vec<String> = if !self.interfaces.is_empty() {
+            self.interfaces
+                .iter()
+                .take(4)
+                .map(|iface| iface.name.clone())
+                .collect()
+        } else if !self.bandwidth_data.is_empty() {
+            self.bandwidth_data.keys().cloned().collect()
+        } else {
+            vec!["br0".to_string(), "virbr0".to_string()]
+        };
+
+        interfaces.sort();
+        interfaces.dedup();
+
+        for (idx, iface) in interfaces.iter().enumerate() {
+            let phase = ((reference_epoch % 60) + idx as u64 * 7) as f64;
+            let rx = (phase * 1_500_000.0) % 80_000_000.0;
+            let tx = ((phase + 15.0) * 1_200_000.0) % 60_000_000.0;
+            let rx_pps = rx / 1024.0;
+            let tx_pps = tx / 1200.0;
+
+            let entry = self.bandwidth_data.entry(iface.clone()).or_default();
+            entry.push(BandwidthUsage {
+                interface: iface.clone(),
+                timestamp: reference_epoch,
+                rx_bps: rx,
+                tx_bps: tx,
+                rx_pps,
+                tx_pps,
+            });
+
+            if entry.len() > 180 {
+                entry.drain(0..(entry.len() - 180));
+            }
+        }
+    }
+
+    fn evaluate_offline_interfaces(&mut self) {
+        let now = Self::epoch_secs();
+        let threshold = self.monitoring_offline_threshold_secs;
+        let offline_now =
+            monitoring::offline_interfaces_from_history(&self.bandwidth_data, threshold, now);
+
+        if self.monitoring_notifications_enabled {
+            let newly_offline: Vec<String> = offline_now
+                .difference(&self.offline_interfaces)
+                .cloned()
+                .collect();
+            let back_online: Vec<String> = self
+                .offline_interfaces
+                .difference(&offline_now)
+                .cloned()
+                .collect();
+
+            for iface in newly_offline {
+                self.record_error(format!("Interface {} marked offline", iface));
+            }
+            for iface in back_online {
+                self.record_success(format!("Interface {} back online", iface));
+            }
+        }
+
+        self.offline_interfaces = offline_now;
+    }
+
+    fn seconds_until_next_poll(&self) -> Option<u64> {
+        if !self.monitoring_enabled {
+            return None;
+        }
+
+        let interval = Duration::from_secs(self.monitoring_poll_secs.max(1));
+        match self.last_monitoring_poll {
+            None => Some(0),
+            Some(last) => {
+                if last.elapsed() >= interval {
+                    Some(0)
+                } else {
+                    Some((interval - last.elapsed()).as_secs())
+                }
+            }
+        }
+    }
+
+    fn epoch_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0))
+            .as_secs()
+    }
+
+    fn format_bytes(bytes: u64) -> String {
+        const KB: f64 = 1024.0;
+        let value = bytes as f64;
+        if value >= KB * KB * KB {
+            format!("{:.1} GiB", value / (KB * KB * KB))
+        } else if value >= KB * KB {
+            format!("{:.1} MiB", value / (KB * KB))
+        } else if value >= KB {
+            format!("{:.1} KiB", value / KB)
+        } else {
+            format!("{} B", bytes)
+        }
+    }
+
+    fn format_timestamp(ts: SystemTime) -> String {
+        let datetime: DateTime<Local> = ts.into();
+        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    fn capture_display_name(path: &Path) -> String {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string())
+    }
+
+    fn format_hex_block(bytes: &[u8]) -> String {
+        if bytes.is_empty() {
+            return "File is empty".to_string();
+        }
+
+        let mut output = String::new();
+        for (chunk_idx, chunk) in bytes.chunks(16).enumerate() {
+            let offset = chunk_idx * 16;
+            let _ = write!(&mut output, "{offset:04X}: ");
+            for byte in chunk {
+                let _ = write!(&mut output, "{byte:02X} ");
+            }
+            if chunk.len() < 16 {
+                for _ in 0..(16 - chunk.len()) {
+                    output.push_str("   ");
+                }
+            }
+            output.push_str(" |");
+            for byte in chunk {
+                let ch = if byte.is_ascii_graphic() || *byte == b' ' {
+                    *byte as char
+                } else {
+                    '.'
+                };
+                output.push(ch);
+            }
+            output.push_str("|\n");
+        }
+        output
     }
 
     fn show_action_feedback(&mut self, ui: &mut egui::Ui) {
@@ -364,11 +687,18 @@ impl NetworkingGui {
             .unwrap_or(false)
     }
 
-    fn update_recent_capture_files(&mut self, ctx: &egui::Context) -> bool {
-        const SCAN_INTERVAL: Duration = Duration::from_secs(5);
-        let needs_scan = match self.capture_dialog.last_file_scan {
-            None => true,
-            Some(ts) => ts.elapsed() >= SCAN_INTERVAL,
+    fn update_recent_capture_files(&mut self, ctx: &egui::Context, force: bool) -> bool {
+        if !self.capture_dialog.auto_scan_enabled && !force {
+            return false;
+        }
+        let interval = Duration::from_secs(self.capture_dialog.scan_interval_secs.max(1));
+        let needs_scan = if force {
+            true
+        } else {
+            match self.capture_dialog.last_file_scan {
+                None => true,
+                Some(ts) => ts.elapsed() >= interval,
+            }
         };
 
         if !needs_scan {
@@ -394,18 +724,134 @@ impl NetworkingGui {
         files.sort();
         files.reverse();
         self.capture_dialog.recent_files = files;
+        if let Some(preview) = &self.capture_dialog.preview {
+            let still_present = self
+                .capture_dialog
+                .recent_files
+                .iter()
+                .any(|entry| entry == &preview.path);
+            if !still_present {
+                self.capture_dialog.preview = None;
+            }
+        }
         self.capture_dialog.last_file_scan = Some(Instant::now());
-        self.capture_dialog.scan_feedback_until = Some(Instant::now() + Duration::from_millis(600));
+        self.capture_dialog.scan_feedback_until =
+            Some(Instant::now() + CAPTURE_SCAN_FEEDBACK_WINDOW);
+        self.capture_dialog.force_rescan = false;
         true
     }
 
-    fn remove_capture_file(&mut self, path: &PathBuf) {
-        if let Err(err) = fs::remove_file(path) {
-            log_warn!("Failed to delete capture file {}: {}", path.display(), err);
+    fn remove_capture_file(&mut self, path: &Path) {
+        let display_name = Self::capture_display_name(path);
+        match fs::remove_file(path) {
+            Ok(_) => {
+                self.record_success(format!("Deleted capture '{}'.", display_name));
+            }
+            Err(err) => {
+                let message = format!("Failed to delete capture '{}': {}", display_name, err);
+                log_warn!("{}", message);
+                self.record_error(message);
+            }
         }
+
         self.capture_dialog
             .recent_files
-            .retain(|existing| existing != path);
+            .retain(|existing| existing.as_path() != path);
+
+        if self
+            .capture_dialog
+            .preview
+            .as_ref()
+            .map(|preview| preview.path.as_path() == path)
+            .unwrap_or(false)
+        {
+            self.capture_dialog.preview = None;
+        }
+
+        self.capture_dialog.pending_delete = None;
+        self.capture_dialog.force_rescan = true;
+    }
+
+    fn preview_capture_file(&mut self, path: &Path) {
+        match Self::build_capture_preview(path) {
+            Ok(preview) => {
+                let label = Self::capture_display_name(path);
+                self.capture_dialog.preview = Some(preview);
+                self.record_info(format!("Previewing capture '{}'.", label));
+            }
+            Err(err) => {
+                self.record_error(format!(
+                    "Failed to build preview for '{}': {}",
+                    Self::capture_display_name(path),
+                    err
+                ));
+            }
+        }
+    }
+
+    fn build_capture_preview(path: &Path) -> Result<CapturePreview, String> {
+        let metadata = fs::metadata(path).map_err(|err| err.to_string())?;
+        let mut header = vec![0u8; CAPTURE_PREVIEW_BYTES];
+        let mut file = fs::File::open(path).map_err(|err| err.to_string())?;
+        let bytes_read = file.read(&mut header).map_err(|err| err.to_string())?;
+        let header_hex = Self::format_hex_block(&header[..bytes_read]);
+        let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+
+        Ok(CapturePreview {
+            path: path.to_path_buf(),
+            size_bytes: metadata.len(),
+            modified,
+            header_hex,
+            sampled_bytes: bytes_read,
+        })
+    }
+
+    fn draw_toasts(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        self.toasts.retain(|toast| toast.expires_at > now);
+        if self.toasts.is_empty() {
+            return;
+        }
+
+        let screen = ctx.screen_rect();
+        for (index, toast) in self.toasts.iter().enumerate() {
+            let pos = Pos2::new(
+                screen.right() - 320.0,
+                screen.top() + 24.0 + index as f32 * 70.0,
+            );
+            let (bg, stroke) = match toast.kind {
+                ToastKind::Success => (
+                    Color32::from_rgb(22, 73, 56),
+                    Color32::from_rgb(96, 200, 140),
+                ),
+                ToastKind::Error => (
+                    Color32::from_rgb(73, 28, 34),
+                    Color32::from_rgb(220, 80, 80),
+                ),
+                ToastKind::Info => (
+                    Color32::from_rgb(32, 52, 78),
+                    Color32::from_rgb(120, 180, 255),
+                ),
+            };
+
+            egui::Area::new(Id::new(format!("network.toast.{index}")))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ctx, |ui| {
+                    ui.set_width(280.0);
+                    egui::Frame::none()
+                        .fill(bg)
+                        .stroke(Stroke::new(1.0, stroke))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&toast.message)
+                                    .color(Color32::from_rgb(235, 245, 255)),
+                            );
+                        });
+                });
+        }
     }
 
     fn execute_pending_network_deletions(&mut self) {
@@ -1021,6 +1467,57 @@ impl NetworkingGui {
 
         ui.separator();
 
+        ui.horizontal_wrapped(|ui| {
+            let poll_resp = ui.add(
+                egui::Slider::new(&mut self.monitoring_poll_secs, 1..=60).text("Poll interval (s)"),
+            );
+            if poll_resp.changed() {
+                self.last_monitoring_poll = None;
+                if self.monitoring_offline_threshold_secs <= self.monitoring_poll_secs {
+                    self.monitoring_offline_threshold_secs = self.monitoring_poll_secs + 5;
+                }
+                self.record_info(format!(
+                    "Monitoring cadence set to {}s",
+                    self.monitoring_poll_secs
+                ));
+            }
+
+            let threshold_resp = ui.add(
+                egui::Slider::new(&mut self.monitoring_offline_threshold_secs, 5..=600)
+                    .text("Offline after (s)"),
+            );
+            if threshold_resp.changed() {
+                if self.monitoring_offline_threshold_secs <= self.monitoring_poll_secs {
+                    self.monitoring_offline_threshold_secs = self.monitoring_poll_secs + 5;
+                }
+                self.record_info(format!(
+                    "Offline threshold set to {}s",
+                    self.monitoring_offline_threshold_secs
+                ));
+                self.evaluate_offline_interfaces();
+            }
+
+            let notify_resp = ui.checkbox(
+                &mut self.monitoring_notifications_enabled,
+                "Notify on state change",
+            );
+            if notify_resp.changed() {
+                if self.monitoring_notifications_enabled {
+                    self.record_success("Monitoring notifications enabled");
+                } else {
+                    self.record_info("Monitoring notifications muted");
+                }
+            }
+
+            if let Some(next) = self.seconds_until_next_poll() {
+                ui.small(format!("Next refresh in {}s", next));
+            }
+        });
+
+        if self.monitoring_enabled {
+            self.maybe_poll_monitoring(ui.ctx());
+        }
+
         if !self.monitoring_enabled {
             ui.vertical_centered(|ui| {
                 ui.add_space(16.0);
@@ -1059,18 +1556,57 @@ impl NetworkingGui {
             return;
         }
 
+        ui.add_space(6.0);
+        if self.offline_interfaces.is_empty() {
+            ui.colored_label(
+                Color32::from_rgb(96, 200, 140),
+                "All tracked interfaces responding",
+            );
+        } else {
+            let mut offline_list: Vec<_> = self.offline_interfaces.iter().cloned().collect();
+            offline_list.sort();
+            ui.colored_label(
+                Color32::from_rgb(220, 120, 80),
+                format!("Offline: {}", offline_list.join(", ")),
+            );
+        }
+
         // Bandwidth charts
+        let now_epoch = Self::epoch_secs();
         for (interface, bandwidth_history) in &self.bandwidth_data {
             if bandwidth_history.is_empty() {
                 continue;
             }
 
+            let is_offline = self.offline_interfaces.contains(interface);
+            let stale_secs = bandwidth_history
+                .last()
+                .map(|sample| now_epoch.saturating_sub(sample.timestamp));
+
             egui::Frame::none()
-                .fill(Color32::from_gray(30))
+                .fill(if is_offline {
+                    Color32::from_rgb(50, 25, 25)
+                } else {
+                    Color32::from_gray(30)
+                })
                 .rounding(5.0)
                 .inner_margin(10.0)
                 .show(ui, |ui| {
-                    ui.heading(format!("Interface: {}", interface));
+                    ui.horizontal(|ui| {
+                        ui.heading(format!("Interface: {}", interface));
+                        ui.add_space(8.0);
+                        if is_offline {
+                            ui.colored_label(
+                                Color32::from_rgb(220, 120, 80),
+                                format!(
+                                    "Offline • {}s stale",
+                                    stale_secs.unwrap_or(self.monitoring_offline_threshold_secs)
+                                ),
+                            );
+                        } else if let Some(stale) = stale_secs {
+                            ui.small(format!("Updated {}s ago", stale));
+                        }
+                    });
 
                     // Show current bandwidth
                     if let Some(latest) = bandwidth_history.last() {
@@ -1245,25 +1781,102 @@ impl NetworkingGui {
 
         ui.separator();
 
-        let scanning = {
-            let ctx = ui.ctx().clone();
-            self.update_recent_capture_files(&ctx)
-        };
+        ui.horizontal_wrapped(|ui| {
+            let auto_scan_response = ui.checkbox(
+                &mut self.capture_dialog.auto_scan_enabled,
+                "Auto-scan capture folder",
+            );
+            if auto_scan_response.changed() {
+                if self.capture_dialog.auto_scan_enabled {
+                    self.capture_dialog.force_rescan = true;
+                    self.record_success(format!(
+                        "Auto-scan enabled (every {}s)",
+                        self.capture_dialog.scan_interval_secs
+                    ));
+                } else {
+                    self.record_info("Auto-scan paused");
+                }
+            }
 
-        // Active captures
-        if scanning
-            || self
-                .capture_dialog
-                .scan_feedback_until
-                .map(|until| Instant::now() < until)
-                .unwrap_or(false)
-        {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("Scanning capture directory...");
-            });
+            if self
+                .preset_button(ui, ButtonIntent::Refresh, Some("Capture Folder"), true)
+                .clicked()
+            {
+                self.capture_dialog.force_rescan = true;
+                self.record_info("Manual capture rescan requested");
+            }
+
+            let slider_response = ui.add(
+                egui::Slider::new(&mut self.capture_dialog.scan_interval_secs, 2..=60)
+                    .text("Scan every (s)"),
+            );
+            if slider_response.changed() {
+                self.capture_dialog.force_rescan = true;
+                if self.capture_dialog.auto_scan_enabled {
+                    self.record_success(format!(
+                        "Auto-scan cadence set to {}s",
+                        self.capture_dialog.scan_interval_secs
+                    ));
+                } else {
+                    self.record_info(format!(
+                        "Scan interval set to {}s (auto-scan disabled)",
+                        self.capture_dialog.scan_interval_secs
+                    ));
+                }
+            }
+
+            let last_scan_text = if let Some(ts) = self.capture_dialog.last_file_scan {
+                let elapsed = ts.elapsed();
+                if elapsed.as_secs() == 0 {
+                    "Last scan: just now".to_string()
+                } else if elapsed.as_secs() < 60 {
+                    format!("Last scan: {}s ago", elapsed.as_secs())
+                } else {
+                    format!("Last scan: {}m ago", elapsed.as_secs() / 60)
+                }
+            } else {
+                "Last scan: never".to_string()
+            };
+            ui.label(egui::RichText::new(last_scan_text).small());
+        });
+
+        if !self.capture_dialog.auto_scan_enabled {
+            ui.label(
+                egui::RichText::new(
+                    "Auto-scan is disabled; use 'Rescan capture folder' to refresh.",
+                )
+                .small(),
+            );
             ui.add_space(6.0);
         }
+
+        let scanning = {
+            let ctx = ui.ctx().clone();
+            let force = self.capture_dialog.force_rescan;
+            self.update_recent_capture_files(&ctx, force)
+        };
+
+        let mut show_scan_feedback = scanning;
+        let mut scan_progress: Option<f32> = if scanning { Some(0.05) } else { None };
+        if let Some(until) = self.capture_dialog.scan_feedback_until {
+            if let Some(remaining) = until.checked_duration_since(Instant::now()) {
+                let total = CAPTURE_SCAN_FEEDBACK_WINDOW.as_secs_f32().max(0.001);
+                let done: f32 = 1.0 - (remaining.as_secs_f32() / total).clamp(0.0, 1.0);
+                let current: f32 = scan_progress.unwrap_or(0.0);
+                scan_progress = Some(current.max(done));
+                show_scan_feedback = true;
+            }
+        }
+
+        if show_scan_feedback {
+            let progress: f32 = scan_progress.unwrap_or(0.0).clamp(0.0, 1.0);
+            ui.add(
+                egui::ProgressBar::new(progress.max(0.05)).text("Scanning capture directory..."),
+            );
+            ui.add_space(6.0);
+        }
+
+        // Active captures
 
         if !self.capture_dialog.active_captures.is_empty() {
             ui.heading("Active Captures");
@@ -1288,28 +1901,75 @@ impl NetworkingGui {
         } else {
             let recent = self.capture_dialog.recent_files.clone();
             for path in recent {
-                let display = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| path.to_string_lossy().to_string());
-                ui.horizontal(|ui| {
-                    ui.label(&display);
-                    if self
-                        .preset_button(ui, ButtonIntent::Open, Some("in Wireshark"), true)
-                        .clicked()
-                    {
-                        if let Some(as_str) = path.to_str() {
-                            self.open_in_wireshark(as_str);
+                let display = Self::capture_display_name(&path);
+                let metadata = fs::metadata(&path).ok();
+                let size_label = metadata
+                    .as_ref()
+                    .map(|data| Self::format_bytes(data.len()))
+                    .unwrap_or_else(|| "Unknown size".to_string());
+                let modified_label = metadata
+                    .as_ref()
+                    .and_then(|data| data.modified().ok())
+                    .map(Self::format_timestamp)
+                    .unwrap_or_else(|| "Unknown modified time".to_string());
+
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&display).strong());
+                        ui.small(format!("{} • {}", size_label, modified_label));
+                    });
+                    ui.small(path.display().to_string());
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if self
+                            .preset_button(ui, ButtonIntent::Inspect, Some("Capture"), true)
+                            .clicked()
+                        {
+                            self.preview_capture_file(&path);
                         }
-                    }
-                    if self
-                        .preset_button(ui, ButtonIntent::Delete, Some("Capture"), true)
-                        .clicked()
-                    {
-                        self.remove_capture_file(&path);
-                    }
+                        if self
+                            .preset_button(ui, ButtonIntent::Open, Some("in Wireshark"), true)
+                            .clicked()
+                        {
+                            if let Some(as_str) = path.to_str() {
+                                self.open_in_wireshark(as_str);
+                            }
+                        }
+                        if self
+                            .preset_button(ui, ButtonIntent::Delete, Some("Capture"), true)
+                            .clicked()
+                        {
+                            self.capture_dialog.pending_delete = Some(path.clone());
+                        }
+                    });
                 });
+                ui.add_space(4.0);
+            }
+        }
+
+        if let Some(preview) = &self.capture_dialog.preview {
+            ui.separator();
+            ui.heading("Capture Preview");
+            ui.label(egui::RichText::new(Self::capture_display_name(&preview.path)).strong());
+            ui.small(format!(
+                "{} • {}",
+                Self::format_bytes(preview.size_bytes),
+                Self::format_timestamp(preview.modified)
+            ));
+
+            if preview.sampled_bytes == 0 {
+                ui.label("Capture file is empty.");
+            } else {
+                ui.small(format!(
+                    "Showing first {} bytes ({} total)",
+                    preview.sampled_bytes,
+                    Self::format_bytes(preview.size_bytes)
+                ));
+                egui::ScrollArea::vertical()
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        ui.monospace(&preview.header_hex);
+                    });
             }
         }
     }
@@ -1586,6 +2246,54 @@ impl NetworkingGui {
             });
     }
 
+    fn show_capture_delete_confirmation(&mut self, ctx: &egui::Context) {
+        if let Some(target) = self.capture_dialog.pending_delete.clone() {
+            let mut open = true;
+            egui::Window::new("Delete capture file")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("This capture will be permanently removed:");
+                    ui.monospace(target.display().to_string());
+                    if let Ok(metadata) = fs::metadata(&target) {
+                        if let Ok(modified) = metadata.modified() {
+                            ui.label(format!(
+                                "Size {} • Modified {}",
+                                Self::format_bytes(metadata.len()),
+                                Self::format_timestamp(modified)
+                            ));
+                        } else {
+                            ui.label(format!(
+                                "Size {} • Modified time unavailable",
+                                Self::format_bytes(metadata.len())
+                            ));
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if self
+                            .preset_button(ui, ButtonIntent::ConfirmDelete, Some("Capture"), true)
+                            .clicked()
+                        {
+                            self.remove_capture_file(&target);
+                        }
+                        if self
+                            .preset_button(ui, ButtonIntent::Cancel, None, true)
+                            .clicked()
+                        {
+                            self.capture_dialog.pending_delete = None;
+                        }
+                    });
+                });
+
+            if !open {
+                self.capture_dialog.pending_delete = None;
+            }
+        }
+    }
+
     // Action implementations (these would contain actual async calls in a real implementation)
     fn refresh_all_data(&mut self) {
         log_info!("Refreshing all network data");
@@ -1672,10 +2380,13 @@ impl NetworkingGui {
             log_info!("Starting network monitoring");
             // Would call network_monitor.start_monitoring()
             self.record_success("Network monitoring enabled");
+            self.last_monitoring_poll = None;
+            self.offline_interfaces.clear();
         } else {
             log_info!("Stopping network monitoring");
             // Would call network_monitor.stop_monitoring()
             self.record_success("Network monitoring disabled");
+            self.offline_interfaces.clear();
         }
         self.touch_refresh_feedback();
     }

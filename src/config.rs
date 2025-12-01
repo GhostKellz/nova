@@ -20,6 +20,82 @@ pub struct NovaConfig {
     pub storage: HashMap<String, StoragePoolConfig>,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub iso: IsoConfig,
+    #[serde(default)]
+    pub templates: TemplatesConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IsoConfig {
+    /// Directories to scan for ISO files
+    #[serde(default = "default_iso_paths")]
+    pub paths: Vec<PathBuf>,
+    /// Known ISOs with friendly names
+    #[serde(default)]
+    pub known: HashMap<String, IsoEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IsoEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub os_type: String,
+    pub version: Option<String>,
+}
+
+fn default_iso_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/data/iso"),
+        PathBuf::from("/var/lib/libvirt/images"),
+        PathBuf::from("/home").join(std::env::var("USER").unwrap_or_default()).join("ISOs"),
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplatesConfig {
+    /// Enable built-in VM templates
+    #[serde(default = "default_true")]
+    pub enable_builtin: bool,
+    /// Custom template definitions
+    #[serde(default)]
+    pub custom: HashMap<String, VmTemplateConfig>,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            enable_builtin: true,
+            custom: HashMap::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmTemplateConfig {
+    pub name: String,
+    pub description: String,
+    pub os_type: String,
+    pub cpu: u32,
+    pub memory: String,
+    pub disk_size: String,
+    #[serde(default)]
+    pub gpu_passthrough: bool,
+    #[serde(default)]
+    pub uefi: bool,
+    #[serde(default)]
+    pub secure_boot: bool,
+    #[serde(default)]
+    pub tpm: bool,
+    pub iso_pattern: Option<String>, // regex to match ISO files
+    #[serde(default)]
+    pub network: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +116,12 @@ pub struct VmConfig {
     pub storage: VmStorageConfig,
     #[serde(default)]
     pub looking_glass: LookingGlassConfig,
+    #[serde(default)]
+    pub firmware: VmFirmwareConfig,
+    #[serde(default)]
+    pub tpm: VmTpmConfig,
+    #[serde(default)]
+    pub compliance_profile: Option<VmComplianceProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +203,76 @@ pub struct VmStorageConfig {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+pub enum VmBootType {
+    Legacy,
+    Uefi,
+}
+
+impl Default for VmBootType {
+    fn default() -> Self {
+        VmBootType::Legacy
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmFirmwareConfig {
+    #[serde(default = "default_vm_boot_type")]
+    pub boot_type: VmBootType,
+    #[serde(default)]
+    pub secure_boot: bool,
+    pub ovmf_code: Option<String>,
+    pub ovmf_vars: Option<String>,
+}
+
+impl Default for VmFirmwareConfig {
+    fn default() -> Self {
+        Self {
+            boot_type: default_vm_boot_type(),
+            secure_boot: false,
+            ovmf_code: None,
+            ovmf_vars: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmTpmVersion {
+    V1_2,
+    V2_0,
+}
+
+impl Default for VmTpmVersion {
+    fn default() -> Self {
+        VmTpmVersion::V2_0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmTpmConfig {
+    #[serde(default = "default_tpm_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_tpm_version")]
+    pub version: VmTpmVersion,
+}
+
+impl Default for VmTpmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_tpm_enabled(),
+            version: default_tpm_version(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmComplianceProfile {
+    Windows11,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum DiskFormat {
     Qcow2,
     Raw,
@@ -193,6 +345,8 @@ impl Default for NovaConfig {
             network: HashMap::new(),
             storage: HashMap::new(),
             ui: UiConfig::default(),
+            iso: IsoConfig::default(),
+            templates: TemplatesConfig::default(),
         }
     }
 }
@@ -209,6 +363,9 @@ impl Default for VmConfig {
             autostart: false,
             storage: VmStorageConfig::default(),
             looking_glass: LookingGlassConfig::default(),
+            firmware: VmFirmwareConfig::default(),
+            tpm: VmTpmConfig::default(),
+            compliance_profile: None,
         }
     }
 }
@@ -327,6 +484,18 @@ fn default_disk_size() -> String {
 
 fn default_create_if_missing() -> bool {
     true
+}
+
+fn default_vm_boot_type() -> VmBootType {
+    VmBootType::Legacy
+}
+
+fn default_tpm_enabled() -> bool {
+    false
+}
+
+fn default_tpm_version() -> VmTpmVersion {
+    VmTpmVersion::V2_0
 }
 
 fn default_ui_theme() -> String {

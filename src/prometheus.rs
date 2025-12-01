@@ -14,6 +14,7 @@ use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone)]
 pub struct PrometheusExporter {
+    bind_addr: String,
     port: u16,
     metrics_registry: Arc<Mutex<MetricsRegistry>>,
     collection_interval_secs: u64,
@@ -139,11 +140,18 @@ pub struct NovaMetrics {
 impl PrometheusExporter {
     pub fn new(port: u16) -> Self {
         Self {
+            bind_addr: "0.0.0.0".to_string(),
             port,
             metrics_registry: Arc::new(Mutex::new(MetricsRegistry::new())),
             collection_interval_secs: 15, // Collect metrics every 15 seconds
             enabled: true,
         }
+    }
+
+    /// Override the bind address (defaults to 0.0.0.0)
+    pub fn with_bind_addr<S: Into<String>>(mut self, addr: S) -> Self {
+        self.bind_addr = addr.into();
+        self
     }
 
     /// Override the default metrics collection interval in seconds (minimum 1 second).
@@ -158,7 +166,11 @@ impl PrometheusExporter {
             return Ok(());
         }
 
-        log_info!("Starting Prometheus metrics exporter on port {}", self.port);
+        log_info!(
+            "Starting Prometheus metrics exporter on {}:{}",
+            self.bind_addr,
+            self.port
+        );
 
         // Start metrics collection task
         let registry = self.metrics_registry.clone();
@@ -195,12 +207,13 @@ impl PrometheusExporter {
     }
 
     async fn start_metrics_server(&self) -> Result<()> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", self.port))
+        let listener = TcpListener::bind(format!("{}:{}", self.bind_addr, self.port))
             .await
             .map_err(|_| NovaError::NetworkError("Failed to bind Prometheus server".to_string()))?;
 
         log_info!(
-            "Prometheus metrics server started on http://0.0.0.0:{}/metrics",
+            "Prometheus metrics server started on http://{}:{}/metrics",
+            self.bind_addr,
             self.port
         );
 
@@ -1148,7 +1161,31 @@ impl MetricsRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::PrometheusExporter;
+    use super::{MetricsRegistry, PrometheusExporter};
+    use std::collections::HashMap;
+
+    #[test]
+    fn exporter_interval_is_clamped_to_one_second() {
+        let exporter = PrometheusExporter::new(9100).with_collection_interval(0);
+        assert_eq!(exporter.collection_interval_secs, 1);
+    }
+
+    #[test]
+    fn registry_reset_clears_all_metric_buckets() {
+        let mut registry = MetricsRegistry::new();
+        registry.increment_counter("nova_test_counter", "help", HashMap::new(), 1.0);
+        registry.set_gauge("nova_test_gauge", "help", HashMap::new(), 42.0);
+        registry.observe_histogram("nova_test_hist", "help", HashMap::new(), 0.5);
+
+        assert!(!registry.counters.is_empty());
+        assert!(!registry.gauges.is_empty());
+        assert!(!registry.histograms.is_empty());
+
+        registry.reset();
+        assert!(registry.counters.is_empty());
+        assert!(registry.gauges.is_empty());
+        assert!(registry.histograms.is_empty());
+    }
 
     #[test]
     fn parse_meminfo_handles_available_memory() {

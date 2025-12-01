@@ -2,16 +2,82 @@ use crate::NovaError;
 use crate::gpu_doctor::{CheckStatus, DiagnosticReport as DoctorReport, GpuDoctor, SystemStatus};
 use crate::gpu_passthrough::{DeviceBindingInfo, GpuCapabilities, GpuManager, PciDevice};
 use crate::theme::{self, ButtonIntent, ButtonRole, GuiTheme};
-use eframe::egui;
-use std::collections::HashMap;
+use eframe::egui::{self, Align, Id, Layout};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+const GPU_STATE_KEY: &str = "nova.gpu-manager.state";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum GpuTab {
     Manager,
     IommuGroups,
     Diagnostics,
+}
+
+impl Default for GpuTab {
+    fn default() -> Self {
+        GpuTab::Manager
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum QuickFilter {
+    All,
+    Assigned,
+    VfioReady,
+    Available,
+    Nvidia,
+    Amd,
+    Intel,
+}
+
+impl Default for QuickFilter {
+    fn default() -> Self {
+        QuickFilter::All
+    }
+}
+
+impl QuickFilter {
+    const fn label(self) -> &'static str {
+        match self {
+            QuickFilter::All => "All",
+            QuickFilter::Assigned => "Assigned",
+            QuickFilter::VfioReady => "VFIO",
+            QuickFilter::Available => "Unassigned",
+            QuickFilter::Nvidia => "NVIDIA",
+            QuickFilter::Amd => "AMD",
+            QuickFilter::Intel => "Intel",
+        }
+    }
+}
+
+const QUICK_FILTERS: [QuickFilter; 7] = [
+    QuickFilter::All,
+    QuickFilter::Assigned,
+    QuickFilter::VfioReady,
+    QuickFilter::Available,
+    QuickFilter::Nvidia,
+    QuickFilter::Amd,
+    QuickFilter::Intel,
+];
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct GpuManagerPersistedState {
+    #[serde(default)]
+    gpu_filter: String,
+    #[serde(default)]
+    selected_vm: String,
+    #[serde(default)]
+    quick_filter: QuickFilter,
+    #[serde(default)]
+    active_tab: GpuTab,
+    #[serde(default)]
+    expanded_cards: Vec<String>,
 }
 
 pub struct GpuManagerGui {
@@ -21,7 +87,11 @@ pub struct GpuManagerGui {
     selected_gpu: Option<String>,
     selected_vm: String,
     gpu_filter: String,
+    quick_filter: QuickFilter,
     active_tab: GpuTab,
+    expanded_cards: HashSet<String>,
+    bulk_selection: HashSet<String>,
+    device_errors: HashMap<String, String>,
 
     // GPU list cache
     gpus: Vec<PciDevice>,
@@ -43,6 +113,8 @@ pub struct GpuManagerGui {
     status_poll_interval: Duration,
     last_status_refresh: Option<Instant>,
     theme: GuiTheme,
+    filter_focus_requested: bool,
+    persist_state_loaded: bool,
 }
 
 impl GpuManagerGui {
@@ -52,7 +124,11 @@ impl GpuManagerGui {
             selected_gpu: None,
             selected_vm: String::new(),
             gpu_filter: String::new(),
+            quick_filter: QuickFilter::All,
             active_tab: GpuTab::Manager,
+            expanded_cards: HashSet::new(),
+            bulk_selection: HashSet::new(),
+            device_errors: HashMap::new(),
             gpus: Vec::new(),
             iommu_groups: HashMap::new(),
             reservations: HashMap::new(),
@@ -64,6 +140,8 @@ impl GpuManagerGui {
             status_poll_interval: Duration::from_secs(3),
             last_status_refresh: None,
             theme: GuiTheme::default(),
+            filter_focus_requested: false,
+            persist_state_loaded: false,
         }
     }
 
@@ -183,6 +261,120 @@ impl GpuManagerGui {
         self.last_status_refresh = Some(Instant::now());
     }
 
+    fn ensure_persisted_state(&mut self, ctx: &egui::Context) {
+        if self.persist_state_loaded {
+            return;
+        }
+
+        let persisted = ctx.data_mut(|data| {
+            data.get_persisted::<GpuManagerPersistedState>(Id::new(GPU_STATE_KEY))
+        });
+
+        if let Some(state) = persisted {
+            self.gpu_filter = state.gpu_filter;
+            self.selected_vm = state.selected_vm;
+            self.quick_filter = state.quick_filter;
+            self.active_tab = state.active_tab;
+            self.expanded_cards = state.expanded_cards.into_iter().collect();
+        }
+
+        self.persist_state_loaded = true;
+    }
+
+    fn persist_state(&self, ctx: &egui::Context) {
+        if !self.persist_state_loaded {
+            return;
+        }
+
+        let state = GpuManagerPersistedState {
+            gpu_filter: self.gpu_filter.clone(),
+            selected_vm: self.selected_vm.clone(),
+            quick_filter: self.quick_filter,
+            active_tab: self.active_tab,
+            expanded_cards: self.expanded_cards.iter().cloned().collect(),
+        };
+
+        ctx.data_mut(|data| {
+            data.insert_persisted(Id::new(GPU_STATE_KEY), state);
+        });
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        ctx.input(|input| {
+            if input.key_pressed(egui::Key::F) && input.modifiers.command_only() {
+                self.filter_focus_requested = true;
+            }
+
+            if input.key_pressed(egui::Key::Num1) && input.modifiers.command_only() {
+                self.active_tab = GpuTab::Manager;
+            }
+            if input.key_pressed(egui::Key::Num2) && input.modifiers.command_only() {
+                self.active_tab = GpuTab::IommuGroups;
+            }
+            if input.key_pressed(egui::Key::Num3) && input.modifiers.command_only() {
+                self.active_tab = GpuTab::Diagnostics;
+            }
+
+            // Shift+Command shortcuts to jump between common filters
+            let shift_command =
+                input.modifiers.command && input.modifiers.shift && !input.modifiers.alt;
+            if shift_command && input.key_pressed(egui::Key::A) {
+                self.toggle_quick_filter(QuickFilter::Assigned);
+            }
+            if shift_command && input.key_pressed(egui::Key::V) {
+                self.toggle_quick_filter(QuickFilter::VfioReady);
+            }
+            if shift_command && input.key_pressed(egui::Key::U) {
+                self.toggle_quick_filter(QuickFilter::Available);
+            }
+        });
+    }
+
+    fn toggle_quick_filter(&mut self, filter: QuickFilter) {
+        if self.quick_filter == filter {
+            self.quick_filter = QuickFilter::All;
+        } else {
+            self.quick_filter = filter;
+        }
+    }
+
+    fn render_filter_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            let edit = egui::TextEdit::singleline(&mut self.gpu_filter)
+                .hint_text("vendor, address, VM")
+                .desired_width(220.0);
+            let response = ui.add(edit);
+            if self.filter_focus_requested {
+                response.request_focus();
+                self.filter_focus_requested = false;
+            }
+            if response.changed() {
+                ui.ctx().request_repaint();
+            }
+            if !self.gpu_filter.is_empty() && ui.small_button("Clear").clicked() {
+                self.gpu_filter.clear();
+            }
+            if self.quick_filter != QuickFilter::All
+                && ui.small_button("Reset Quick Filter").clicked()
+            {
+                self.quick_filter = QuickFilter::All;
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Quick filters:");
+            for filter in QUICK_FILTERS.iter().copied() {
+                let selected = self.quick_filter == filter;
+                let response = ui.selectable_label(selected, filter.label());
+                if response.clicked() {
+                    self.toggle_quick_filter(filter);
+                }
+            }
+        });
+    }
+
     fn themed_button(
         &self,
         ui: &mut egui::Ui,
@@ -204,7 +396,11 @@ impl GpuManagerGui {
     }
 
     fn matches_gpu_filter(&self, gpu: &PciDevice, query: &str) -> bool {
-        if query.is_empty() {
+        self.matches_text_filter(gpu, query) && self.matches_quick_filter(gpu)
+    }
+
+    fn matches_text_filter(&self, gpu: &PciDevice, query: &str) -> bool {
+        if query.trim().is_empty() {
             return true;
         }
 
@@ -226,8 +422,52 @@ impl GpuManagerGui {
         fields.iter().any(|field| field.contains(&q))
     }
 
+    fn matches_quick_filter(&self, gpu: &PciDevice) -> bool {
+        match self.quick_filter {
+            QuickFilter::All => true,
+            QuickFilter::Assigned => self.reservations.contains_key(&gpu.address),
+            QuickFilter::VfioReady => gpu.driver.as_deref() == Some("vfio-pci"),
+            QuickFilter::Available => {
+                !self.reservations.contains_key(&gpu.address)
+                    && gpu.driver.as_deref() != Some("vfio-pci")
+            }
+            QuickFilter::Nvidia => gpu.vendor_id.eq_ignore_ascii_case("10de"),
+            QuickFilter::Amd => gpu.vendor_id.eq_ignore_ascii_case("1002"),
+            QuickFilter::Intel => gpu.vendor_id.eq_ignore_ascii_case("8086"),
+        }
+    }
+
+    fn is_card_expanded(&self, address: &str) -> bool {
+        self.expanded_cards.contains(address)
+    }
+
+    fn toggle_card_expansion(&mut self, address: &str) {
+        if !self.expanded_cards.insert(address.to_string()) {
+            self.expanded_cards.remove(address);
+        }
+    }
+
+    fn set_bulk_selection(&mut self, address: &str, selected: bool) {
+        if selected {
+            self.bulk_selection.insert(address.to_string());
+        } else {
+            self.bulk_selection.remove(address);
+        }
+    }
+
+    fn clear_bulk_selection(&mut self) {
+        self.bulk_selection.clear();
+    }
+
+    fn bulk_selected_devices(&self) -> Vec<String> {
+        let mut devices: Vec<String> = self.bulk_selection.iter().cloned().collect();
+        devices.sort();
+        devices
+    }
+
     fn bind_to_vfio(&mut self, device_address: String) {
-        self.with_gpu_manager(move |manager| {
+        let device_context = device_address.clone();
+        self.with_gpu_manager(Some(device_context), move |manager| {
             let before = manager.binding_info(&device_address);
             manager.bind_device_to_vfio(&device_address)?;
             let after = manager.binding_info(&device_address);
@@ -241,7 +481,8 @@ impl GpuManagerGui {
     }
 
     fn reattach_host_driver(&mut self, device_address: String) {
-        self.with_gpu_manager(move |manager| {
+        let device_context = device_address.clone();
+        self.with_gpu_manager(Some(device_context), move |manager| {
             let before = manager.binding_info(&device_address);
             manager.reattach_device_driver(&device_address)?;
             let after = manager.binding_info(&device_address);
@@ -255,7 +496,8 @@ impl GpuManagerGui {
     }
 
     fn force_unbind(&mut self, device_address: String) {
-        self.with_gpu_manager(move |manager| {
+        let device_context = device_address.clone();
+        self.with_gpu_manager(Some(device_context), move |manager| {
             let before = manager.binding_info(&device_address);
             manager.force_unbind_device(&device_address)?;
             manager.refresh_device_status();
@@ -269,8 +511,29 @@ impl GpuManagerGui {
         });
     }
 
+    fn bulk_bind_selection(&mut self) {
+        for address in self.bulk_selected_devices() {
+            self.bind_to_vfio(address);
+        }
+        self.clear_bulk_selection();
+    }
+
+    fn bulk_reattach_selection(&mut self) {
+        for address in self.bulk_selected_devices() {
+            self.reattach_host_driver(address);
+        }
+        self.clear_bulk_selection();
+    }
+
+    fn bulk_force_unbind_selection(&mut self) {
+        for address in self.bulk_selected_devices() {
+            self.force_unbind(address);
+        }
+        self.clear_bulk_selection();
+    }
+
     fn load_vfio_modules(&mut self) {
-        self.with_gpu_manager(|manager| {
+        self.with_gpu_manager(None, |manager| {
             manager.load_vfio_stack()?;
             let missing = manager.missing_vfio_modules();
             if missing.is_empty() {
@@ -284,7 +547,7 @@ impl GpuManagerGui {
         });
     }
 
-    fn with_gpu_manager<F>(&mut self, action: F)
+    fn with_gpu_manager<F>(&mut self, context_device: Option<String>, action: F)
     where
         F: FnOnce(&mut GpuManager) -> std::result::Result<String, NovaError>,
     {
@@ -298,12 +561,18 @@ impl GpuManagerGui {
                         self.reservations.insert(addr.clone(), vm.clone());
                     }
 
+                    if let Some(device) = context_device.as_ref() {
+                        self.device_errors.remove(device);
+                    }
                     self.last_message = Some(success_message);
                     self.last_error = None;
                     self.last_status_refresh = Some(Instant::now());
                 }
                 Err(err) => {
-                    self.last_error = Some(format!("{:?}", err));
+                    if let Some(device) = context_device.clone() {
+                        self.device_errors.insert(device, err.to_string());
+                    }
+                    self.last_error = Some(err.to_string());
                     self.last_message = None;
                 }
             },
@@ -406,6 +675,31 @@ impl GpuManagerGui {
             }
         });
 
+        if let Some(report) = &self.diagnostic_report {
+            let (status_text, status_color, icon) = match report.overall_status {
+                SystemStatus::Ready => ("Ready", egui::Color32::from_rgb(96, 200, 140), "✓"),
+                SystemStatus::NeedsConfiguration => (
+                    "Needs Configuration",
+                    egui::Color32::from_rgb(255, 170, 0),
+                    "⚠",
+                ),
+                SystemStatus::NotSupported => {
+                    ("Not Supported", egui::Color32::from_rgb(220, 80, 80), "✗")
+                }
+            };
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(status_color, format!("{} {}", icon, status_text));
+                ui.small(format!(
+                    "Checks {} • Warnings {} • Errors {}",
+                    report.checks.len(),
+                    report.warnings.len(),
+                    report.errors.len()
+                ));
+            });
+        }
+
         ui.add_space(8.0);
 
         // Draw active tab
@@ -444,19 +738,7 @@ impl GpuManagerGui {
 
         ui.add_space(6.0);
 
-        ui.horizontal(|ui| {
-            ui.label("Filter:");
-            let edit = egui::TextEdit::singleline(&mut self.gpu_filter)
-                .hint_text("vendor, address, VM")
-                .desired_width(220.0);
-            let response = ui.add(edit);
-            if response.changed() {
-                ui.ctx().request_repaint();
-            }
-            if !self.gpu_filter.is_empty() && ui.small_button("Clear").clicked() {
-                self.gpu_filter.clear();
-            }
-        });
+        self.render_filter_controls(ui);
 
         ui.add_space(4.0);
 
@@ -483,6 +765,23 @@ impl GpuManagerGui {
             return;
         }
 
+        ui.horizontal(|ui| {
+            if ui.small_button("Select visible").clicked() {
+                for gpu in &filtered_gpus {
+                    self.bulk_selection.insert(gpu.address.clone());
+                }
+            }
+            if !self.bulk_selection.is_empty() && ui.small_button("Clear selection").clicked() {
+                self.clear_bulk_selection();
+            }
+            if !self.bulk_selection.is_empty() {
+                ui.small(format!(
+                    "{} GPU(s) queued for bulk actions",
+                    self.bulk_selection.len()
+                ));
+            }
+        });
+
         // GPU assignment section
         ui.group(|ui| {
             ui.label(egui::RichText::new("Quick Assignment").strong());
@@ -492,6 +791,34 @@ impl GpuManagerGui {
                 ui.text_edit_singleline(&mut self.selected_vm);
             });
         });
+
+        if !self.bulk_selection.is_empty() {
+            ui.add_space(6.0);
+            ui.group(|ui| {
+                ui.label(egui::RichText::new("Bulk Actions").strong());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if self
+                        .preset_button(ui, ButtonIntent::Bind, Some("Selected to VFIO"), true)
+                        .clicked()
+                    {
+                        self.bulk_bind_selection();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Configure, Some("Host Driver"), true)
+                        .clicked()
+                    {
+                        self.bulk_reattach_selection();
+                    }
+                    if self
+                        .preset_button(ui, ButtonIntent::Unbind, Some("Driver"), true)
+                        .clicked()
+                    {
+                        self.bulk_force_unbind_selection();
+                    }
+                });
+            });
+        }
 
         ui.add_space(8.0);
 
@@ -528,6 +855,7 @@ impl GpuManagerGui {
         let is_selected = self.selected_gpu.as_ref() == Some(&gpu.address);
         let is_assigned = self.reservations.contains_key(&gpu.address);
         let driver = gpu.driver.as_deref();
+        let expanded = self.is_card_expanded(&gpu.address);
 
         egui::Frame::none()
             .fill(if is_selected {
@@ -547,6 +875,11 @@ impl GpuManagerGui {
             .inner_margin(egui::Margin::same(12.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let mut bulk_checked = self.bulk_selection.contains(&gpu.address);
+                    if ui.checkbox(&mut bulk_checked, "").changed() {
+                        self.set_bulk_selection(&gpu.address, bulk_checked);
+                    }
+
                     let vendor_color = if gpu.vendor_id == "10de" {
                         egui::Color32::from_rgb(118, 185, 0)
                     } else if gpu.vendor_id == "1002" {
@@ -566,6 +899,17 @@ impl GpuManagerGui {
                         ui.add_space(6.0);
                         ui.label(format!("IOMMU Group: {}", group));
                     }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = if expanded {
+                            "Hide details"
+                        } else {
+                            "Show details"
+                        };
+                        if ui.small_button(label).clicked() {
+                            self.toggle_card_expansion(&gpu.address);
+                        }
+                    });
                 });
 
                 ui.label(egui::RichText::new(&gpu.device_name).strong());
@@ -586,32 +930,34 @@ impl GpuManagerGui {
                 ui.small(format!("{}:{}", gpu.vendor_id, gpu.device_id));
                 ui.add_space(4.0);
 
-                if let Some(caps) = self.capabilities.get(&gpu.address) {
-                    let generation = caps
-                        .generation
-                        .as_ref()
-                        .map(|g| g.to_string())
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    let min_driver = caps.minimum_driver.as_deref().unwrap_or("-");
-                    let recommended_kernel = caps.recommended_kernel.as_deref().unwrap_or("-");
-                    let tcc_status = if caps.tcc_supported { "Yes" } else { "No" };
+                if expanded {
+                    if let Some(caps) = self.capabilities.get(&gpu.address) {
+                        let generation = caps
+                            .generation
+                            .as_ref()
+                            .map(|g| g.to_string())
+                            .unwrap_or_else(|| "Unknown".to_string());
+                        let min_driver = caps.minimum_driver.as_deref().unwrap_or("-");
+                        let recommended_kernel = caps.recommended_kernel.as_deref().unwrap_or("-");
+                        let tcc_status = if caps.tcc_supported { "Yes" } else { "No" };
 
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Generation: {}", generation));
-                        ui.add_space(12.0);
-                        ui.label(format!("Min Driver: {}", min_driver));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Kernel: {}", recommended_kernel));
-                        ui.add_space(12.0);
-                        ui.label(format!("TCC: {}", tcc_status));
-                    });
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Generation: {}", generation));
+                            ui.add_space(12.0);
+                            ui.label(format!("Min Driver: {}", min_driver));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Kernel: {}", recommended_kernel));
+                            ui.add_space(12.0);
+                            ui.label(format!("TCC: {}", tcc_status));
+                        });
 
-                    if let Some(vram_mb) = caps.vram_mb {
-                        ui.label(format!("VRAM: {} MB", vram_mb));
+                        if let Some(vram_mb) = caps.vram_mb {
+                            ui.label(format!("VRAM: {} MB", vram_mb));
+                        }
+
+                        ui.add_space(4.0);
                     }
-
-                    ui.add_space(4.0);
                 }
 
                 let (status_text, status_color) =
@@ -640,6 +986,12 @@ impl GpuManagerGui {
                     };
 
                 ui.colored_label(status_color, status_text);
+                if let Some(err) = self.device_errors.get(&gpu.address) {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        format!("VFIO action failed: {}", err),
+                    );
+                }
                 ui.add_space(6.0);
 
                 let address = gpu.address.clone();
@@ -966,6 +1318,10 @@ impl GpuManagerWindow {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
+        self.gui.ensure_persisted_state(ctx);
+        if self.open {
+            self.gui.handle_shortcuts(ctx);
+        }
         egui::Window::new("GPU Passthrough Manager")
             .open(&mut self.open)
             .default_size([900.0, 600.0])
@@ -973,6 +1329,7 @@ impl GpuManagerWindow {
             .show(ctx, |ui| {
                 self.gui.draw(ui);
             });
+        self.gui.persist_state(ctx);
     }
 
     pub fn set_theme(&mut self, theme: GuiTheme) {

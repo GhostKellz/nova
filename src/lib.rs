@@ -22,8 +22,8 @@ pub mod network;
 pub mod pci_passthrough;
 pub mod performance_monitor;
 pub mod port_monitor;
+pub mod preflight;
 pub mod prometheus;
-pub mod rustdesk_integration;
 pub mod spice_console;
 pub mod sriov;
 pub mod storage;
@@ -35,6 +35,7 @@ pub mod theme;
 pub mod usb_passthrough;
 pub mod vm;
 pub mod vm_enhanced;
+pub mod vm_templates;
 
 pub use error::NovaError;
 pub use instance::{Instance, InstanceStatus, InstanceType};

@@ -52,46 +52,6 @@ mouse_input = "Relative"
 width = 1920
 height = 1080
 
-[container.ml-training]
-capsule = "pytorch/pytorch:latest-gpu"
-volumes = []
-network = "nova-net"
-autostart = false
-runtime = "bolt"
-
-[container.ml-training.env]
-
-[container.ml-training.bolt]
-isolation = "standard"
-gpu_access = true
-gpu_devices = ["nvidia0"]
-memory_limit = "8Gi"
-security_profile = "gpu"
-network_mode = ""
-read_only = false
-no_new_privileges = false
-
-[container.database]
-capsule = "postgres:15"
-volumes = ["./postgres-data:/var/lib/postgresql/data"]
-network = "nova-net"
-autostart = true
-runtime = "docker"
-
-[container.database.env]
-POSTGRES_DB = "mydb"
-POSTGRES_USER = "user"
-POSTGRES_PASSWORD = "pass"
-
-[container.database.bolt]
-isolation = "standard"
-gpu_access = false
-gpu_devices = []
-security_profile = "default"
-network_mode = "bridge"
-read_only = false
-no_new_privileges = false
-
 [container.web-api]
 capsule = "ubuntu:22.04"
 volumes = [
@@ -117,6 +77,46 @@ network_mode = ""
 read_only = false
 no_new_privileges = false
 
+[container.database]
+capsule = "postgres:15"
+volumes = ["./postgres-data:/var/lib/postgresql/data"]
+network = "nova-net"
+autostart = true
+runtime = "docker"
+
+[container.database.env]
+POSTGRES_DB = "mydb"
+POSTGRES_USER = "user"
+POSTGRES_PASSWORD = "pass"
+
+[container.database.bolt]
+isolation = "standard"
+gpu_access = false
+gpu_devices = []
+security_profile = "default"
+network_mode = "bridge"
+read_only = false
+no_new_privileges = false
+
+[container.ml-training]
+capsule = "pytorch/pytorch:latest-gpu"
+volumes = []
+network = "nova-net"
+autostart = false
+runtime = "bolt"
+
+[container.ml-training.env]
+
+[container.ml-training.bolt]
+isolation = "standard"
+gpu_access = true
+gpu_devices = ["nvidia0"]
+memory_limit = "8Gi"
+security_profile = "gpu"
+network_mode = ""
+read_only = false
+no_new_privileges = false
+
 [network.bridge0]
 type = "bridge"
 interfaces = ["enp6s0"]
@@ -133,7 +133,7 @@ gateway = "10.100.0.1"
 [storage]
 
 [ui]
-theme = "dracula"
+theme = "tokyo-night-storm"
 font_family = "fira-code-nerd"
 font_size = 15.0
 compact_layout = false

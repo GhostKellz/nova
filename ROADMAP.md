@@ -16,12 +16,14 @@ _Target window: January – March 2026_
 ### Goals
 - Ship first-class observability with a Prometheus exporter, Grafana dashboards, and alerting runbooks.
 - Launch a versioned docs portal covering install, NovaFile reference, CLI/API usage, and troubleshooting.
+- Keep the README/COMMANDS docs in sync with Material Ocean theming, Windows 11 presets, networking monitoring knobs, and GPU board workflows.
 - Deliver support tooling (`nova support bundle`, diagnostics helpers) with redaction and escalation guidance.
 - Close the feedback loop through office hours, docs analytics, and RC5 advisory outreach.
 
 ### Key Deliverables
 - Configurable `nova-metrics` exporter with default Grafana dashboard pack checked into `docs/`.
 - mdBook/Docusaurus site (docs.nova.dev) with search, link checking, and automated publishing in CI.
+- Rolling documentation refresh from the repository root (README, COMMANDS, NETWORKING) so changes land before the full docs portal ships.
 - `nova support bundle` and `nova diag` commands bundling logs/configs with scrub options and playbooks.
 - Community rollout kit: onboarding guides, webinar plan, and feedback intake widgets feeding the roadmap board.
 
@@ -37,6 +39,7 @@ _Target window: January – March 2026_
 - ✅ Template gallery launched with metadata registry, provenance badges, and curated starter stacks.
 - ✅ Live metrics panels and topology visualizations landed in the Wayland UI without introducing stalls.
 - ✅ Accessibility pass closed high-contrast gaps, keyboard traps, and notification polish feedback.
+- ✅ Material Ocean theme, capture auto-scan controls, offline monitoring thresholds, and GPU board persistence/bulk actions keep the GUI feeling cohesive release to release.
 - ✅ RC4 retrospective documented validation library reuse and telemetry alignment lessons for RC5.
 
 ## Earlier Milestone — RC3 Networking & Infrastructure Parity

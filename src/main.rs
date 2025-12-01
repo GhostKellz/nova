@@ -13,6 +13,7 @@ use nova::{
         SwitchType,
     },
     pci_passthrough::PciPassthroughManager,
+    preflight,
     prometheus::PrometheusExporter,
     spice_console::{SpiceConfig, SpiceManager},
     sriov::SriovManager,
@@ -169,16 +170,19 @@ enum WizardCommands {
     Vm(WizardVmArgs),
 }
 
+const WIZARD_DEFAULT_CPU: u32 = 4;
+const WIZARD_DEFAULT_MEMORY: &str = "8Gi";
+
 #[derive(Args, Debug)]
 struct WizardVmArgs {
     /// Name of the VM to generate (letters, numbers, '-', '_')
     name: String,
-    /// Number of virtual CPUs to allocate
-    #[arg(long, default_value_t = 4)]
-    cpu: u32,
-    /// Memory allocation (e.g. "8Gi")
-    #[arg(long, default_value = "8Gi")]
-    memory: String,
+    /// Number of virtual CPUs to allocate (defaults to 4)
+    #[arg(long)]
+    cpu: Option<u32>,
+    /// Memory allocation (e.g. "8Gi", defaults to 8Gi)
+    #[arg(long)]
+    memory: Option<String>,
     /// Target network bridge (omit to choose interactively)
     #[arg(long)]
     network: Option<String>,
@@ -191,12 +195,34 @@ struct WizardVmArgs {
     /// Start the VM automatically with Nova
     #[arg(long)]
     autostart: bool,
+    /// Apply a preset with sensible defaults (e.g. windows11)
+    #[arg(long, value_enum)]
+    preset: Option<VmPreset>,
     /// Persist the generated entry to a NovaFile
     #[arg(long)]
     apply: bool,
     /// Alternate output file (defaults to --config/NovaFile)
     #[arg(long)]
     output: Option<PathBuf>,
+}
+
+impl WizardVmArgs {
+    fn resolved_cpu(&self) -> u32 {
+        self.cpu.unwrap_or(WIZARD_DEFAULT_CPU)
+    }
+
+    fn resolved_memory(&self) -> String {
+        self.memory
+            .clone()
+            .unwrap_or_else(|| WIZARD_DEFAULT_MEMORY.to_string())
+    }
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum VmPreset {
+    Windows11,
+    #[value(name = "gpu-labs")]
+    GpuLabs,
 }
 
 #[derive(Subcommand)]
@@ -732,6 +758,9 @@ enum MetricsCommands {
         /// Metrics collection interval in seconds
         #[arg(long, default_value_t = 15)]
         interval: u64,
+        /// Bind address (defaults to 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
     },
     /// Print a one-off metrics snapshot to stdout
     Snapshot,
@@ -756,9 +785,18 @@ enum SupportCommands {
         /// Redact IP and MAC addresses from collected files
         #[arg(long)]
         redact: bool,
+        /// Skip diagnostics capture
+        #[arg(long)]
+        no_diagnostics: bool,
     },
     /// Run environment diagnostics and print a readiness summary
-    Diagnose,
+    Diagnose {
+        /// Emit machine-readable JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run Arch-focused kernel/userland preflight checks
+    Preflight,
 }
 
 fn parse_cli_dhcp_range(range: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
@@ -2084,12 +2122,29 @@ Volumes:"
             }
         }
         Commands::Metrics { metrics_command } => match metrics_command {
-            MetricsCommands::Serve { port, interval } => {
+            MetricsCommands::Serve {
+                port,
+                interval,
+                bind,
+            } => {
+                if port == 0 {
+                    return Err(NovaError::ConfigError(
+                        "metrics --port must be greater than zero".to_string(),
+                    ));
+                }
+                if interval == 0 {
+                    return Err(NovaError::ConfigError(
+                        "metrics --interval must be greater than zero".to_string(),
+                    ));
+                }
+
                 println!(
-                    "Starting Prometheus exporter on port {} (interval {}s). Press Ctrl+C to exit.",
-                    port, interval
+                    "Starting Prometheus exporter on {}:{} (interval {}s). Press Ctrl+C to exit.",
+                    bind, port, interval
                 );
-                let exporter = PrometheusExporter::new(port).with_collection_interval(interval);
+                let exporter = PrometheusExporter::new(port)
+                    .with_bind_addr(bind)
+                    .with_collection_interval(interval);
                 exporter.start().await?;
             }
             MetricsCommands::Snapshot => {
@@ -2105,6 +2160,7 @@ Volumes:"
                 no_system,
                 no_metrics,
                 redact,
+                no_diagnostics,
             } => {
                 let mut options = SupportBundleOptions::default();
                 options.output_dir = output;
@@ -2112,17 +2168,32 @@ Volumes:"
                 options.include_logs = !no_logs;
                 options.include_system = !no_system;
                 options.include_metrics = !no_metrics;
+                options.include_diagnostics = !no_diagnostics;
                 options.redact = redact;
 
                 let bundle_path = support::generate_support_bundle(options).await?;
                 println!("Support bundle archived at {}", bundle_path.display());
             }
-            SupportCommands::Diagnose => {
+            SupportCommands::Diagnose { json } => {
                 let report = support::run_diagnostics().await?;
-                println!("{}", report);
-                if !report.is_healthy() {
+                if json {
+                    let payload = serde_json::to_string_pretty(&report)?;
+                    println!("{}", payload);
+                } else {
+                    println!("{}", report);
+                    if !report.is_healthy() {
+                        println!(
+                            "Detected issues above. Consider running 'nova support bundle --redact' and sharing with maintainers."
+                        );
+                    }
+                }
+            }
+            SupportCommands::Preflight => {
+                let summary = preflight::run_preflight()?;
+                println!("{}", summary);
+                if !summary.is_ready() {
                     println!(
-                        "Detected issues above. Consider running 'nova support bundle --redact' and sharing with maintainers."
+                        "Missing prerequisites detected. Consult COMMANDS.md → Diagnostics for remediation steps."
                     );
                 }
             }
@@ -2398,11 +2469,12 @@ fn handle_vm_wizard(
     default_output: &PathBuf,
 ) -> Result<()> {
     ensure_valid_vm_name(&args.name)?;
+    apply_wizard_preset_defaults(&mut args);
 
     let selected_network = resolve_wizard_network(&args.name, args.network.clone(), config)?;
     args.network = Some(selected_network.clone());
 
-    let snippet = build_vm_wizard_snippet(&args, &selected_network);
+    let mut snippet = build_vm_wizard_snippet(&args, &selected_network);
 
     if !args.apply {
         println!("# NovaFile snippet (dry-run)\n");
@@ -2428,6 +2500,17 @@ fn handle_vm_wizard(
     } else {
         None
     };
+
+    if let Some(VmPreset::Windows11) = args.preset {
+        snippet.push_str("compliance_profile = \"windows11\"\n");
+        snippet.push_str(&format!("[vm.{}.firmware]\n", args.name));
+        snippet.push_str("boot_type = \"uefi\"\n");
+        snippet.push_str("secure_boot = true\n\n");
+
+        snippet.push_str(&format!("[vm.{}.tpm]\n", args.name));
+        snippet.push_str("enabled = true\n");
+        snippet.push_str("version = \"v2-0\"\n\n");
+    }
 
     if let Some(content) = &existing_content {
         if content.contains(&format!("[vm.{}]", args.name)) {
@@ -2471,6 +2554,29 @@ fn handle_vm_wizard(
     println!("✅ Added VM '{}' to {}", args.name, target_path.display());
 
     Ok(())
+}
+
+fn apply_wizard_preset_defaults(args: &mut WizardVmArgs) {
+    if let Some(preset) = args.preset {
+        match preset {
+            VmPreset::Windows11 => {}
+            VmPreset::GpuLabs => {
+                if args.cpu.is_none() {
+                    args.cpu = Some(8);
+                }
+                if args.memory.is_none() {
+                    args.memory = Some("16Gi".to_string());
+                }
+                args.gpu = true;
+            }
+        }
+    }
+    if args.cpu.is_none() {
+        args.cpu = Some(WIZARD_DEFAULT_CPU);
+    }
+    if args.memory.is_none() {
+        args.memory = Some(WIZARD_DEFAULT_MEMORY.to_string());
+    }
 }
 
 fn resolve_wizard_network(
@@ -2565,13 +2671,15 @@ fn build_vm_wizard_snippet(args: &WizardVmArgs, network: &str) -> String {
         .image
         .clone()
         .unwrap_or_else(|| format!("/var/lib/nova/images/{}.qcow2", args.name));
+    let cpu = args.resolved_cpu();
+    let memory = args.resolved_memory();
 
     let mut snippet = String::new();
     snippet.push_str("# Generated with `nova wizard vm`\n");
     snippet.push_str(&format!("[vm.{}]\n", args.name));
     snippet.push_str(&format!("image = \"{}\"\n", image_path));
-    snippet.push_str(&format!("cpu = {}\n", args.cpu));
-    snippet.push_str(&format!("memory = \"{}\"\n", args.memory));
+    snippet.push_str(&format!("cpu = {}\n", cpu));
+    snippet.push_str(&format!("memory = \"{}\"\n", memory));
     snippet.push_str(&format!(
         "gpu_passthrough = {}\n",
         if args.gpu { "true" } else { "false" }

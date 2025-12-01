@@ -58,6 +58,9 @@ nova wizard vm my-vm --cpu 4 --memory 8Gi --apply
 
 # Skip the prompt by specifying a network explicitly
 nova wizard vm my-vm --network bridge0 --apply
+
+# Apply the gpu-labs preset (8 vCPU, 16Gi memory, GPU passthrough enabled)
+nova wizard vm win11 --preset gpu-labs --apply
 ```
 
 > The wizard inspects the networks defined in your NovaFile and lets you pick one when `--network` is omitted.
