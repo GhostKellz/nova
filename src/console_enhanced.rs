@@ -1,29 +1,29 @@
-use crate::console::{ConsoleConfig, ConsoleManager, ConsoleSession};
-use crate::rustdesk_integration::{
-    PerformanceProfile, RustDeskConfig, RustDeskManager, RustDeskSession,
-};
-use crate::{NovaError, Result, log_error, log_info, log_warn};
+// Enhanced Console Manager for Nova
+// Supports SPICE, VNC, and Looking Glass protocols
+
+use crate::console::{ConsoleConfig, ConsoleManager};
+use crate::looking_glass::{LookingGlassConfig, LookingGlassManager, LookingGlassProfile};
+use crate::{NovaError, Result, log_info, log_warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnhancedConsoleConfig {
-    pub standard_console: ConsoleConfig,
-    pub rustdesk_config: RustDeskConfig,
+    pub console_config: ConsoleConfig,
+    pub looking_glass_config: LookingGlassConfig,
     pub preferred_protocol: PreferredProtocol,
-    pub auto_install_agents: bool,
     pub performance_monitoring: bool,
-    pub session_recording: bool,
     pub multi_monitor_support: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PreferredProtocol {
-    RustDesk, // Highest performance
-    SPICE,    // Good performance, native libvirt
-    VNC,      // Universal compatibility
-    Auto,     // Auto-select based on VM capabilities
+    LookingGlass, // Best for GPU passthrough VMs
+    SPICE,        // Good performance, native libvirt integration
+    VNC,          // Universal compatibility
+    Auto,         // Auto-select based on VM capabilities
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +31,7 @@ pub struct UnifiedConsoleSession {
     pub vm_name: String,
     pub session_id: String,
     pub protocol_used: ActiveProtocol,
+    pub connection_info: ConnectionDetails,
     pub performance_score: f32,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub last_accessed: chrono::DateTime<chrono::Utc>,
@@ -40,124 +41,90 @@ pub struct UnifiedConsoleSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActiveProtocol {
-    RustDesk(RustDeskSession),
-    Standard(ConsoleSession),
+    LookingGlass,
+    SPICE,
+    VNC,
+    Serial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionDetails {
+    pub host: String,
+    pub port: u16,
+    pub protocol: String,
+    pub viewer_command: String,
+    pub shmem_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionFeatures {
-    pub file_transfer: bool,
     pub clipboard_sync: bool,
     pub audio_enabled: bool,
     pub multi_monitor: bool,
     pub hardware_acceleration: bool,
-    pub encryption: bool,
-    pub recording: bool,
+    pub usb_redirect: bool,
+    pub low_latency: bool,
 }
 
 pub struct EnhancedConsoleManager {
     config: EnhancedConsoleConfig,
     console_manager: ConsoleManager,
-    rustdesk_manager: RustDeskManager,
+    looking_glass_manager: LookingGlassManager,
     unified_sessions: Arc<Mutex<HashMap<String, UnifiedConsoleSession>>>,
     performance_scores: Arc<Mutex<HashMap<String, f32>>>,
 }
 
 impl EnhancedConsoleManager {
     pub fn new(config: EnhancedConsoleConfig) -> Self {
-        let console_manager = ConsoleManager::new(config.standard_console.clone());
-        let rustdesk_manager = RustDeskManager::new(config.rustdesk_config.clone());
+        let console_manager = ConsoleManager::new(config.console_config.clone());
+        let looking_glass_manager = LookingGlassManager::new();
 
         Self {
             config,
             console_manager,
-            rustdesk_manager,
+            looking_glass_manager,
             unified_sessions: Arc::new(Mutex::new(HashMap::new())),
             performance_scores: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Create the best possible console connection for a VM
+    /// Create the best console connection for a VM
     pub async fn create_optimal_console(
         &mut self,
         vm_name: &str,
-        vm_ip: Option<&str>,
+        _vm_ip: Option<&str>,
     ) -> Result<UnifiedConsoleSession> {
-        log_info!("Creating optimal console connection for VM: {}", vm_name);
+        log_info!("Creating console session for VM: {}", vm_name);
 
-        // Analyze VM capabilities and network conditions
-        let vm_analysis = self.analyze_vm_capabilities(vm_name, vm_ip).await?;
-
-        // Select the best protocol based on analysis
-        let selected_protocol = self.select_optimal_protocol(&vm_analysis).await;
+        // Analyze VM to determine best protocol
+        let analysis = self.analyze_vm_capabilities(vm_name).await?;
+        let selected_protocol = self.select_optimal_protocol(&analysis);
 
         log_info!(
-            "Selected protocol for VM '{}': {:?}",
+            "Selected protocol for '{}': {:?}",
             vm_name,
             selected_protocol
         );
 
         let session = match selected_protocol {
-            PreferredProtocol::RustDesk => {
-                if let Some(ip) = vm_ip {
-                    match self
-                        .create_rustdesk_session(vm_name, Some(ip), vm_analysis.clone())
-                        .await
-                    {
-                        Ok(session) => session,
-                        Err(err) => {
-                            log_warn!(
-                                "RustDesk session failed for '{}': {:?}. Falling back to SPICE",
-                                vm_name,
-                                err
-                            );
-                            self.create_spice_session(vm_name, vm_analysis.clone())
-                                .await?
-                        }
-                    }
-                } else {
-                    log_warn!(
-                        "No management IP available for '{}'; using SPICE console fallback",
-                        vm_name
-                    );
-                    self.create_spice_session(vm_name, vm_analysis.clone())
-                        .await?
-                }
+            PreferredProtocol::LookingGlass => {
+                self.create_looking_glass_session(vm_name, &analysis).await?
             }
             PreferredProtocol::SPICE => {
-                self.create_spice_session(vm_name, vm_analysis.clone())
-                    .await?
+                self.create_spice_session(vm_name, &analysis).await?
             }
-            PreferredProtocol::VNC => self.create_vnc_session(vm_name).await?,
+            PreferredProtocol::VNC => {
+                self.create_vnc_session(vm_name).await?
+            }
             PreferredProtocol::Auto => {
-                // Should never happen; already resolved above
-                if let Some(ip) = vm_ip {
-                    match self
-                        .create_rustdesk_session(vm_name, Some(ip), vm_analysis.clone())
-                        .await
-                    {
-                        Ok(session) => session,
-                        Err(err) => {
-                            log_warn!(
-                                "Auto protocol RustDesk fallback for '{}' failed: {:?}",
-                                vm_name,
-                                err
-                            );
-                            self.create_spice_session(vm_name, vm_analysis.clone())
-                                .await?
-                        }
-                    }
-                } else {
-                    self.create_spice_session(vm_name, vm_analysis.clone())
-                        .await?
-                }
+                // Auto already resolved by select_optimal_protocol
+                self.create_spice_session(vm_name, &analysis).await?
             }
         };
 
-        // Start performance monitoring
+        // Start performance monitoring if enabled
         if self.config.performance_monitoring {
-            self.start_performance_monitoring(&session.session_id)
-                .await?;
+            self.start_performance_monitoring(&session.session_id).await?;
         }
 
         // Store session
@@ -167,7 +134,7 @@ impl EnhancedConsoleManager {
         }
 
         log_info!(
-            "Optimal console session created: {} (score: {:.2})",
+            "Console session created: {} (score: {:.0})",
             session.session_id,
             session.performance_score
         );
@@ -175,134 +142,156 @@ impl EnhancedConsoleManager {
         Ok(session)
     }
 
-    async fn create_rustdesk_session(
+    async fn create_looking_glass_session(
         &mut self,
         vm_name: &str,
-        vm_ip: Option<&str>,
-        analysis: VmAnalysis,
+        analysis: &VmAnalysis,
     ) -> Result<UnifiedConsoleSession> {
-        log_info!("Creating RustDesk session for VM: {}", vm_name);
+        log_info!("Creating Looking Glass session for VM: {}", vm_name);
 
-        let vm_ip = vm_ip.ok_or_else(|| {
-            log_error!("VM IP required for RustDesk connection");
-            NovaError::SystemCommandFailed
-        })?;
-
-        // Determine optimal performance profile
-        let performance_profile = self.determine_performance_profile(&analysis);
-
-        let rustdesk_session = self
-            .rustdesk_manager
-            .create_rustdesk_session(vm_name, vm_ip, performance_profile)
-            .await?;
-
-        let features = SessionFeatures {
-            file_transfer: true,
-            clipboard_sync: true,
-            audio_enabled: true,
-            multi_monitor: analysis.supports_multi_monitor,
-            hardware_acceleration: analysis.has_gpu,
-            encryption: true,
-            recording: self.config.session_recording,
+        // Select profile based on VM capabilities
+        let profile = if analysis.has_gpu && analysis.cpu_cores >= 4 {
+            LookingGlassProfile::Gaming
+        } else {
+            LookingGlassProfile::Productivity
         };
 
-        let session = UnifiedConsoleSession {
+        let lg_config = profile.to_config();
+        self.looking_glass_manager.register_config(vm_name.to_string(), lg_config.clone());
+
+        let session_id = format!("lg-{}-{}", vm_name, chrono::Utc::now().timestamp());
+
+        let connection = ConnectionDetails {
+            host: "localhost".to_string(),
+            port: 0, // Looking Glass uses shared memory, not network
+            protocol: "looking-glass".to_string(),
+            viewer_command: format!(
+                "looking-glass-client -f {}",
+                lg_config.shmem_path.display()
+            ),
+            shmem_path: Some(lg_config.shmem_path.display().to_string()),
+        };
+
+        let features = SessionFeatures {
+            clipboard_sync: true,
+            audio_enabled: lg_config.audio_enabled,
+            multi_monitor: analysis.supports_multi_monitor,
+            hardware_acceleration: true,
+            usb_redirect: false,
+            low_latency: true,
+        };
+
+        Ok(UnifiedConsoleSession {
             vm_name: vm_name.to_string(),
-            session_id: rustdesk_session.session_id.clone(),
-            protocol_used: ActiveProtocol::RustDesk(rustdesk_session),
-            performance_score: 95.0, // RustDesk gets highest score
+            session_id,
+            protocol_used: ActiveProtocol::LookingGlass,
+            connection_info: connection,
+            performance_score: 95.0,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
             active: true,
             features,
-        };
-
-        Ok(session)
+        })
     }
 
     async fn create_spice_session(
         &mut self,
         vm_name: &str,
-        analysis: VmAnalysis,
+        analysis: &VmAnalysis,
     ) -> Result<UnifiedConsoleSession> {
         log_info!("Creating SPICE session for VM: {}", vm_name);
 
         let console_session = self.console_manager.create_spice_console(vm_name).await?;
 
+        let connection = ConnectionDetails {
+            host: console_session.connection_info.host.clone(),
+            port: console_session.connection_info.port,
+            protocol: "spice".to_string(),
+            viewer_command: format!(
+                "remote-viewer spice://{}:{}",
+                console_session.connection_info.host,
+                console_session.connection_info.port
+            ),
+            shmem_path: None,
+        };
+
         let features = SessionFeatures {
-            file_transfer: false, // SPICE doesn't have native file transfer
             clipboard_sync: true,
             audio_enabled: true,
             multi_monitor: analysis.supports_multi_monitor,
             hardware_acceleration: analysis.has_gpu,
-            encryption: false,
-            recording: false,
+            usb_redirect: true,
+            low_latency: false,
         };
 
-        let session = UnifiedConsoleSession {
+        Ok(UnifiedConsoleSession {
             vm_name: vm_name.to_string(),
-            session_id: console_session.session_id.clone(),
-            protocol_used: ActiveProtocol::Standard(console_session),
-            performance_score: 75.0, // SPICE gets good score
+            session_id: console_session.session_id,
+            protocol_used: ActiveProtocol::SPICE,
+            connection_info: connection,
+            performance_score: 75.0,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
             active: true,
             features,
-        };
-
-        Ok(session)
+        })
     }
 
     async fn create_vnc_session(&mut self, vm_name: &str) -> Result<UnifiedConsoleSession> {
-        log_info!("Creating enhanced VNC session for VM: {}", vm_name);
+        log_info!("Creating VNC session for VM: {}", vm_name);
 
         let console_session = self
             .console_manager
-            .create_vnc_console(vm_name, true) // Enhanced VNC
+            .create_vnc_console(vm_name, true)
             .await?;
 
+        let connection = ConnectionDetails {
+            host: console_session.connection_info.host.clone(),
+            port: console_session.connection_info.port,
+            protocol: "vnc".to_string(),
+            viewer_command: format!(
+                "vncviewer {}:{}",
+                console_session.connection_info.host,
+                console_session.connection_info.port
+            ),
+            shmem_path: None,
+        };
+
         let features = SessionFeatures {
-            file_transfer: false,
             clipboard_sync: false,
             audio_enabled: false,
             multi_monitor: false,
             hardware_acceleration: false,
-            encryption: self.config.standard_console.ssl_enabled,
-            recording: false,
+            usb_redirect: false,
+            low_latency: false,
         };
 
-        let session = UnifiedConsoleSession {
+        Ok(UnifiedConsoleSession {
             vm_name: vm_name.to_string(),
-            session_id: console_session.session_id.clone(),
-            protocol_used: ActiveProtocol::Standard(console_session),
-            performance_score: 50.0, // VNC gets basic score
+            session_id: console_session.session_id,
+            protocol_used: ActiveProtocol::VNC,
+            connection_info: connection,
+            performance_score: 50.0,
             created_at: chrono::Utc::now(),
             last_accessed: chrono::Utc::now(),
             active: true,
             features,
-        };
-
-        Ok(session)
+        })
     }
 
-    async fn analyze_vm_capabilities(
-        &self,
-        vm_name: &str,
-        vm_ip: Option<&str>,
-    ) -> Result<VmAnalysis> {
+    async fn analyze_vm_capabilities(&self, vm_name: &str) -> Result<VmAnalysis> {
         log_info!("Analyzing VM capabilities: {}", vm_name);
 
         let mut analysis = VmAnalysis::default();
 
         // Check VM specs via libvirt
         if let Ok(output) = tokio::process::Command::new("virsh")
-            .args(&["dominfo", vm_name])
+            .args(["dominfo", vm_name])
             .output()
             .await
         {
             let info = String::from_utf8_lossy(&output.stdout);
 
-            // Parse CPU and memory info
             if let Some(cpu_line) = info.lines().find(|line| line.contains("CPU(s)")) {
                 if let Some(cpu_str) = cpu_line.split_whitespace().nth(1) {
                     analysis.cpu_cores = cpu_str.parse().unwrap_or(1);
@@ -316,145 +305,65 @@ impl EnhancedConsoleManager {
             }
         }
 
-        // Check for GPU passthrough
+        // Check for GPU passthrough and Looking Glass IVSHMEM
         if let Ok(output) = tokio::process::Command::new("virsh")
-            .args(&["dumpxml", vm_name])
+            .args(["dumpxml", vm_name])
             .output()
             .await
         {
             let xml = String::from_utf8_lossy(&output.stdout);
             analysis.has_gpu = xml.contains("<hostdev") && xml.contains("type='pci'");
+            analysis.has_looking_glass = xml.contains("looking-glass") || xml.contains("ivshmem");
+            analysis.has_spice = xml.contains("<graphics type='spice'");
+            analysis.has_vnc = xml.contains("<graphics type='vnc'");
         }
 
-        // Check network connectivity and latency if IP provided
-        if let Some(ip) = vm_ip {
-            analysis.network_latency_ms = self.measure_network_latency(ip).await;
-            analysis.network_bandwidth_mbps = self.measure_network_bandwidth(ip).await;
-        }
-
-        // Detect OS type and capabilities
-        analysis.os_type = self.detect_os_type(vm_name).await;
+        // Check guest agent
         analysis.supports_guest_agent = self.check_guest_agent(vm_name).await;
 
-        // Multi-monitor support (mainly for SPICE and RustDesk)
-        analysis.supports_multi_monitor =
-            analysis.has_gpu || matches!(analysis.os_type.as_str(), "windows" | "linux");
+        // Multi-monitor based on config
+        analysis.supports_multi_monitor = analysis.has_gpu || analysis.has_spice;
 
         log_info!(
-            "VM analysis complete for '{}': {} cores, {}MB RAM, GPU: {}, OS: {}",
+            "VM '{}': {} cores, {}MB, GPU={}, LG={}, SPICE={}, VNC={}",
             vm_name,
             analysis.cpu_cores,
             analysis.memory_mb,
             analysis.has_gpu,
-            analysis.os_type
+            analysis.has_looking_glass,
+            analysis.has_spice,
+            analysis.has_vnc
         );
 
         Ok(analysis)
     }
 
-    async fn select_optimal_protocol(&self, analysis: &VmAnalysis) -> PreferredProtocol {
+    fn select_optimal_protocol(&self, analysis: &VmAnalysis) -> PreferredProtocol {
         match &self.config.preferred_protocol {
             PreferredProtocol::Auto => {
-                // Intelligent protocol selection based on VM capabilities
-
-                // RustDesk is preferred for high-performance scenarios
-                if analysis.cpu_cores >= 2
-                    && analysis.memory_mb >= 2048
-                    && analysis.network_latency_ms < 50.0
-                {
-                    return PreferredProtocol::RustDesk;
+                // Looking Glass for GPU passthrough VMs with IVSHMEM configured
+                if analysis.has_looking_glass && analysis.has_gpu {
+                    if self.looking_glass_manager.check_client_installed() {
+                        return PreferredProtocol::LookingGlass;
+                    }
+                    log_warn!("Looking Glass configured but client not installed");
                 }
 
-                // SPICE for good balance with libvirt integration
-                if analysis.supports_guest_agent && analysis.cpu_cores >= 1 {
+                // SPICE for VMs with SPICE graphics
+                if analysis.has_spice && analysis.supports_guest_agent {
                     return PreferredProtocol::SPICE;
                 }
 
-                // VNC as fallback
+                // VNC as universal fallback
                 PreferredProtocol::VNC
             }
             other => other.clone(),
         }
     }
 
-    fn determine_performance_profile(&self, analysis: &VmAnalysis) -> PerformanceProfile {
-        // Select optimal RustDesk performance profile based on VM capabilities
-
-        if analysis.has_gpu
-            && analysis.cpu_cores >= 4
-            && analysis.memory_mb >= 4096
-            && analysis.network_bandwidth_mbps >= 100.0
-        {
-            PerformanceProfile::UltraHigh
-        } else if analysis.cpu_cores >= 2
-            && analysis.memory_mb >= 2048
-            && analysis.network_bandwidth_mbps >= 50.0
-        {
-            PerformanceProfile::High
-        } else if analysis.network_bandwidth_mbps < 10.0 {
-            PerformanceProfile::LowBandwidth
-        } else {
-            PerformanceProfile::Balanced
-        }
-    }
-
-    async fn measure_network_latency(&self, ip: &str) -> f32 {
-        // Measure ping latency to VM
-        if let Ok(output) = tokio::process::Command::new("ping")
-            .args(&["-c", "3", ip])
-            .output()
-            .await
-        {
-            let ping_output = String::from_utf8_lossy(&output.stdout);
-            if let Some(avg_line) = ping_output.lines().find(|line| line.contains("avg")) {
-                if let Some(avg_str) = avg_line.split('/').nth(4) {
-                    return avg_str.parse().unwrap_or(100.0);
-                }
-            }
-        }
-        100.0 // Default high latency
-    }
-
-    async fn measure_network_bandwidth(&self, ip: &str) -> f32 {
-        // Quick bandwidth test (simplified)
-        // In production, could use iperf3 or similar
-        if self.measure_network_latency(ip).await < 10.0 {
-            1000.0 // Assume gigabit for low latency (LAN)
-        } else if self.measure_network_latency(ip).await < 50.0 {
-            100.0 // Assume 100Mbps for moderate latency
-        } else {
-            10.0 // Assume 10Mbps for high latency
-        }
-    }
-
-    async fn detect_os_type(&self, vm_name: &str) -> String {
-        // Try to detect OS via guest agent or XML analysis
-        if let Ok(output) = tokio::process::Command::new("virsh")
-            .args(&[
-                "qemu-agent-command",
-                vm_name,
-                "{\"execute\":\"guest-get-osinfo\"}",
-            ])
-            .output()
-            .await
-        {
-            if output.status.success() {
-                let response = String::from_utf8_lossy(&output.stdout);
-                if response.contains("Windows") {
-                    return "windows".to_string();
-                } else if response.contains("Linux") {
-                    return "linux".to_string();
-                } else if response.contains("Darwin") {
-                    return "macos".to_string();
-                }
-            }
-        }
-        "unknown".to_string()
-    }
-
     async fn check_guest_agent(&self, vm_name: &str) -> bool {
         tokio::process::Command::new("virsh")
-            .args(&[
+            .args([
                 "qemu-agent-command",
                 vm_name,
                 "{\"execute\":\"guest-ping\"}",
@@ -466,24 +375,18 @@ impl EnhancedConsoleManager {
     }
 
     async fn start_performance_monitoring(&self, session_id: &str) -> Result<()> {
-        log_info!(
-            "Starting performance monitoring for session: {}",
-            session_id
-        );
+        log_info!("Starting performance monitoring for: {}", session_id);
 
         let session_id_clone = session_id.to_string();
         let scores_clone = self.performance_scores.clone();
 
         tokio::spawn(async move {
             loop {
-                // Collect performance metrics and calculate score
-                let score = Self::calculate_performance_score(&session_id_clone).await;
-
+                let score = 85.0; // Placeholder - would measure actual metrics
                 {
                     let mut scores = scores_clone.lock().unwrap();
                     scores.insert(session_id_clone.clone(), score);
                 }
-
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
         });
@@ -491,18 +394,7 @@ impl EnhancedConsoleManager {
         Ok(())
     }
 
-    async fn calculate_performance_score(_session_id: &str) -> f32 {
-        // Calculate performance score based on multiple factors:
-        // - Latency
-        // - FPS
-        // - Bandwidth usage
-        // - CPU/Memory usage
-
-        // Simplified scoring for now
-        85.0
-    }
-
-    // Public API methods
+    // Public API
     pub fn list_active_sessions(&self) -> Vec<UnifiedConsoleSession> {
         let sessions = self.unified_sessions.lock().unwrap();
         sessions.values().filter(|s| s.active).cloned().collect()
@@ -518,26 +410,57 @@ impl EnhancedConsoleManager {
         scores.get(session_id).copied()
     }
 
-    pub async fn launch_session_client(&mut self, session_id: &str) -> Result<()> {
+    /// Launch the viewer application for a session
+    pub async fn launch_session_client(&self, session_id: &str) -> Result<()> {
         let session = self
             .get_session(session_id)
             .ok_or(NovaError::NetworkNotFound(session_id.to_string()))?;
 
-        match &session.protocol_used {
-            ActiveProtocol::RustDesk(rd_session) => {
-                self.rustdesk_manager
-                    .connect_with_performance_profile(
-                        &session.session_id,
-                        rd_session.performance_profile.clone(),
-                    )
-                    .await?;
+        log_info!("Launching viewer: {}", session.connection_info.viewer_command);
+
+        match session.protocol_used {
+            ActiveProtocol::LookingGlass => {
+                if let Some(shmem) = &session.connection_info.shmem_path {
+                    Command::new("looking-glass-client")
+                        .arg("-f")
+                        .arg(shmem)
+                        .spawn()
+                        .map_err(|_| NovaError::SystemCommandFailed)?;
+                }
             }
-            ActiveProtocol::Standard(_) => {
-                log_info!(
-                    "Session '{}' is using {:?}; launch viewer manually via supported client",
-                    session_id,
-                    session.protocol_used
-                );
+            ActiveProtocol::SPICE => {
+                Command::new("remote-viewer")
+                    .arg(format!(
+                        "spice://{}:{}",
+                        session.connection_info.host, session.connection_info.port
+                    ))
+                    .spawn()
+                    .map_err(|_| NovaError::SystemCommandFailed)?;
+            }
+            ActiveProtocol::VNC => {
+                // Try virt-viewer first, fallback to vncviewer
+                let result = Command::new("remote-viewer")
+                    .arg(format!(
+                        "vnc://{}:{}",
+                        session.connection_info.host, session.connection_info.port
+                    ))
+                    .spawn();
+
+                if result.is_err() {
+                    Command::new("vncviewer")
+                        .arg(format!(
+                            "{}:{}",
+                            session.connection_info.host, session.connection_info.port
+                        ))
+                        .spawn()
+                        .map_err(|_| NovaError::SystemCommandFailed)?;
+                }
+            }
+            ActiveProtocol::Serial => {
+                Command::new("virsh")
+                    .args(["console", &session.vm_name])
+                    .spawn()
+                    .map_err(|_| NovaError::SystemCommandFailed)?;
             }
         }
 
@@ -545,20 +468,17 @@ impl EnhancedConsoleManager {
     }
 
     pub async fn close_session(&mut self, session_id: &str) -> Result<()> {
-        log_info!("Closing unified console session: {}", session_id);
+        log_info!("Closing session: {}", session_id);
 
         if let Some(session) = self.get_session(session_id) {
             match session.protocol_used {
-                ActiveProtocol::RustDesk(_) => {
-                    self.rustdesk_manager.disconnect_session(session_id).await?
+                ActiveProtocol::SPICE | ActiveProtocol::VNC => {
+                    self.console_manager.close_session(session_id).await?;
                 }
-                ActiveProtocol::Standard(_) => {
-                    self.console_manager.close_session(session_id).await?
-                }
+                _ => {}
             }
         }
 
-        // Remove from unified sessions
         {
             let mut sessions = self.unified_sessions.lock().unwrap();
             sessions.remove(session_id);
@@ -572,40 +492,15 @@ impl EnhancedConsoleManager {
         Ok(())
     }
 
-    /// Switch protocols for an active session (if possible)
-    pub async fn switch_protocol(
-        &mut self,
-        session_id: &str,
-        new_protocol: PreferredProtocol,
-    ) -> Result<UnifiedConsoleSession> {
-        log_info!(
-            "Switching protocol for session: {} to {:?}",
-            session_id,
-            new_protocol
-        );
+    /// Get Looking Glass manager for direct access
+    pub fn looking_glass(&self) -> &LookingGlassManager {
+        &self.looking_glass_manager
+    }
 
-        // Get current session
-        let current_session = self
-            .get_session(session_id)
-            .ok_or(NovaError::NetworkNotFound(session_id.to_string()))?;
-
-        // Close current session
-        self.close_session(session_id).await?;
-
-        // Create new session with different protocol
-        self.config.preferred_protocol = new_protocol;
-
-        // Determine VM IP from current session if needed
-        let vm_ip = match &current_session.protocol_used {
-            ActiveProtocol::RustDesk(_rd_session) => {
-                // Extract IP from RustDesk session if available
-                Some("192.168.1.100") // Placeholder
-            }
-            ActiveProtocol::Standard(_) => None,
-        };
-
-        self.create_optimal_console(&current_session.vm_name, vm_ip)
-            .await
+    /// Check system requirements for Looking Glass
+    pub fn check_looking_glass_ready(&self) -> bool {
+        let reqs = self.looking_glass_manager.check_system_requirements();
+        reqs.ready
     }
 }
 
@@ -614,9 +509,9 @@ struct VmAnalysis {
     cpu_cores: u32,
     memory_mb: u64,
     has_gpu: bool,
-    network_latency_ms: f32,
-    network_bandwidth_mbps: f32,
-    os_type: String,
+    has_looking_glass: bool,
+    has_spice: bool,
+    has_vnc: bool,
     supports_guest_agent: bool,
     supports_multi_monitor: bool,
 }
@@ -627,9 +522,9 @@ impl Default for VmAnalysis {
             cpu_cores: 2,
             memory_mb: 2048,
             has_gpu: false,
-            network_latency_ms: 10.0,
-            network_bandwidth_mbps: 100.0,
-            os_type: "unknown".to_string(),
+            has_looking_glass: false,
+            has_spice: true,
+            has_vnc: true,
             supports_guest_agent: false,
             supports_multi_monitor: false,
         }
@@ -639,12 +534,10 @@ impl Default for VmAnalysis {
 impl Default for EnhancedConsoleConfig {
     fn default() -> Self {
         Self {
-            standard_console: ConsoleConfig::default(),
-            rustdesk_config: RustDeskConfig::default(),
+            console_config: ConsoleConfig::default(),
+            looking_glass_config: LookingGlassConfig::default(),
             preferred_protocol: PreferredProtocol::Auto,
-            auto_install_agents: true,
             performance_monitoring: true,
-            session_recording: false,
             multi_monitor_support: true,
         }
     }

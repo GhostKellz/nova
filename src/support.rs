@@ -26,6 +26,7 @@ pub struct SupportBundleOptions {
     pub include_logs: bool,
     pub include_system: bool,
     pub include_metrics: bool,
+    pub include_diagnostics: bool,
     pub redact: bool,
 }
 
@@ -37,6 +38,7 @@ impl Default for SupportBundleOptions {
             include_logs: true,
             include_system: true,
             include_metrics: true,
+            include_diagnostics: true,
             redact: false,
         }
     }
@@ -75,13 +77,14 @@ fn create_support_bundle(
         collect_system_info(bundle_root, opts.redact)?;
     }
 
-    collect_nova_state(bundle_root, &opts, metrics_snapshot.as_deref())?;
+    let metrics_snapshot_bytes =
+        collect_nova_state(bundle_root, &opts, metrics_snapshot.as_deref())?;
 
     if opts.include_logs {
         collect_logs(bundle_root, opts.redact)?;
     }
 
-    write_manifest(bundle_root, &opts)?;
+    write_manifest(bundle_root, &opts, metrics_snapshot_bytes)?;
 
     let output_dir = opts.output_dir.unwrap_or_else(|| std::env::temp_dir());
     fs::create_dir_all(&output_dir)?;
@@ -138,9 +141,10 @@ fn collect_nova_state(
     root: &Path,
     opts: &SupportBundleOptions,
     metrics_snapshot: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<usize>> {
     let nova_dir = root.join("nova");
     fs::create_dir_all(&nova_dir)?;
+    let mut metrics_snapshot_bytes = None;
 
     if let Some(config_path) = opts.config_path.as_ref() {
         if config_path.exists() {
@@ -175,9 +179,29 @@ fn collect_nova_state(
             observability_dir.join("prometheus-metrics.txt"),
             maybe_redact(metrics, opts.redact),
         )?;
+        metrics_snapshot_bytes = Some(metrics.as_bytes().len());
     }
 
-    Ok(())
+    if opts.include_diagnostics {
+        match diagnostics_inner() {
+            Ok(report) => {
+                let diag_dir = nova_dir.join("diagnostics");
+                fs::create_dir_all(&diag_dir)?;
+                let text_report = report.to_string();
+                fs::write(
+                    diag_dir.join("report.txt"),
+                    maybe_redact(&text_report, opts.redact),
+                )?;
+                let json_report = serde_json::to_string_pretty(&report)?;
+                fs::write(diag_dir.join("report.json"), json_report)?;
+            }
+            Err(err) => {
+                log_warn!("Diagnostics capture failed: {}", err);
+            }
+        }
+    }
+
+    Ok(metrics_snapshot_bytes)
 }
 
 fn collect_gpu_snapshot(nova_dir: &Path, redact: bool) -> Result<()> {
@@ -241,7 +265,11 @@ fn collect_logs(root: &Path, redact: bool) -> Result<()> {
     Ok(())
 }
 
-fn write_manifest(root: &Path, opts: &SupportBundleOptions) -> Result<()> {
+fn write_manifest(
+    root: &Path,
+    opts: &SupportBundleOptions,
+    metrics_snapshot_bytes: Option<usize>,
+) -> Result<()> {
     let manifest = BundleManifest {
         generated_at: Utc::now().to_rfc3339(),
         nova_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -250,6 +278,7 @@ fn write_manifest(root: &Path, opts: &SupportBundleOptions) -> Result<()> {
         include_metrics: opts.include_metrics,
         redact_applied: opts.redact,
         host: get_hostname(),
+        metrics_snapshot_bytes,
     };
 
     let manifest_path = root.join("manifest.json");
@@ -316,6 +345,7 @@ struct BundleManifest {
     include_metrics: bool,
     redact_applied: bool,
     host: Option<String>,
+    metrics_snapshot_bytes: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,7 +375,7 @@ impl SupportGpuSnapshot {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct DiagnosticReport {
     pub kvm_available: bool,
     pub iommu_enabled: bool,
@@ -492,6 +522,7 @@ mod tests {
         opts.include_logs = false;
         opts.include_system = false;
         opts.include_metrics = false;
+        opts.include_diagnostics = false;
 
         let bundle_path = generate_support_bundle(opts).await.expect("bundle path");
         assert!(bundle_path.exists());
@@ -523,6 +554,7 @@ mod tests {
                 assert_eq!(manifest["include_logs"], Value::Bool(false));
                 assert_eq!(manifest["include_system"], Value::Bool(false));
                 assert_eq!(manifest["include_metrics"], Value::Bool(false));
+                assert_eq!(manifest["metrics_snapshot_bytes"], Value::Null);
             } else if path_str.ends_with(
                 Path::new("nova")
                     .join(config_path.file_name().unwrap_or_default())

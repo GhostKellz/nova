@@ -119,12 +119,12 @@ pub const CAT_ROSEWATER: Color32 = Color32::from_rgb(245, 224, 220); // #f5e0dc
 pub const CAT_RED: Color32 = Color32::from_rgb(243, 139, 168); // #f38ba8
 
 // ===== DRACULA =====
-// Classic high-contrast purple/green palette
+// Classic high-contrast purple/green palette with deep midnight background
 
-pub const DRACULA_BG: Color32 = Color32::from_rgb(40, 42, 54); // #282a36
-pub const DRACULA_BG_DARK: Color32 = Color32::from_rgb(33, 34, 44); // #21222c
-pub const DRACULA_BG_HIGHLIGHT: Color32 = Color32::from_rgb(68, 71, 90); // #44475a
-pub const DRACULA_TERMINAL_BLACK: Color32 = Color32::from_rgb(24, 26, 35); // #181a23
+pub const DRACULA_BG: Color32 = Color32::from_rgb(30, 31, 41); // #1e1f29
+pub const DRACULA_BG_DARK: Color32 = Color32::from_rgb(22, 23, 31); // #16171f
+pub const DRACULA_BG_HIGHLIGHT: Color32 = Color32::from_rgb(46, 48, 65); // #2e3041
+pub const DRACULA_TERMINAL_BLACK: Color32 = Color32::from_rgb(16, 17, 25); // #101119
 pub const DRACULA_FG: Color32 = Color32::from_rgb(248, 248, 242); // #f8f8f2
 pub const DRACULA_COMMENT: Color32 = Color32::from_rgb(98, 114, 164); // #6272a4
 pub const DRACULA_PINK: Color32 = Color32::from_rgb(255, 121, 198); // #ff79c6
@@ -226,7 +226,7 @@ impl GuiTheme {
             GuiTheme::TokyoNight(TokyoNightVariant::Moon) => "Tokyo Night (Moon)",
             GuiTheme::CatppuccinMocha => "Catppuccin (Mocha)",
             GuiTheme::Dracula => "Dracula",
-            GuiTheme::Ocean => "Ocean (Legacy)",
+            GuiTheme::Ocean => "Material Ocean",
         }
     }
 
@@ -518,34 +518,34 @@ fn dracula_button_palette(role: ButtonRole) -> ButtonPalette {
 fn ocean_button_palette(role: ButtonRole) -> ButtonPalette {
     match role {
         ButtonRole::Primary => ButtonPalette {
-            fill: ACTION_PRIMARY,
-            hover: ACTION_PRIMARY_HOVER,
-            stroke: ACTION_PRIMARY,
-            text: BG_MAIN,
+            fill: MO_ACTION_PRIMARY,
+            hover: MO_ACTION_PRIMARY_HOVER,
+            stroke: MO_ACTION_PRIMARY,
+            text: MO_BG_MAIN,
         },
         ButtonRole::Start => ButtonPalette {
-            fill: ACTION_SUCCESS,
-            hover: GRAPH_NETWORK,
-            stroke: ACTION_PRIMARY,
-            text: BG_MAIN,
+            fill: MO_ACTION_SUCCESS,
+            hover: MO_GRAPH_NETWORK,
+            stroke: MO_ACTION_PRIMARY,
+            text: MO_BG_MAIN,
         },
         ButtonRole::Stop => ButtonPalette {
-            fill: ACTION_DANGER,
-            hover: STATUS_STOPPED,
-            stroke: ACTION_PRIMARY,
-            text: BG_MAIN,
+            fill: MO_ACTION_DANGER,
+            hover: MO_STATUS_STOPPED,
+            stroke: MO_ACTION_PRIMARY,
+            text: MO_BG_MAIN,
         },
         ButtonRole::Restart => ButtonPalette {
-            fill: STATUS_WARNING,
-            hover: STATUS_SUSPENDED,
-            stroke: ACTION_PRIMARY,
-            text: BG_MAIN,
+            fill: MO_STATUS_WARNING,
+            hover: MO_STATUS_SUSPENDED,
+            stroke: MO_ACTION_PRIMARY,
+            text: MO_BG_MAIN,
         },
         ButtonRole::Secondary => ButtonPalette {
-            fill: BG_SECONDARY,
-            hover: ACTION_PRIMARY,
-            stroke: ACTION_PRIMARY,
-            text: TEXT_PRIMARY,
+            fill: MO_BG_SECONDARY,
+            hover: MO_ACTION_PRIMARY,
+            stroke: MO_ACTION_PRIMARY,
+            text: MO_TEXT_PRIMARY,
         },
     }
 }
@@ -568,6 +568,7 @@ pub enum ButtonIntent {
     Start,
     Stop,
     Open,
+    Inspect,
     Cancel,
     Diagnostics,
     Load,
@@ -666,6 +667,13 @@ fn intent_spec(intent: ButtonIntent) -> ButtonIntentSpec {
             tooltip_prefix: "Open",
             role: ButtonRole::Secondary,
             min_width: 150.0,
+        },
+        ButtonIntent::Inspect => ButtonIntentSpec {
+            icon: "👁",
+            verb: "Preview",
+            tooltip_prefix: "Preview",
+            role: ButtonRole::Secondary,
+            min_width: 170.0,
         },
         ButtonIntent::Cancel => ButtonIntentSpec {
             icon: "✖",
@@ -1091,75 +1099,105 @@ pub fn get_status_icon(status: &crate::instance::InstanceStatus) -> &'static str
     }
 }
 
-// ===== LEGACY OCEAN THEME (Keep for backwards compatibility) =====
+// ===== MATERIAL OCEAN THEME =====
+// Deep azure panels with neon accents, inspired by the Material Theme Oceanic palette
 
-// Deep Dark Material Blue Ocean Theme - Original
-pub const BG_MAIN: Color32 = Color32::from_rgb(0, 7, 45);
-pub const BG_PANEL: Color32 = Color32::from_rgb(10, 27, 61);
-pub const BG_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82);
-pub const BG_ELEVATED: Color32 = Color32::from_rgb(36, 55, 95);
-pub const BG_HOVER: Color32 = Color32::from_rgb(26, 67, 191);
-pub const BG_CONSOLE: Color32 = Color32::from_rgb(0, 5, 16);
+pub const MO_BG_MAIN: Color32 = Color32::from_rgb(10, 18, 34); // #0a1222
+pub const MO_BG_PANEL: Color32 = Color32::from_rgb(13, 26, 46); // #0d1a2e
+pub const MO_BG_SECONDARY: Color32 = Color32::from_rgb(20, 38, 62); // #14263e
+pub const MO_BG_ELEVATED: Color32 = Color32::from_rgb(24, 47, 78); // #182f4e
+pub const MO_BG_HOVER: Color32 = Color32::from_rgb(36, 72, 118); // #244876
+pub const MO_BG_CONSOLE: Color32 = Color32::from_rgb(9, 14, 24); // #090e18
 
-pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(137, 207, 240);
-pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(48, 213, 200);
-pub const TEXT_ACCENT: Color32 = Color32::from_rgb(26, 67, 191);
-pub const TEXT_BRIGHT: Color32 = Color32::from_rgb(48, 213, 200);
+pub const MO_TEXT_PRIMARY: Color32 = Color32::from_rgb(198, 208, 245); // #c6d0f5
+pub const MO_TEXT_SECONDARY: Color32 = Color32::from_rgb(126, 206, 255); // #7eceff
+pub const MO_TEXT_ACCENT: Color32 = Color32::from_rgb(64, 156, 255); // #409cff
+pub const MO_TEXT_BRIGHT: Color32 = Color32::from_rgb(142, 229, 245); // #8ee5f5
 
-pub const STATUS_RUNNING: Color32 = Color32::from_rgb(80, 250, 123);
-pub const STATUS_STOPPED: Color32 = Color32::from_rgb(255, 85, 85);
-pub const STATUS_WARNING: Color32 = Color32::from_rgb(241, 250, 140);
-pub const STATUS_SUSPENDED: Color32 = Color32::from_rgb(139, 233, 253);
-pub const STATUS_UNKNOWN: Color32 = Color32::from_rgb(98, 114, 164);
+pub const MO_STATUS_RUNNING: Color32 = Color32::from_rgb(66, 215, 172); // #42d7ac
+pub const MO_STATUS_STOPPED: Color32 = Color32::from_rgb(255, 110, 120); // #ff6e78
+pub const MO_STATUS_WARNING: Color32 = Color32::from_rgb(255, 204, 128); // #ffcc80
+pub const MO_STATUS_SUSPENDED: Color32 = Color32::from_rgb(120, 210, 255); // #78d2ff
+pub const MO_STATUS_UNKNOWN: Color32 = Color32::from_rgb(92, 122, 180); // #5c7ab4
 
-pub const ACTION_PRIMARY: Color32 = Color32::from_rgb(48, 213, 200);
-pub const ACTION_PRIMARY_HOVER: Color32 = Color32::from_rgb(26, 67, 191);
-pub const ACTION_SECONDARY: Color32 = Color32::from_rgb(26, 47, 82);
-pub const ACTION_DANGER: Color32 = Color32::from_rgb(255, 85, 85);
-pub const ACTION_SUCCESS: Color32 = Color32::from_rgb(80, 250, 123);
+pub const MO_ACTION_PRIMARY: Color32 = Color32::from_rgb(64, 156, 255); // #409cff
+pub const MO_ACTION_PRIMARY_HOVER: Color32 = Color32::from_rgb(92, 180, 255); // #5cb4ff
+pub const MO_ACTION_SECONDARY: Color32 = MO_BG_SECONDARY;
+pub const MO_ACTION_DANGER: Color32 = Color32::from_rgb(255, 110, 120); // #ff6e78
+pub const MO_ACTION_SUCCESS: Color32 = Color32::from_rgb(66, 215, 172); // #42d7ac
 
-pub const BORDER_DEFAULT: Color32 = Color32::from_rgb(36, 55, 95);
-pub const BORDER_FOCUS: Color32 = Color32::from_rgb(48, 213, 200);
-pub const DIVIDER: Color32 = Color32::from_rgb(26, 47, 82);
+pub const MO_BORDER_DEFAULT: Color32 = Color32::from_rgb(30, 54, 88); // #1e3658
+pub const MO_BORDER_FOCUS: Color32 = Color32::from_rgb(64, 156, 255); // #409cff
+pub const MO_DIVIDER: Color32 = Color32::from_rgb(22, 38, 62); // #16263e
 
-pub const SELECTION_BG: Color32 = Color32::from_rgb(26, 67, 191);
-pub const SELECTION_HOVER: Color32 = Color32::from_rgb(10, 27, 61);
+pub const MO_SELECTION_BG: Color32 = Color32::from_rgb(32, 96, 173); // #2060ad
+pub const MO_SELECTION_HOVER: Color32 = Color32::from_rgb(20, 64, 114); // #144072
 
-pub const GRAPH_CPU: Color32 = Color32::from_rgb(48, 213, 200);
-pub const GRAPH_MEMORY: Color32 = Color32::from_rgb(137, 207, 240);
-pub const GRAPH_DISK: Color32 = Color32::from_rgb(26, 67, 191);
-pub const GRAPH_NETWORK: Color32 = Color32::from_rgb(80, 250, 123);
+pub const MO_GRAPH_CPU: Color32 = Color32::from_rgb(64, 156, 255); // #409cff
+pub const MO_GRAPH_MEMORY: Color32 = Color32::from_rgb(126, 206, 255); // #7eceff
+pub const MO_GRAPH_DISK: Color32 = Color32::from_rgb(142, 229, 245); // #8ee5f5
+pub const MO_GRAPH_NETWORK: Color32 = Color32::from_rgb(66, 215, 172); // #42d7ac
+
+// Backwards-compatible aliases for existing callers
+pub const TEXT_PRIMARY: Color32 = MO_TEXT_PRIMARY;
+pub const TEXT_SECONDARY: Color32 = MO_TEXT_SECONDARY;
+pub const TEXT_ACCENT: Color32 = MO_TEXT_ACCENT;
+pub const TEXT_BRIGHT: Color32 = MO_TEXT_BRIGHT;
+
+pub const STATUS_RUNNING: Color32 = MO_STATUS_RUNNING;
+pub const STATUS_STOPPED: Color32 = MO_STATUS_STOPPED;
+pub const STATUS_WARNING: Color32 = MO_STATUS_WARNING;
+pub const STATUS_SUSPENDED: Color32 = MO_STATUS_SUSPENDED;
+pub const STATUS_UNKNOWN: Color32 = MO_STATUS_UNKNOWN;
+
+pub const ACTION_PRIMARY: Color32 = MO_ACTION_PRIMARY;
+pub const ACTION_PRIMARY_HOVER: Color32 = MO_ACTION_PRIMARY_HOVER;
+pub const ACTION_SECONDARY: Color32 = MO_ACTION_SECONDARY;
+pub const ACTION_DANGER: Color32 = MO_ACTION_DANGER;
+pub const ACTION_SUCCESS: Color32 = MO_ACTION_SUCCESS;
+
+pub const BORDER_DEFAULT: Color32 = MO_BORDER_DEFAULT;
+pub const BORDER_FOCUS: Color32 = MO_BORDER_FOCUS;
+pub const DIVIDER: Color32 = MO_DIVIDER;
+
+pub const SELECTION_BG: Color32 = MO_SELECTION_BG;
+pub const SELECTION_HOVER: Color32 = MO_SELECTION_HOVER;
+
+pub const GRAPH_CPU: Color32 = MO_GRAPH_CPU;
+pub const GRAPH_MEMORY: Color32 = MO_GRAPH_MEMORY;
+pub const GRAPH_DISK: Color32 = MO_GRAPH_DISK;
+pub const GRAPH_NETWORK: Color32 = MO_GRAPH_NETWORK;
 
 pub fn configure_ocean_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let mut visuals = egui::Visuals::dark();
 
-    visuals.window_fill = BG_MAIN;
-    visuals.panel_fill = BG_PANEL;
-    visuals.extreme_bg_color = BG_CONSOLE;
-    visuals.faint_bg_color = BG_SECONDARY;
+    visuals.window_fill = MO_BG_MAIN;
+    visuals.panel_fill = MO_BG_PANEL;
+    visuals.extreme_bg_color = MO_BG_CONSOLE;
+    visuals.faint_bg_color = MO_BG_SECONDARY;
 
-    visuals.override_text_color = Some(TEXT_PRIMARY);
-    visuals.hyperlink_color = ACTION_PRIMARY;
+    visuals.override_text_color = Some(MO_TEXT_PRIMARY);
+    visuals.hyperlink_color = MO_ACTION_PRIMARY;
 
-    visuals.widgets.noninteractive.bg_fill = BG_SECONDARY;
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER_DEFAULT);
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.noninteractive.bg_fill = MO_BG_SECONDARY;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, MO_BORDER_DEFAULT);
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, MO_TEXT_PRIMARY);
 
-    visuals.widgets.inactive.bg_fill = BG_ELEVATED;
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER_DEFAULT);
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
+    visuals.widgets.inactive.bg_fill = MO_BG_ELEVATED;
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, MO_BORDER_DEFAULT);
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, MO_TEXT_SECONDARY);
 
-    visuals.widgets.hovered.bg_fill = BG_HOVER;
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, ACTION_PRIMARY);
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_BRIGHT);
+    visuals.widgets.hovered.bg_fill = MO_BG_HOVER;
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, MO_ACTION_PRIMARY);
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, MO_TEXT_BRIGHT);
 
-    visuals.widgets.active.bg_fill = SELECTION_BG;
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, BORDER_FOCUS);
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_BRIGHT);
+    visuals.widgets.active.bg_fill = MO_SELECTION_BG;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, MO_BORDER_FOCUS);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, MO_TEXT_BRIGHT);
 
-    visuals.selection.bg_fill = SELECTION_BG;
-    visuals.selection.stroke = egui::Stroke::new(1.0, ACTION_PRIMARY);
+    visuals.selection.bg_fill = MO_SELECTION_BG;
+    visuals.selection.stroke = egui::Stroke::new(1.0, MO_ACTION_PRIMARY);
 
     visuals.popup_shadow = egui::epaint::Shadow {
         extrusion: 8.0,
@@ -1177,7 +1215,7 @@ pub fn configure_ocean_theme(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    style.spacing.button_padding = egui::vec2(14.0, 8.0);
     style.spacing.menu_margin = egui::Margin::same(8.0);
     style.spacing.indent = 20.0;
 
@@ -1190,10 +1228,10 @@ pub fn configure_ocean_theme(ctx: &egui::Context) {
 pub fn get_status_color_ocean(status: &crate::instance::InstanceStatus) -> Color32 {
     use crate::instance::InstanceStatus;
     match status {
-        InstanceStatus::Running => STATUS_RUNNING,
-        InstanceStatus::Stopped => STATUS_STOPPED,
-        InstanceStatus::Starting | InstanceStatus::Stopping => STATUS_WARNING,
-        InstanceStatus::Error => STATUS_STOPPED,
-        InstanceStatus::Suspended => STATUS_SUSPENDED,
+        InstanceStatus::Running => MO_STATUS_RUNNING,
+        InstanceStatus::Stopped => MO_STATUS_STOPPED,
+        InstanceStatus::Starting | InstanceStatus::Stopping => MO_STATUS_WARNING,
+        InstanceStatus::Error => MO_STATUS_STOPPED,
+        InstanceStatus::Suspended => MO_STATUS_SUSPENDED,
     }
 }

@@ -1,16 +1,37 @@
 use crate::{
     NovaError, Result,
-    config::{DiskFormat, VmConfig},
+    config::{DiskFormat, VmBootType, VmConfig, VmFirmwareConfig, VmTpmConfig, VmTpmVersion},
     gpu_passthrough::{DisplayMode, GpuManager, GpuPassthroughConfig},
     instance::Instance,
     log_debug, log_error, log_info, log_warn,
     looking_glass::{LookingGlassConfig, LookingGlassManager},
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::time::{Duration, sleep};
+
+const DEFAULT_OVMF_CODE: &str = "/usr/share/OVMF/OVMF_CODE.fd";
+const DEFAULT_OVMF_VARS: &str = "/usr/share/OVMF/OVMF_VARS.fd";
+const DEFAULT_OVMF_CODE_SECURE: &str = "/usr/share/OVMF/OVMF_CODE.secboot.fd";
+const DEFAULT_OVMF_VARS_SECURE: &str = "/usr/share/OVMF/OVMF_VARS.ms.fd";
+const FIRMWARE_WORK_DIR: &str = "/var/lib/nova/firmware";
+const TPM_WORK_DIR: &str = "/var/lib/nova/tpm";
+
+#[derive(Clone)]
+struct TpmArtifacts {
+    socket_path: PathBuf,
+    control_path: PathBuf,
+    state_dir: PathBuf,
+    root_dir: PathBuf,
+}
+
+struct ManagedTpm {
+    child: Child,
+    artifacts: TpmArtifacts,
+}
 
 pub struct VmManager {
     instances: Arc<Mutex<HashMap<String, Instance>>>,
@@ -18,6 +39,7 @@ pub struct VmManager {
     gpu_manager: Arc<Mutex<GpuManager>>,
     gpu_allocations: Arc<Mutex<HashMap<String, GpuPassthroughConfig>>>,
     looking_glass_configs: Arc<Mutex<HashMap<String, LookingGlassConfig>>>,
+    tpm_instances: Arc<Mutex<HashMap<String, ManagedTpm>>>,
 }
 
 impl VmManager {
@@ -28,6 +50,7 @@ impl VmManager {
             gpu_manager: Arc::new(Mutex::new(GpuManager::new())),
             gpu_allocations: Arc::new(Mutex::new(HashMap::new())),
             looking_glass_configs: Arc::new(Mutex::new(HashMap::new())),
+            tpm_instances: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -80,6 +103,12 @@ impl VmManager {
         // GPU passthrough and Looking Glass support
         self.apply_gpu_passthrough(name, &vm_config, &mut cmd)
             .await?;
+
+        // Firmware / Secure Boot configuration
+        self.configure_firmware(name, &vm_config.firmware, &mut cmd)?;
+
+        // TPM device (for Windows 11 compliance, etc.)
+        self.configure_tpm(name, &vm_config.tpm, &mut cmd)?;
 
         // Network configuration
         if let Some(network) = &vm_config.network {
@@ -319,6 +348,173 @@ impl VmManager {
         Ok(config)
     }
 
+    fn configure_firmware(
+        &self,
+        name: &str,
+        firmware: &VmFirmwareConfig,
+        cmd: &mut Command,
+    ) -> Result<()> {
+        if !matches!(firmware.boot_type, VmBootType::Uefi) {
+            return Ok(());
+        }
+
+        let code_path = firmware.ovmf_code.clone().unwrap_or_else(|| {
+            if firmware.secure_boot {
+                DEFAULT_OVMF_CODE_SECURE.to_string()
+            } else {
+                DEFAULT_OVMF_CODE.to_string()
+            }
+        });
+        let vars_source = firmware.ovmf_vars.clone().unwrap_or_else(|| {
+            if firmware.secure_boot {
+                DEFAULT_OVMF_VARS_SECURE.to_string()
+            } else {
+                DEFAULT_OVMF_VARS.to_string()
+            }
+        });
+
+        if !Path::new(&code_path).exists() {
+            return Err(NovaError::ConfigError(format!(
+                "OVMF firmware image not found at {}",
+                code_path
+            )));
+        }
+        if !Path::new(&vars_source).exists() {
+            return Err(NovaError::ConfigError(format!(
+                "OVMF vars image not found at {}",
+                vars_source
+            )));
+        }
+
+        fs::create_dir_all(FIRMWARE_WORK_DIR).map_err(|err| {
+            log_error!(
+                "Failed to prepare firmware directory {}: {}",
+                FIRMWARE_WORK_DIR,
+                err
+            );
+            NovaError::ConfigError("Unable to prepare firmware workspace".into())
+        })?;
+        let vars_dest = Path::new(FIRMWARE_WORK_DIR).join(format!("{}-vars.fd", name));
+        if !vars_dest.exists() {
+            fs::copy(&vars_source, &vars_dest).map_err(|err| {
+                log_error!(
+                    "Failed to seed OVMF vars for VM '{}' ({} -> {}): {}",
+                    name,
+                    vars_source,
+                    vars_dest.display(),
+                    err
+                );
+                NovaError::ConfigError("Unable to prepare OVMF vars image".into())
+            })?;
+        }
+
+        cmd.arg("-machine").arg("q35,smm=on");
+        cmd.arg("-drive").arg(format!(
+            "if=pflash,format=raw,readonly=on,file={}",
+            code_path
+        ));
+        cmd.arg("-drive")
+            .arg(format!("if=pflash,format=raw,file={}", vars_dest.display()));
+
+        Ok(())
+    }
+
+    fn configure_tpm(&self, name: &str, tpm: &VmTpmConfig, cmd: &mut Command) -> Result<()> {
+        if !tpm.enabled {
+            let managed = {
+                let mut guard = self.tpm_instances.lock().unwrap();
+                guard.remove(name)
+            };
+            if let Some(mut existing) = managed {
+                let _ = existing.child.kill();
+                let _ = existing.child.wait();
+                Self::cleanup_tpm_artifacts(existing.artifacts);
+            }
+            return Ok(());
+        }
+
+        let managed = self.spawn_tpm(name, tpm)?;
+        let artifacts = managed.artifacts.clone();
+        {
+            let mut guard = self.tpm_instances.lock().unwrap();
+            guard.insert(name.to_string(), managed);
+        }
+
+        let chardev_id = format!("chrtpm-{}", name);
+        cmd.arg("-chardev").arg(format!(
+            "socket,id={},path={}",
+            chardev_id,
+            artifacts.socket_path.display()
+        ));
+        cmd.arg("-tpmdev")
+            .arg(format!("emulator,id=tpm-{},chardev={}", name, chardev_id));
+        cmd.arg("-device")
+            .arg(format!("tpm-tis,tpmdev=tpm-{}", name));
+
+        Ok(())
+    }
+
+    fn spawn_tpm(&self, name: &str, config: &VmTpmConfig) -> Result<ManagedTpm> {
+        fs::create_dir_all(TPM_WORK_DIR).map_err(|err| {
+            log_error!("Failed to prepare TPM directory {}: {}", TPM_WORK_DIR, err);
+            NovaError::ConfigError("Unable to prepare TPM workspace".into())
+        })?;
+
+        let root_dir = Path::new(TPM_WORK_DIR).join(name);
+        let state_dir = root_dir.join("state");
+        fs::create_dir_all(&state_dir).map_err(|err| {
+            log_error!("Failed to prepare TPM state dir {:?}: {}", state_dir, err);
+            NovaError::ConfigError("Unable to prepare TPM state".into())
+        })?;
+
+        let socket_path = root_dir.join("swtpm.sock");
+        let control_path = root_dir.join("swtpm.ctrl");
+        for path in [&socket_path, &control_path] {
+            if path.exists() {
+                let _ = fs::remove_file(path);
+            }
+        }
+
+        let mut command = Command::new("swtpm");
+        command.arg("socket");
+        match config.version {
+            VmTpmVersion::V1_2 => {
+                command.arg("--tpm1");
+            }
+            VmTpmVersion::V2_0 => {
+                command.arg("--tpm2");
+            }
+        }
+        command
+            .arg("--ctrl")
+            .arg(format!("type=unixio,path={}", control_path.display()))
+            .arg("--server")
+            .arg(format!("type=unixio,path={}", socket_path.display()))
+            .arg("--tpmstate")
+            .arg(format!("dir={},mode=0600", state_dir.display()))
+            .arg("--flags")
+            .arg("not-need-init");
+        command.stdin(Stdio::null()).stdout(Stdio::null());
+
+        let child = command.spawn().map_err(|err| {
+            log_error!("Failed to launch swtpm for VM '{}': {}", name, err);
+            NovaError::SystemCommandFailed
+        })?;
+
+        // Give swtpm a brief moment to create the socket
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        Ok(ManagedTpm {
+            child,
+            artifacts: TpmArtifacts {
+                socket_path,
+                control_path,
+                state_dir,
+                root_dir,
+            },
+        })
+    }
+
     async fn prepare_looking_glass(
         &self,
         name: &str,
@@ -399,6 +595,31 @@ impl VmManager {
                     err
                 );
             }
+        }
+
+        let managed_tpm = {
+            let mut instances = self.tpm_instances.lock().unwrap();
+            instances.remove(name)
+        };
+
+        if let Some(mut tpm) = managed_tpm {
+            if let Err(err) = tpm.child.kill() {
+                log_warn!("Failed to terminate swtpm for VM '{}': {}", name, err);
+            }
+            let _ = tpm.child.wait();
+            Self::cleanup_tpm_artifacts(tpm.artifacts);
+        }
+    }
+
+    fn cleanup_tpm_artifacts(artifacts: TpmArtifacts) {
+        let _ = fs::remove_file(&artifacts.socket_path);
+        let _ = fs::remove_file(&artifacts.control_path);
+        if let Err(err) = fs::remove_dir_all(&artifacts.root_dir) {
+            log_debug!(
+                "Unable to remove TPM workspace {:?}: {} (will be reused)",
+                artifacts.root_dir,
+                err
+            );
         }
     }
 

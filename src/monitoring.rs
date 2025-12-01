@@ -1,6 +1,6 @@
 use crate::{NovaError, Result, log_debug, log_error, log_info, log_warn};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,6 +74,86 @@ pub struct NetworkMonitor {
     _stats_history: HashMap<String, Vec<NetworkStats>>,
     bandwidth_history: HashMap<String, Vec<BandwidthUsage>>,
     monitoring_active: bool,
+}
+
+/// Returns the set of interfaces that have not produced a sample within `threshold_secs`.
+///
+/// This helper is shared with GUI components and can be unit tested without egui.
+pub fn offline_interfaces_from_history(
+    history: &HashMap<String, Vec<BandwidthUsage>>,
+    threshold_secs: u64,
+    now_epoch_secs: u64,
+) -> HashSet<String> {
+    if threshold_secs == 0 {
+        return HashSet::new();
+    }
+
+    let mut offline = HashSet::new();
+    for (iface, samples) in history {
+        if let Some(latest) = samples.last() {
+            if now_epoch_secs.saturating_sub(latest.timestamp) > threshold_secs {
+                offline.insert(iface.clone());
+            }
+        }
+    }
+    offline
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BandwidthUsage, offline_interfaces_from_history};
+    use std::collections::HashMap;
+
+    #[test]
+    fn marks_interfaces_with_stale_samples_as_offline() {
+        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
+        history.insert(
+            "br0".into(),
+            vec![BandwidthUsage {
+                interface: "br0".into(),
+                timestamp: 100,
+                rx_bps: 0.0,
+                tx_bps: 0.0,
+                rx_pps: 0.0,
+                tx_pps: 0.0,
+            }],
+        );
+        history.insert(
+            "virbr0".into(),
+            vec![BandwidthUsage {
+                interface: "virbr0".into(),
+                timestamp: 115,
+                rx_bps: 10.0,
+                tx_bps: 20.0,
+                rx_pps: 1.0,
+                tx_pps: 2.0,
+            }],
+        );
+
+        let offline = offline_interfaces_from_history(&history, 10, 120);
+        assert!(offline.contains("br0"));
+        assert!(!offline.contains("virbr0"));
+        assert_eq!(offline.len(), 1);
+    }
+
+    #[test]
+    fn zero_threshold_disables_offline_detection() {
+        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
+        history.insert(
+            "br0".into(),
+            vec![BandwidthUsage {
+                interface: "br0".into(),
+                timestamp: 1,
+                rx_bps: 0.0,
+                tx_bps: 0.0,
+                rx_pps: 0.0,
+                tx_pps: 0.0,
+            }],
+        );
+
+        let offline = offline_interfaces_from_history(&history, 0, 10);
+        assert!(offline.is_empty());
+    }
 }
 
 impl NetworkMonitor {

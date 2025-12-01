@@ -6,6 +6,8 @@
 **Wayland-Native Virtualization & Container Manager**  
 *Bare metal speed. Declarative control. GPU-first.*
 
+🎨 **Tokyo Night Storm remains the default palette.** Material Ocean ships as an opt-in preset if you want the softer cyan/aqua look, but screenshots still reflect the classic Tokyo Night experience.
+
 </div>
 
 ---
@@ -35,7 +37,7 @@ Designed for modern Linux environments, Nova delivers bare-metal performance wit
 - 📦 **Lightweight Capsules** – Container technology with built-in snapshots, persistence, and isolation
 - 🧩 **Infrastructure as Code** – Declarative TOML configuration for reproducible, version-controlled deployments
 - 🌐 **Software-Defined Networking** – Advanced bridge, overlay, and QUIC-based mesh networking
-- 🎨 **Modern Interface** – Native Wayland GUI with real-time monitoring and intuitive controls
+- 🎨 **Modern Interface** – Native Wayland GUI with Tokyo Night defaults, opt-in Material Ocean styling, persisted preferences, and real-time monitoring controls
 - 🔐 **Security-First Design** – Cryptographic signing, encrypted networking, and secure defaults  
 
 ---
@@ -89,13 +91,22 @@ nova snapshot vm win11
 nova logs container api
 ``` 
 
+## What's New (RC4 Sprint)
+
+- **Material Ocean preset**: New optional palette sits beside the Tokyo Night variants in Settings → Appearance for teams that prefer softer gradients.
+- **Windows 11 presets**: `nova wizard vm` pulls in official Win11 tweaks (TPM layout, secure boot toggle, ballooned RAM guidance) without manual editing.
+- **Capture auto-scan & toasts**: Networking view remembers your discovery cadence, surfaces info toasts for manual rescans, and debounces storage churn.
+- **Monitoring controls**: Live bandwidth panes expose poll intervals, offline thresholds, and notification toggles so you can dial in the right fidelity per lab.
+- **GPU passthrough board**: Quick filters persist between sessions, bulk VFIO bind/unbind/reset actions are one click away, and diagnostics bubbles flag cards that need attention.
+- **Arch preflight CLI**: `nova support preflight` runs kernel/userland readiness checks (KVM, VFIO, virsh, nmcli) so you can validate Arch boxes before migrating off virt-manager.
+
 ## Documentation & Playbooks
 
 - [`docs/rtx50-series.md`](docs/rtx50-series.md) — RTX 50-series passthrough checklist (driver/kernel requirements, TCC guidance, validation matrix)
 - `COMMANDS.md` → Diagnostics & Support — details on `nova gpu list/info` output and the enriched support bundles (now capture GPU capabilities, metrics, and redacted system snapshots)
 - `nova support bundle --redact` — quickest way to gather logs, metrics, and per-GPU requirements for bug reports
 
-## Networking Persistence & Recovery
+## Networking Persistence, Capture & Monitoring
 
 Nova now keeps track of managed switches so they survive daemon or host restarts. Key points:
 
@@ -119,6 +130,34 @@ nova net create hyperv0 --type bridge \
 ```bash
 cargo test network::tests::hydrate_restoration_behaviors
 ```
+
+### Monitoring cadence & capture tuning
+
+Inside the Wayland shell you can now:
+
+- Set the **capture auto-scan interval** (15–120 seconds) and keep it synced to disk, so Nova only hits `~/.local/share/nova/captures` when you expect it.
+- Fire a manual refresh for a single host and watch an **info toast** confirm what was scanned and when.
+- Adjust **monitoring poll intervals** per interface (sampled metrics stay smooth around 5s, long-haul links can stretch to 60s) and tweak the **offline threshold** so flapping uplinks do not spam alerts.
+- Mute or enable **offline notifications** entirely when running noisy soak tests.
+
+Monitoring regression coverage is rolling out alongside RC5 observability; follow `tests/network.rs` for the latest offline heuristics cases.
+
+## GPU Passthrough Board
+
+The GPU dashboard now preserves exactly how you left it:
+
+- **Quick filters** (vendor, generation, host) sync to disk, so hopping between consoles or restarts keeps the same triage view.
+- **Card expansion state** sticks, letting you pin the adapters you babysit without repeatedly hunting for toggles.
+- **Bulk actions** perform VFIO bind/unbind/reset or driver reattach across the currently selected cards with status toasts for each device.
+- **Diagnostics badges** summarize health (`OK`, `Degraded`, `Action Needed`) next to the refresh button before you dive into a specific GPU.
+
+To compare board state from the CLI, the wizard exposes matching presets:
+
+```bash
+nova wizard vm win11 --preset gpu-labs
+```
+
+Pair the wizard with `COMMANDS.md` → Diagnostics & Support for deep dives, and watch for the upcoming GPU manager regression cases landing during the RC5 observability push.
 
 ## Roadmap
 
