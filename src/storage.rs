@@ -60,7 +60,7 @@ impl StorageManager {
             .iter()
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect();
-        pools.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        pools.sort_by_key(|p| p.0.to_lowercase());
         pools
     }
 
@@ -177,13 +177,15 @@ mod tests {
         }
 
         let mut manager = StorageManager::load(&path).unwrap();
-        let mut pool_cfg = StoragePoolConfig::default();
-        pool_cfg.directory = path
-            .parent()
-            .unwrap()
-            .join("nova-storage-test")
-            .to_string_lossy()
-            .into_owned();
+        let pool_cfg = StoragePoolConfig {
+            directory: path
+                .parent()
+                .unwrap()
+                .join("nova-storage-test")
+                .to_string_lossy()
+                .into_owned(),
+            ..Default::default()
+        };
 
         manager.create_pool("images", pool_cfg.clone()).unwrap();
         let pools = manager.list_pools();

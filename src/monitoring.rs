@@ -90,70 +90,13 @@ pub fn offline_interfaces_from_history(
 
     let mut offline = HashSet::new();
     for (iface, samples) in history {
-        if let Some(latest) = samples.last() {
-            if now_epoch_secs.saturating_sub(latest.timestamp) > threshold_secs {
-                offline.insert(iface.clone());
-            }
+        if let Some(latest) = samples.last()
+            && now_epoch_secs.saturating_sub(latest.timestamp) > threshold_secs
+        {
+            offline.insert(iface.clone());
         }
     }
     offline
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BandwidthUsage, offline_interfaces_from_history};
-    use std::collections::HashMap;
-
-    #[test]
-    fn marks_interfaces_with_stale_samples_as_offline() {
-        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
-        history.insert(
-            "br0".into(),
-            vec![BandwidthUsage {
-                interface: "br0".into(),
-                timestamp: 100,
-                rx_bps: 0.0,
-                tx_bps: 0.0,
-                rx_pps: 0.0,
-                tx_pps: 0.0,
-            }],
-        );
-        history.insert(
-            "virbr0".into(),
-            vec![BandwidthUsage {
-                interface: "virbr0".into(),
-                timestamp: 115,
-                rx_bps: 10.0,
-                tx_bps: 20.0,
-                rx_pps: 1.0,
-                tx_pps: 2.0,
-            }],
-        );
-
-        let offline = offline_interfaces_from_history(&history, 10, 120);
-        assert!(offline.contains("br0"));
-        assert!(!offline.contains("virbr0"));
-        assert_eq!(offline.len(), 1);
-    }
-
-    #[test]
-    fn zero_threshold_disables_offline_detection() {
-        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
-        history.insert(
-            "br0".into(),
-            vec![BandwidthUsage {
-                interface: "br0".into(),
-                timestamp: 1,
-                rx_bps: 0.0,
-                tx_bps: 0.0,
-                rx_pps: 0.0,
-                tx_pps: 0.0,
-            }],
-        );
-
-        let offline = offline_interfaces_from_history(&history, 0, 10);
-        assert!(offline.is_empty());
-    }
 }
 
 impl NetworkMonitor {
@@ -280,8 +223,8 @@ impl NetworkMonitor {
         log_info!("Starting packet capture on interface: {}", config.interface);
 
         let mut cmd = Command::new("tcpdump");
-        cmd.args(&["-i", &config.interface]);
-        cmd.args(&["-w", &config.output_file]);
+        cmd.args(["-i", &config.interface]);
+        cmd.args(["-w", &config.output_file]);
 
         // Add filter if specified
         if let Some(filter) = &config.filter {
@@ -290,13 +233,13 @@ impl NetworkMonitor {
 
         // Add packet count limit if specified
         if let Some(count) = config.packet_count {
-            cmd.args(&["-c", &count.to_string()]);
+            cmd.args(["-c", &count.to_string()]);
         }
 
         // Set capture duration if specified
         if let Some(duration) = config.duration {
-            cmd.args(&["-G", &duration.to_string()]);
-            cmd.args(&["-W", "1"]); // Only one file
+            cmd.args(["-G", &duration.to_string()]);
+            cmd.args(["-W", "1"]); // Only one file
         }
 
         // Run in background
@@ -320,18 +263,18 @@ impl NetworkMonitor {
         log_info!("Stopping packet capture: {}", capture_id);
 
         // Extract PID from capture_id
-        if let Some(pid_str) = capture_id.strip_prefix("nova-capture-") {
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                let output = Command::new("kill")
-                    .args(&["-TERM", &pid.to_string()])
-                    .output()
-                    .map_err(|_| NovaError::SystemCommandFailed)?;
+        if let Some(pid_str) = capture_id.strip_prefix("nova-capture-")
+            && let Ok(pid) = pid_str.parse::<u32>()
+        {
+            let output = Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output()
+                .map_err(|_| NovaError::SystemCommandFailed)?;
 
-                if output.status.success() {
-                    log_info!("Packet capture {} stopped", capture_id);
-                } else {
-                    log_warn!("Failed to stop packet capture {}", capture_id);
-                }
+            if output.status.success() {
+                log_info!("Packet capture {} stopped", capture_id);
+            } else {
+                log_warn!("Failed to stop packet capture {}", capture_id);
             }
         }
 
@@ -388,34 +331,29 @@ impl NetworkMonitor {
         let sys_net =
             std::fs::read_dir("/sys/class/net").map_err(|_| NovaError::SystemCommandFailed)?;
 
-        for entry in sys_net {
-            if let Ok(entry) = entry {
-                let bridge_path = entry.path().join("bridge");
-                if bridge_path.exists() {
-                    let bridge_name = entry.file_name().to_string_lossy().to_string();
+        for entry in sys_net.flatten() {
+            let bridge_path = entry.path().join("bridge");
+            if bridge_path.exists() {
+                let bridge_name = entry.file_name().to_string_lossy().to_string();
 
-                    // Get bridge interfaces
-                    let mut interfaces = Vec::new();
-                    if let Ok(brif_dir) = std::fs::read_dir(bridge_path.join("brif")) {
-                        for iface_entry in brif_dir {
-                            if let Ok(iface_entry) = iface_entry {
-                                interfaces
-                                    .push(iface_entry.file_name().to_string_lossy().to_string());
-                            }
-                        }
+                // Get bridge interfaces
+                let mut interfaces = Vec::new();
+                if let Ok(brif_dir) = std::fs::read_dir(bridge_path.join("brif")) {
+                    for iface_entry in brif_dir.flatten() {
+                        interfaces.push(iface_entry.file_name().to_string_lossy().to_string());
                     }
-
-                    // Get bridge IP address
-                    let ip_address = self.get_interface_ip(&bridge_name).await.ok();
-
-                    topology.bridges.push(TopologyBridge {
-                        name: bridge_name,
-                        bridge_type: "linux".to_string(),
-                        interfaces,
-                        ip_address,
-                        status: "active".to_string(),
-                    });
                 }
+
+                // Get bridge IP address
+                let ip_address = self.get_interface_ip(&bridge_name).await.ok();
+
+                topology.bridges.push(TopologyBridge {
+                    name: bridge_name,
+                    bridge_type: "linux".to_string(),
+                    interfaces,
+                    ip_address,
+                    status: "active".to_string(),
+                });
             }
         }
 
@@ -438,7 +376,7 @@ impl NetworkMonitor {
             if !bridge_name.is_empty() {
                 // Get bridge ports
                 let port_output = Command::new("ovs-vsctl")
-                    .args(&["list-ports", bridge_name])
+                    .args(["list-ports", bridge_name])
                     .output()
                     .unwrap_or_else(|_| std::process::Output {
                         status: std::process::ExitStatus::from_raw(1),
@@ -490,7 +428,7 @@ impl NetworkMonitor {
 
     async fn get_interface_ip(&self, interface: &str) -> Result<String> {
         let output = Command::new("ip")
-            .args(&["-4", "addr", "show", interface])
+            .args(["-4", "addr", "show", interface])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -500,12 +438,13 @@ impl NetworkMonitor {
 
         let output_str = String::from_utf8_lossy(&output.stdout);
         for line in output_str.lines() {
-            if line.contains("inet ") && !line.contains("127.0.0.1") {
-                if let Some(start) = line.find("inet ") {
-                    let ip_part = &line[start + 5..];
-                    if let Some(end) = ip_part.find(' ') {
-                        return Ok(ip_part[..end].to_string());
-                    }
+            if line.contains("inet ")
+                && !line.contains("127.0.0.1")
+                && let Some(start) = line.find("inet ")
+            {
+                let ip_part = &line[start + 5..];
+                if let Some(end) = ip_part.find(' ') {
+                    return Ok(ip_part[..end].to_string());
                 }
             }
         }
@@ -518,7 +457,7 @@ impl NetworkMonitor {
         log_debug!("Getting active network connections");
 
         let output = Command::new("netstat")
-            .args(&["-tuln"])
+            .args(["-tuln"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -584,5 +523,62 @@ impl NetworkMonitor {
 impl Default for NetworkMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BandwidthUsage, offline_interfaces_from_history};
+    use std::collections::HashMap;
+
+    #[test]
+    fn marks_interfaces_with_stale_samples_as_offline() {
+        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
+        history.insert(
+            "br0".into(),
+            vec![BandwidthUsage {
+                interface: "br0".into(),
+                timestamp: 100,
+                rx_bps: 0.0,
+                tx_bps: 0.0,
+                rx_pps: 0.0,
+                tx_pps: 0.0,
+            }],
+        );
+        history.insert(
+            "virbr0".into(),
+            vec![BandwidthUsage {
+                interface: "virbr0".into(),
+                timestamp: 115,
+                rx_bps: 10.0,
+                tx_bps: 20.0,
+                rx_pps: 1.0,
+                tx_pps: 2.0,
+            }],
+        );
+
+        let offline = offline_interfaces_from_history(&history, 10, 120);
+        assert!(offline.contains("br0"));
+        assert!(!offline.contains("virbr0"));
+        assert_eq!(offline.len(), 1);
+    }
+
+    #[test]
+    fn zero_threshold_disables_offline_detection() {
+        let mut history: HashMap<String, Vec<BandwidthUsage>> = HashMap::new();
+        history.insert(
+            "br0".into(),
+            vec![BandwidthUsage {
+                interface: "br0".into(),
+                timestamp: 1,
+                rx_bps: 0.0,
+                tx_bps: 0.0,
+                rx_pps: 0.0,
+                tx_pps: 0.0,
+            }],
+        );
+
+        let offline = offline_interfaces_from_history(&history, 0, 10);
+        assert!(offline.is_empty());
     }
 }

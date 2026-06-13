@@ -108,14 +108,11 @@ impl EnhancedConsoleManager {
 
         let session = match selected_protocol {
             PreferredProtocol::LookingGlass => {
-                self.create_looking_glass_session(vm_name, &analysis).await?
+                self.create_looking_glass_session(vm_name, &analysis)
+                    .await?
             }
-            PreferredProtocol::SPICE => {
-                self.create_spice_session(vm_name, &analysis).await?
-            }
-            PreferredProtocol::VNC => {
-                self.create_vnc_session(vm_name).await?
-            }
+            PreferredProtocol::SPICE => self.create_spice_session(vm_name, &analysis).await?,
+            PreferredProtocol::VNC => self.create_vnc_session(vm_name).await?,
             PreferredProtocol::Auto => {
                 // Auto already resolved by select_optimal_protocol
                 self.create_spice_session(vm_name, &analysis).await?
@@ -124,7 +121,8 @@ impl EnhancedConsoleManager {
 
         // Start performance monitoring if enabled
         if self.config.performance_monitoring {
-            self.start_performance_monitoring(&session.session_id).await?;
+            self.start_performance_monitoring(&session.session_id)
+                .await?;
         }
 
         // Store session
@@ -157,7 +155,8 @@ impl EnhancedConsoleManager {
         };
 
         let lg_config = profile.to_config();
-        self.looking_glass_manager.register_config(vm_name.to_string(), lg_config.clone());
+        self.looking_glass_manager
+            .register_config(vm_name.to_string(), lg_config.clone());
 
         let session_id = format!("lg-{}-{}", vm_name, chrono::Utc::now().timestamp());
 
@@ -165,10 +164,7 @@ impl EnhancedConsoleManager {
             host: "localhost".to_string(),
             port: 0, // Looking Glass uses shared memory, not network
             protocol: "looking-glass".to_string(),
-            viewer_command: format!(
-                "looking-glass-client -f {}",
-                lg_config.shmem_path.display()
-            ),
+            viewer_command: format!("looking-glass-client -f {}", lg_config.shmem_path.display()),
             shmem_path: Some(lg_config.shmem_path.display().to_string()),
         };
 
@@ -209,8 +205,7 @@ impl EnhancedConsoleManager {
             protocol: "spice".to_string(),
             viewer_command: format!(
                 "remote-viewer spice://{}:{}",
-                console_session.connection_info.host,
-                console_session.connection_info.port
+                console_session.connection_info.host, console_session.connection_info.port
             ),
             shmem_path: None,
         };
@@ -251,8 +246,7 @@ impl EnhancedConsoleManager {
             protocol: "vnc".to_string(),
             viewer_command: format!(
                 "vncviewer {}:{}",
-                console_session.connection_info.host,
-                console_session.connection_info.port
+                console_session.connection_info.host, console_session.connection_info.port
             ),
             shmem_path: None,
         };
@@ -292,16 +286,16 @@ impl EnhancedConsoleManager {
         {
             let info = String::from_utf8_lossy(&output.stdout);
 
-            if let Some(cpu_line) = info.lines().find(|line| line.contains("CPU(s)")) {
-                if let Some(cpu_str) = cpu_line.split_whitespace().nth(1) {
-                    analysis.cpu_cores = cpu_str.parse().unwrap_or(1);
-                }
+            if let Some(cpu_line) = info.lines().find(|line| line.contains("CPU(s)"))
+                && let Some(cpu_str) = cpu_line.split_whitespace().nth(1)
+            {
+                analysis.cpu_cores = cpu_str.parse().unwrap_or(1);
             }
 
-            if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory")) {
-                if let Some(mem_str) = mem_line.split_whitespace().nth(2) {
-                    analysis.memory_mb = mem_str.parse().unwrap_or(1024);
-                }
+            if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory"))
+                && let Some(mem_str) = mem_line.split_whitespace().nth(2)
+            {
+                analysis.memory_mb = mem_str.parse().unwrap_or(1024);
             }
         }
 
@@ -416,7 +410,10 @@ impl EnhancedConsoleManager {
             .get_session(session_id)
             .ok_or(NovaError::NetworkNotFound(session_id.to_string()))?;
 
-        log_info!("Launching viewer: {}", session.connection_info.viewer_command);
+        log_info!(
+            "Launching viewer: {}",
+            session.connection_info.viewer_command
+        );
 
         match session.protocol_used {
             ActiveProtocol::LookingGlass => {

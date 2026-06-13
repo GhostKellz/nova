@@ -45,6 +45,12 @@ pub struct SriovManager {
     vf_assignments: HashMap<String, String>, // VF address -> VM name
 }
 
+impl Default for SriovManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SriovManager {
     pub fn new() -> Self {
         Self {
@@ -73,18 +79,15 @@ impl SriovManager {
 
             // Check if device supports SR-IOV
             let sriov_totalvfs_path = device_path.join("sriov_totalvfs");
-            if sriov_totalvfs_path.exists() {
-                if let Ok(max_vfs_str) = fs::read_to_string(&sriov_totalvfs_path) {
-                    if let Ok(max_vfs) = max_vfs_str.trim().parse::<u32>() {
-                        if max_vfs > 0 {
-                            // This device supports SR-IOV
-                            let device =
-                                self.parse_sriov_device(&device_path, &address, max_vfs)?;
-                            devices.push(device.clone());
-                            self.devices.insert(address.clone(), device);
-                        }
-                    }
-                }
+            if sriov_totalvfs_path.exists()
+                && let Ok(max_vfs_str) = fs::read_to_string(&sriov_totalvfs_path)
+                && let Ok(max_vfs) = max_vfs_str.trim().parse::<u32>()
+                && max_vfs > 0
+            {
+                // This device supports SR-IOV
+                let device = self.parse_sriov_device(&device_path, &address, max_vfs)?;
+                devices.push(device.clone());
+                self.devices.insert(address.clone(), device);
             }
         }
 
@@ -234,7 +237,7 @@ impl SriovManager {
                     .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()));
 
                 // For network VFs, read MAC address
-                let mac_address = Self::read_vf_mac_address(&pf_path, vf_index);
+                let mac_address = Self::read_vf_mac_address(pf_path, vf_index);
 
                 vfs.push(VirtualFunction {
                     vf_index,
@@ -358,7 +361,7 @@ impl SriovManager {
     pub fn generate_vf_xml(&self, vf_address: &str) -> String {
         // Parse PCI address (e.g., "0000:01:00.1")
         let parts: Vec<&str> = vf_address.split(&[':', '.']).collect();
-        let domain = parts.get(0).unwrap_or(&"0000");
+        let domain = parts.first().unwrap_or(&"0000");
         let bus = parts.get(1).unwrap_or(&"00");
         let slot = parts.get(2).unwrap_or(&"00");
         let function = parts.get(3).unwrap_or(&"0");

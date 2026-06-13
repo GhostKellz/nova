@@ -290,10 +290,10 @@ impl NetworkManager {
                 }
             }
 
-            if let Some(switch) = self.switches.get_mut(&switch_name) {
-                if bridge_ready || is_test_mode() {
-                    switch.status = SwitchStatus::Active;
-                }
+            if let Some(switch) = self.switches.get_mut(&switch_name)
+                && (bridge_ready || is_test_mode())
+            {
+                switch.status = SwitchStatus::Active;
             }
 
             if let Some(profile) = state.profile.clone() {
@@ -333,14 +333,14 @@ impl NetworkManager {
                     .interfaces
                     .get(uplink)
                     .and_then(|iface| iface.bridge.as_ref())
-                    .map_or(false, |bridge| bridge == &state.name);
+                    .is_some_and(|bridge| bridge == &state.name);
 
                 if !already_attached {
                     self.add_interface_to_switch(&state.name, uplink).await?;
-                } else if let Some(switch) = self.switches.get_mut(&state.name) {
-                    if !switch.interfaces.iter().any(|iface| iface == uplink) {
-                        switch.interfaces.push(uplink.clone());
-                    }
+                } else if let Some(switch) = self.switches.get_mut(&state.name)
+                    && !switch.interfaces.iter().any(|iface| iface == uplink)
+                {
+                    switch.interfaces.push(uplink.clone());
                 }
 
                 if let Some(iface) = self.interfaces.get_mut(uplink) {
@@ -469,7 +469,7 @@ impl NetworkManager {
             interfaces_up,
             interfaces_down,
             interfaces_unknown,
-            last_refresh_at: self.last_refresh_at.clone(),
+            last_refresh_at: self.last_refresh_at,
         }
     }
 
@@ -479,12 +479,11 @@ impl NetworkManager {
         }
 
         for (iface_name, interface) in &self.interfaces {
-            if let Some(master) = &interface.bridge {
-                if let Some(switch) = self.switches.get_mut(master) {
-                    if !switch.interfaces.contains(iface_name) {
-                        switch.interfaces.push(iface_name.clone());
-                    }
-                }
+            if let Some(master) = &interface.bridge
+                && let Some(switch) = self.switches.get_mut(master)
+                && !switch.interfaces.contains(iface_name)
+            {
+                switch.interfaces.push(iface_name.clone());
             }
         }
     }
@@ -632,7 +631,7 @@ impl NetworkManager {
 
         // Create bridge using ip command (modern approach)
         let output = Command::new("ip")
-            .args(&["link", "add", "name", name, "type", "bridge"])
+            .args(["link", "add", "name", name, "type", "bridge"])
             .output()
             .map_err(|e| {
                 log_error!("Failed to create bridge {}: {}", name, e);
@@ -647,7 +646,7 @@ impl NetworkManager {
 
         // Bring bridge up
         let output = Command::new("ip")
-            .args(&["link", "set", "dev", name, "up"])
+            .args(["link", "set", "dev", name, "up"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -673,7 +672,7 @@ impl NetworkManager {
         }
 
         let output = Command::new("ovs-vsctl")
-            .args(&["add-br", name])
+            .args(["add-br", name])
             .output()
             .map_err(|e| {
                 log_error!("Failed to create OVS bridge {}: {}", name, e);
@@ -717,12 +716,12 @@ impl NetworkManager {
                     let _ = self.configure_nat(&nat_config).await;
                     let _ = self.stop_dhcp(name).await;
                     let _ = Command::new("ip")
-                        .args(&["addr", "flush", "dev", name])
+                        .args(["addr", "flush", "dev", name])
                         .output();
                 }
                 SwitchProfile::External { uplink } => {
                     let _ = Command::new("ip")
-                        .args(&["link", "set", "dev", &uplink, "nomaster"])
+                        .args(["link", "set", "dev", &uplink, "nomaster"])
                         .output();
                 }
                 SwitchProfile::Internal => {}
@@ -758,12 +757,12 @@ impl NetworkManager {
     async fn delete_linux_bridge(&self, name: &str) -> Result<()> {
         // Bring bridge down first
         let _ = Command::new("ip")
-            .args(&["link", "set", "dev", name, "down"])
+            .args(["link", "set", "dev", name, "down"])
             .output();
 
         // Delete bridge
         let output = Command::new("ip")
-            .args(&["link", "delete", name, "type", "bridge"])
+            .args(["link", "delete", name, "type", "bridge"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -778,7 +777,7 @@ impl NetworkManager {
 
     async fn delete_ovs_bridge(&self, name: &str) -> Result<()> {
         let output = Command::new("ovs-vsctl")
-            .args(&["del-br", name])
+            .args(["del-br", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -815,10 +814,10 @@ impl NetworkManager {
             }
         }
 
-        if let Some(switch) = self.switches.get_mut(switch_name) {
-            if !switch.interfaces.iter().any(|i| i == interface) {
-                switch.interfaces.push(interface.to_string());
-            }
+        if let Some(switch) = self.switches.get_mut(switch_name)
+            && !switch.interfaces.iter().any(|i| i == interface)
+        {
+            switch.interfaces.push(interface.to_string());
         }
 
         Ok(())
@@ -844,7 +843,7 @@ impl NetworkManager {
         match switch_type {
             SwitchType::LinuxBridge => {
                 let output = Command::new("ip")
-                    .args(&["link", "set", "dev", interface, "nomaster"])
+                    .args(["link", "set", "dev", interface, "nomaster"])
                     .output()
                     .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -859,7 +858,7 @@ impl NetworkManager {
             }
             SwitchType::OpenVSwitch => {
                 let output = Command::new("ovs-vsctl")
-                    .args(&["del-port", switch_name, interface])
+                    .args(["del-port", switch_name, interface])
                     .output()
                     .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -892,7 +891,7 @@ impl NetworkManager {
         }
 
         let output = Command::new("ip")
-            .args(&["link", "set", "dev", interface, "master", bridge])
+            .args(["link", "set", "dev", interface, "master", bridge])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -920,7 +919,7 @@ impl NetworkManager {
         }
 
         let output = Command::new("ovs-vsctl")
-            .args(&["add-port", bridge, interface])
+            .args(["add-port", bridge, interface])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -976,7 +975,7 @@ impl NetworkManager {
 
     async fn enable_stp(&self, bridge: &str) -> Result<()> {
         let output = Command::new("ip")
-            .args(&[
+            .args([
                 "link",
                 "set",
                 "dev",
@@ -1003,7 +1002,7 @@ impl NetworkManager {
 
         let output = Command::new("sh")
             .arg("-c")
-            .arg(&format!("echo {} > {}", value, sysfs_path))
+            .arg(format!("echo {} > {}", value, sysfs_path))
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -1044,12 +1043,12 @@ impl NetworkManager {
                 bridge
             );
             let _ = Command::new("ip")
-                .args(&["addr", "flush", "dev", source])
+                .args(["addr", "flush", "dev", source])
                 .output();
         }
 
         let output = Command::new("ip")
-            .args(&["addr", "replace", cidr, "dev", bridge])
+            .args(["addr", "replace", cidr, "dev", bridge])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -1059,7 +1058,7 @@ impl NetworkManager {
         }
 
         let _ = Command::new("ip")
-            .args(&["link", "set", "dev", bridge, "up"])
+            .args(["link", "set", "dev", bridge, "up"])
             .output();
 
         log_info!("Assigned address {} to bridge {}", cidr, bridge);
@@ -1071,7 +1070,7 @@ impl NetworkManager {
         log_info!("Discovering network interfaces");
 
         let output = Command::new("ip")
-            .args(&["-j", "link", "show"])
+            .args(["-j", "link", "show"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -1195,7 +1194,7 @@ impl NetworkManager {
         log_info!("Creating VLAN interface: {}", vlan_name);
 
         let output = Command::new("ip")
-            .args(&[
+            .args([
                 "link",
                 "add",
                 "link",
@@ -1217,7 +1216,7 @@ impl NetworkManager {
 
         // Bring VLAN interface up
         let _ = Command::new("ip")
-            .args(&["link", "set", "dev", &vlan_name, "up"])
+            .args(["link", "set", "dev", &vlan_name, "up"])
             .output();
 
         log_info!("VLAN interface {} created successfully", vlan_name);
@@ -1261,7 +1260,7 @@ impl NetworkManager {
 
     pub fn check_bridge_utils_available(&self) -> bool {
         Command::new("ip")
-            .args(&["link", "help"])
+            .args(["link", "help"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -1286,7 +1285,7 @@ impl NetworkManager {
         if self.check_ovs_available() {
             // Use OVS for advanced port mirroring
             let output = Command::new("ovs-vsctl")
-                .args(&[
+                .args([
                     "--",
                     "--id=@m",
                     "create",
@@ -1294,13 +1293,13 @@ impl NetworkManager {
                     &format!("name=mirror-{}-{}", source_port, target_port),
                 ])
                 .arg("--")
-                .args(&["--id=@in", "get", "port", source_port])
+                .args(["--id=@in", "get", "port", source_port])
                 .arg("--")
-                .args(&["--id=@out", "get", "port", target_port])
+                .args(["--id=@out", "get", "port", target_port])
                 .arg("--")
-                .args(&["set", "bridge", bridge, "mirrors=@m"])
+                .args(["set", "bridge", bridge, "mirrors=@m"])
                 .arg("--")
-                .args(&[
+                .args([
                     "set",
                     "mirror",
                     "@m",
@@ -1340,7 +1339,7 @@ impl NetworkManager {
             FilterAction::Allow => {
                 // Use ebtables for bridge-level filtering
                 let output = Command::new("ebtables")
-                    .args(&[
+                    .args([
                         "-A",
                         "FORWARD",
                         "-i",
@@ -1359,7 +1358,7 @@ impl NetworkManager {
             }
             FilterAction::Deny => {
                 let output = Command::new("ebtables")
-                    .args(&[
+                    .args([
                         "-A",
                         "FORWARD",
                         "-i",
@@ -1452,9 +1451,9 @@ impl NetworkManager {
         let log_file = format!("/tmp/nova-dhcp-{}.log", interface);
 
         let output = Command::new("dnsmasq")
-            .args(&["-C", &conf_file])
-            .args(&["--pid-file", &pid_file])
-            .args(&["--log-facility", &log_file])
+            .args(["-C", &conf_file])
+            .args(["--pid-file", &pid_file])
+            .args(["--log-facility", &log_file])
             .output()
             .map_err(|e| {
                 log_error!("Failed to start dnsmasq: {}", e);
@@ -1481,16 +1480,16 @@ impl NetworkManager {
 
         let pid_file = format!("/tmp/nova-dhcp-{}.pid", interface);
 
-        if let Ok(pid_content) = std::fs::read_to_string(&pid_file) {
-            if let Ok(pid) = pid_content.trim().parse::<u32>() {
-                let _ = Command::new("kill").arg(&pid.to_string()).output();
-            }
+        if let Ok(pid_content) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = pid_content.trim().parse::<u32>()
+        {
+            let _ = Command::new("kill").arg(pid.to_string()).output();
         }
 
         // Clean up files
         let _ = std::fs::remove_file(&pid_file);
-        let _ = std::fs::remove_file(&format!("/tmp/nova-dhcp-{}.conf", interface));
-        let _ = std::fs::remove_file(&format!("/tmp/nova-dhcp-{}.log", interface));
+        let _ = std::fs::remove_file(format!("/tmp/nova-dhcp-{}.conf", interface));
+        let _ = std::fs::remove_file(format!("/tmp/nova-dhcp-{}.log", interface));
 
         Ok(())
     }
@@ -1531,7 +1530,7 @@ impl NetworkManager {
 
         // Enable IP forwarding globally
         let output = Command::new("sysctl")
-            .args(&["-w", "net.ipv4.ip_forward=1"])
+            .args(["-w", "net.ipv4.ip_forward=1"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -1554,7 +1553,7 @@ impl NetworkManager {
     async fn apply_nat_with_iptables(&self, config: &NatConfig) -> Result<()> {
         if config.masquerade {
             let output = Command::new("iptables")
-                .args(&[
+                .args([
                     "-t",
                     "nat",
                     "-A",
@@ -1574,7 +1573,7 @@ impl NetworkManager {
         }
 
         let output = Command::new("iptables")
-            .args(&[
+            .args([
                 "-A",
                 "FORWARD",
                 "-i",
@@ -1593,7 +1592,7 @@ impl NetworkManager {
         }
 
         let output = Command::new("iptables")
-            .args(&[
+            .args([
                 "-A",
                 "FORWARD",
                 "-i",
@@ -1621,7 +1620,7 @@ impl NetworkManager {
     async fn remove_nat_with_iptables(&self, config: &NatConfig) -> Result<()> {
         if config.masquerade {
             let _ = Command::new("iptables")
-                .args(&[
+                .args([
                     "-t",
                     "nat",
                     "-D",
@@ -1635,7 +1634,7 @@ impl NetworkManager {
         }
 
         let _ = Command::new("iptables")
-            .args(&[
+            .args([
                 "-D",
                 "FORWARD",
                 "-i",
@@ -1648,7 +1647,7 @@ impl NetworkManager {
             .output();
 
         let _ = Command::new("iptables")
-            .args(&[
+            .args([
                 "-D",
                 "FORWARD",
                 "-i",
@@ -1670,7 +1669,7 @@ impl NetworkManager {
     async fn apply_nat_with_nftables(&self, config: &NatConfig) -> Result<()> {
         let table_name = Self::nft_table_name(&config.internal_interface);
         let _ = Command::new("nft")
-            .args(&["delete", "table", "inet", &table_name])
+            .args(["delete", "table", "inet", &table_name])
             .output();
 
         let script = format!(
@@ -1725,7 +1724,7 @@ impl NetworkManager {
     async fn remove_nat_with_nftables(&self, config: &NatConfig) -> Result<()> {
         let table_name = Self::nft_table_name(&config.internal_interface);
         let _ = Command::new("nft")
-            .args(&["delete", "table", "inet", &table_name])
+            .args(["delete", "table", "inet", &table_name])
             .output();
         Ok(())
     }
@@ -1741,7 +1740,7 @@ impl NetworkManager {
 
     pub fn check_iptables_available(&self) -> bool {
         Command::new("iptables")
-            .args(&["-L", "-n"])
+            .args(["-L", "-n"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -1761,7 +1760,7 @@ impl NetworkManager {
 
     pub fn check_ebtables_available(&self) -> bool {
         Command::new("ebtables")
-            .args(&["-L"])
+            .args(["-L"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)

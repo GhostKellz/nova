@@ -24,7 +24,6 @@ const TPM_WORK_DIR: &str = "/var/lib/nova/tpm";
 struct TpmArtifacts {
     socket_path: PathBuf,
     control_path: PathBuf,
-    state_dir: PathBuf,
     root_dir: PathBuf,
 }
 
@@ -64,11 +63,11 @@ impl VmManager {
         // Check if VM is already running
         {
             let instances = self.instances.lock().unwrap();
-            if let Some(instance) = instances.get(name) {
-                if instance.is_running() {
-                    log_warn!("VM '{}' is already running", name);
-                    return Ok(());
-                }
+            if let Some(instance) = instances.get(name)
+                && instance.is_running()
+            {
+                log_warn!("VM '{}' is already running", name);
+                return Ok(());
             }
         }
 
@@ -162,16 +161,39 @@ impl VmManager {
             instances.insert(name.to_string(), instance);
         }
 
-        // Monitor VM startup
+        // Monitor VM startup and trigger auto-connect if enabled
         tokio::spawn({
             let instances = self.instances.clone();
+            let looking_glass_configs = self.looking_glass_configs.clone();
             let name = name.to_string();
             async move {
                 sleep(Duration::from_secs(3)).await;
-                let mut instances = instances.lock().unwrap();
-                if let Some(instance) = instances.get_mut(&name) {
-                    instance.update_status(crate::instance::InstanceStatus::Running);
-                    log_info!("VM '{}' is now running", name);
+                {
+                    let mut instances = instances.lock().unwrap();
+                    if let Some(instance) = instances.get_mut(&name) {
+                        instance.update_status(crate::instance::InstanceStatus::Running);
+                        log_info!("VM '{}' is now running", name);
+                    }
+                }
+
+                // Check for Looking Glass auto-connect
+                if LookingGlassManager::is_auto_connect_enabled(&name) {
+                    log_info!("Looking Glass auto-connect enabled for VM '{}'", name);
+                    let lg_config = {
+                        let configs = looking_glass_configs.lock().unwrap();
+                        configs.get(&name).cloned()
+                    };
+
+                    // Try to load saved config if not in memory
+                    let config = lg_config.or_else(|| LookingGlassManager::load_vm_config(&name));
+
+                    let manager = LookingGlassManager::new();
+                    if let Err(e) = manager
+                        .auto_connect_if_enabled(&name, config.as_ref())
+                        .await
+                    {
+                        log_warn!("Failed to auto-connect Looking Glass for '{}': {}", name, e);
+                    }
                 }
             }
         });
@@ -206,7 +228,7 @@ impl VmManager {
         // Alternative: use pkill to find and kill QEMU process
         let output = Command::new("pkill")
             .arg("-f")
-            .arg(&format!("qemu.*{}", name))
+            .arg(format!("qemu.*{}", name))
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -298,21 +320,20 @@ impl VmManager {
                 cmd.arg(arg);
             }
 
-            if matches!(config.display, DisplayMode::LookingGlass) {
-                if let Err(err) = self
+            if matches!(config.display, DisplayMode::LookingGlass)
+                && let Err(err) = self
                     .prepare_looking_glass(name, &vm_config.looking_glass, cmd)
                     .await
-                {
-                    let mut manager = self.gpu_manager.lock().unwrap();
-                    if let Err(release_err) = manager.release_gpu(&config.device_address) {
-                        log_warn!(
-                            "Failed to release GPU {} after Looking Glass error: {}",
-                            config.device_address,
-                            release_err
-                        );
-                    }
-                    return Err(err);
+            {
+                let mut manager = self.gpu_manager.lock().unwrap();
+                if let Err(release_err) = manager.release_gpu(&config.device_address) {
+                    log_warn!(
+                        "Failed to release GPU {} after Looking Glass error: {}",
+                        config.device_address,
+                        release_err
+                    );
                 }
+                return Err(err);
             }
 
             let mut allocations = self.gpu_allocations.lock().unwrap();
@@ -337,12 +358,14 @@ impl VmManager {
             .or_else(|| manager.list_gpus().first())
             .ok_or_else(|| NovaError::ConfigError("No GPUs available for passthrough".into()))?;
 
-        let mut config = GpuPassthroughConfig::default();
-        config.device_address = gpu.address.clone();
-        config.display = if vm_config.looking_glass.enabled {
-            DisplayMode::LookingGlass
-        } else {
-            DisplayMode::None
+        let config = GpuPassthroughConfig {
+            device_address: gpu.address.clone(),
+            display: if vm_config.looking_glass.enabled {
+                DisplayMode::LookingGlass
+            } else {
+                DisplayMode::None
+            },
+            ..Default::default()
         };
 
         Ok(config)
@@ -420,6 +443,8 @@ impl VmManager {
     }
 
     fn configure_tpm(&self, name: &str, tpm: &VmTpmConfig, cmd: &mut Command) -> Result<()> {
+        use crate::config::VmTpmBackend;
+
         if !tpm.enabled {
             let managed = {
                 let mut guard = self.tpm_instances.lock().unwrap();
@@ -433,6 +458,94 @@ impl VmManager {
             return Ok(());
         }
 
+        match tpm.backend {
+            VmTpmBackend::Hardware => {
+                // Hardware TPM passthrough - use host's /dev/tpm0 directly
+                self.configure_hardware_tpm(name, tpm, cmd)?;
+            }
+            VmTpmBackend::Emulated => {
+                // Software TPM emulation via swtpm
+                self.configure_emulated_tpm(name, tpm, cmd)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn configure_hardware_tpm(
+        &self,
+        name: &str,
+        tpm: &VmTpmConfig,
+        cmd: &mut Command,
+    ) -> Result<()> {
+        // Check if hardware TPM is available
+        let tpm_device = Path::new("/dev/tpm0");
+        let tpmrm_device = Path::new("/dev/tpmrm0");
+
+        if !tpm_device.exists() && !tpmrm_device.exists() {
+            return Err(NovaError::ConfigError(
+                "Hardware TPM requested but /dev/tpm0 or /dev/tpmrm0 not found. \
+                 Ensure TPM 2.0 is enabled in BIOS and tpm_tis/tpm_crb module is loaded."
+                    .into(),
+            ));
+        }
+
+        // Prefer tpmrm0 (resource manager) for concurrent access, fall back to tpm0
+        let device_path = if tpmrm_device.exists() {
+            log_info!(
+                "Using TPM resource manager device /dev/tpmrm0 for VM '{}'",
+                name
+            );
+            "/dev/tpmrm0"
+        } else {
+            log_info!(
+                "Using direct TPM device /dev/tpm0 for VM '{}' (exclusive access)",
+                name
+            );
+            "/dev/tpm0"
+        };
+
+        // Verify TPM version matches requested version
+        if tpm.version == VmTpmVersion::V2_0 {
+            // Check TPM version via sysfs
+            let version_path = Path::new("/sys/class/tpm/tpm0/tpm_version_major");
+            if version_path.exists()
+                && let Ok(version) = fs::read_to_string(version_path)
+            {
+                let major: u8 = version.trim().parse().unwrap_or(0);
+                if major != 2 {
+                    return Err(NovaError::ConfigError(format!(
+                        "TPM 2.0 requested but host has TPM {}.x",
+                        major
+                    )));
+                }
+            }
+        }
+
+        // Configure QEMU to use hardware TPM passthrough
+        // Using tpm-passthrough backend which directly accesses the host TPM
+        cmd.arg("-tpmdev").arg(format!(
+            "passthrough,id=tpm-{},path={},cancel-path=/dev/null",
+            name, device_path
+        ));
+        cmd.arg("-device")
+            .arg(format!("tpm-tis,tpmdev=tpm-{}", name));
+
+        log_info!(
+            "Hardware TPM 2.0 passthrough configured for VM '{}' using {}",
+            name,
+            device_path
+        );
+
+        Ok(())
+    }
+
+    fn configure_emulated_tpm(
+        &self,
+        name: &str,
+        tpm: &VmTpmConfig,
+        cmd: &mut Command,
+    ) -> Result<()> {
         let managed = self.spawn_tpm(name, tpm)?;
         let artifacts = managed.artifacts.clone();
         {
@@ -450,6 +563,8 @@ impl VmManager {
             .arg(format!("emulator,id=tpm-{},chardev={}", name, chardev_id));
         cmd.arg("-device")
             .arg(format!("tpm-tis,tpmdev=tpm-{}", name));
+
+        log_info!("Emulated TPM configured for VM '{}' via swtpm", name);
 
         Ok(())
     }
@@ -509,7 +624,6 @@ impl VmManager {
             artifacts: TpmArtifacts {
                 socket_path,
                 control_path,
-                state_dir,
                 root_dir,
             },
         })
@@ -679,7 +793,7 @@ pub(crate) async fn prepare_vm_disk(
     );
 
     let output = Command::new("qemu-img")
-        .args(&[
+        .args([
             "create",
             "-f",
             storage_cfg.format.as_str(),

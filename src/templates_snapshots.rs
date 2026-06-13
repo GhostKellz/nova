@@ -213,9 +213,9 @@ impl TemplateManager {
 
         // Create snapshot using virsh
         let mut cmd = Command::new("virsh");
-        cmd.args(&["snapshot-create-as", vm_name]);
-        cmd.args(&["--name", snapshot_name]);
-        cmd.args(&["--description", description]);
+        cmd.args(["snapshot-create-as", vm_name]);
+        cmd.args(["--name", snapshot_name]);
+        cmd.args(["--description", description]);
 
         match snapshot_type {
             SnapshotType::Memory => {
@@ -273,7 +273,7 @@ impl TemplateManager {
         // Store snapshot
         self.snapshots
             .entry(vm_name.to_string())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(snapshot_id.clone(), snapshot);
 
         log_info!(
@@ -332,9 +332,7 @@ impl TemplateManager {
         if matches!(state, VmState::Running) {
             log_info!("Shutting down VM '{}' for template creation", vm_name);
 
-            let output = Command::new("virsh")
-                .args(&["shutdown", vm_name])
-                .output()?;
+            let output = Command::new("virsh").args(["shutdown", vm_name]).output()?;
 
             if !output.status.success() {
                 return Err(NovaError::SystemCommandFailed);
@@ -352,9 +350,7 @@ impl TemplateManager {
     }
 
     async fn get_vm_state(&self, vm_name: &str) -> Result<VmState> {
-        let output = Command::new("virsh")
-            .args(&["domstate", vm_name])
-            .output()?;
+        let output = Command::new("virsh").args(["domstate", vm_name]).output()?;
 
         if output.status.success() {
             let state = String::from_utf8_lossy(&output.stdout)
@@ -376,7 +372,7 @@ impl TemplateManager {
         log_info!("Compressing VM disk: {:?} -> {:?}", source, target);
 
         let output = Command::new("qemu-img")
-            .args(&["convert", "-c", "-O", "qcow2"])
+            .args(["convert", "-c", "-O", "qcow2"])
             .arg(source)
             .arg(target)
             .output()?;
@@ -402,12 +398,11 @@ impl TemplateManager {
 
             if template_dir.is_dir() {
                 let metadata_file = template_dir.join("template.json");
-                if metadata_file.exists() {
-                    if let Ok(content) = std::fs::read_to_string(metadata_file) {
-                        if let Ok(template) = serde_json::from_str::<VmTemplate>(&content) {
-                            self.templates.insert(template.id.clone(), template);
-                        }
-                    }
+                if metadata_file.exists()
+                    && let Ok(content) = std::fs::read_to_string(metadata_file)
+                    && let Ok(template) = serde_json::from_str::<VmTemplate>(&content)
+                {
+                    self.templates.insert(template.id.clone(), template);
                 }
             }
         }
@@ -470,7 +465,7 @@ impl TemplateManager {
 
         if was_running {
             log_info!("Stopping VM before snapshot revert");
-            let output = Command::new("virsh").args(&["destroy", vm_name]).output()?;
+            let output = Command::new("virsh").args(["destroy", vm_name]).output()?;
 
             if !output.status.success() {
                 log_error!("Failed to stop VM");
@@ -480,7 +475,7 @@ impl TemplateManager {
 
         // Revert snapshot using virsh
         let output = Command::new("virsh")
-            .args(&["snapshot-revert", vm_name, snapshot_name])
+            .args(["snapshot-revert", vm_name, snapshot_name])
             .arg("--force")
             .output()?;
 
@@ -500,7 +495,7 @@ impl TemplateManager {
         // Restart VM if it was running
         if was_running {
             log_info!("Restarting VM after snapshot revert");
-            let output = Command::new("virsh").args(&["start", vm_name]).output()?;
+            let output = Command::new("virsh").args(["start", vm_name]).output()?;
 
             if !output.status.success() {
                 log_error!("Failed to restart VM");
@@ -541,7 +536,7 @@ impl TemplateManager {
 
         // Delete using virsh
         let mut cmd = Command::new("virsh");
-        cmd.args(&["snapshot-delete", vm_name, snapshot_name]);
+        cmd.args(["snapshot-delete", vm_name, snapshot_name]);
 
         if delete_children {
             cmd.arg("--children");
@@ -596,7 +591,7 @@ impl TemplateManager {
     pub fn list_snapshots_chronological(&self, vm_name: &str) -> Vec<&VmSnapshot> {
         if let Some(snapshots) = self.snapshots.get(vm_name) {
             let mut snapshot_list: Vec<&VmSnapshot> = snapshots.values().collect();
-            snapshot_list.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            snapshot_list.sort_by_key(|s| s.created_at);
             snapshot_list
         } else {
             Vec::new()
@@ -634,7 +629,7 @@ impl TemplateManager {
 
         // Create clone using virt-clone
         let output = Command::new("virt-clone")
-            .args(&[
+            .args([
                 "--original",
                 source_vm,
                 "--name",
@@ -670,7 +665,7 @@ impl TemplateManager {
 
         // Use virt-clone for the operation
         let mut cmd = Command::new("virt-clone");
-        cmd.args(&["--original", source_vm, "--name", new_vm_name]);
+        cmd.args(["--original", source_vm, "--name", new_vm_name]);
 
         if clone_disks {
             cmd.arg("--auto-clone");
@@ -707,9 +702,9 @@ impl TemplateManager {
         self.ensure_vm_shutdown(source_vm).await?;
 
         let mut cmd = Command::new("virt-clone");
-        cmd.args(&["--original", source_vm, "--name", new_vm_name]);
+        cmd.args(["--original", source_vm, "--name", new_vm_name]);
 
-        for (_i, disk_path) in disk_paths.iter().enumerate() {
+        for disk_path in disk_paths.iter() {
             cmd.arg("--file").arg(disk_path);
         }
 
@@ -740,7 +735,7 @@ impl TemplateManager {
         let new_disk = PathBuf::from(format!("/var/lib/libvirt/images/{}.qcow2", new_vm_name));
 
         let output = Command::new("qemu-img")
-            .args(&[
+            .args([
                 "create",
                 "-f",
                 "qcow2",

@@ -251,7 +251,7 @@ impl ContainerRuntime for BoltRuntime {
             log_info!("Stopping Bolt container: {}", id_or_name);
 
             let output = Command::new("bolt")
-                .args(&["stop", id_or_name])
+                .args(["stop", id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::StopFailed(format!("Failed to execute bolt stop: {}", e))
@@ -318,7 +318,7 @@ impl ContainerRuntime for BoltRuntime {
     fn inspect_container<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerInfo> {
         Box::pin(async move {
             let output = Command::new("bolt")
-                .args(&["inspect", id_or_name])
+                .args(["inspect", id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute bolt inspect: {}", e))
@@ -352,7 +352,7 @@ impl ContainerRuntime for BoltRuntime {
             log_info!("Pulling Bolt image: {}", image);
 
             let output = Command::new("bolt")
-                .args(&["pull", image])
+                .args(["pull", image])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute bolt pull: {}", e))
@@ -370,7 +370,7 @@ impl ContainerRuntime for BoltRuntime {
     fn list_images<'a>(&'a self) -> RuntimeFuture<'a, Vec<ImageInfo>> {
         Box::pin(async move {
             let output = Command::new("bolt")
-                .args(&["images"])
+                .args(["images"])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute bolt images: {}", e))
@@ -387,7 +387,7 @@ impl ContainerRuntime for BoltRuntime {
     fn get_logs<'a>(&'a self, id_or_name: &'a str, lines: usize) -> RuntimeFuture<'a, Vec<String>> {
         Box::pin(async move {
             let output = Command::new("bolt")
-                .args(&["logs", "--tail", &lines.to_string(), id_or_name])
+                .args(["logs", "--tail", &lines.to_string(), id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute bolt logs: {}", e))
@@ -407,7 +407,7 @@ impl ContainerRuntime for BoltRuntime {
     fn get_stats<'a>(&'a self, id_or_name: &'a str) -> RuntimeFuture<'a, ContainerStats> {
         Box::pin(async move {
             let output = Command::new("bolt")
-                .args(&["stats", "--no-stream", id_or_name])
+                .args(["stats", "--no-stream", id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute bolt stats: {}", e))

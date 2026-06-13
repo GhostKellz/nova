@@ -10,23 +10,19 @@ use std::time::{Duration, Instant};
 
 const GPU_STATE_KEY: &str = "nova.gpu-manager.state";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 enum GpuTab {
+    #[default]
     Manager,
     IommuGroups,
     Diagnostics,
 }
 
-impl Default for GpuTab {
-    fn default() -> Self {
-        GpuTab::Manager
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 enum QuickFilter {
+    #[default]
     All,
     Assigned,
     VfioReady,
@@ -34,12 +30,6 @@ enum QuickFilter {
     Nvidia,
     Amd,
     Intel,
-}
-
-impl Default for QuickFilter {
-    fn default() -> Self {
-        QuickFilter::All
-    }
 }
 
 impl QuickFilter {
@@ -156,7 +146,7 @@ impl GpuManagerGui {
             let _ = manager.discover();
             manager.refresh_device_status();
 
-            self.gpus = manager.list_gpus().iter().cloned().collect();
+            self.gpus = manager.list_gpus().to_vec();
 
             // Build IOMMU group map
             self.iommu_groups.clear();
@@ -164,7 +154,7 @@ impl GpuManagerGui {
                 if let Some(group) = gpu.iommu_group {
                     self.iommu_groups
                         .entry(group)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(gpu.address.clone());
                 }
             }
@@ -251,7 +241,7 @@ impl GpuManagerGui {
     fn refresh_binding_status(&mut self) {
         if let Ok(mut manager) = self.gpu_manager.lock() {
             manager.refresh_device_status();
-            self.gpus = manager.list_gpus().iter().cloned().collect();
+            self.gpus = manager.list_gpus().to_vec();
             self.reservations.clear();
             for (addr, vm) in manager.get_reservations() {
                 self.reservations.insert(addr.clone(), vm.clone());
@@ -555,7 +545,7 @@ impl GpuManagerGui {
             Ok(mut manager) => match action(&mut manager) {
                 Ok(success_message) => {
                     manager.refresh_device_status();
-                    self.gpus = manager.list_gpus().iter().cloned().collect();
+                    self.gpus = manager.list_gpus().to_vec();
                     self.reservations.clear();
                     for (addr, vm) in manager.get_reservations() {
                         self.reservations.insert(addr.clone(), vm.clone());
@@ -753,8 +743,8 @@ impl GpuManagerGui {
         let filtered_gpus: Vec<PciDevice> = self
             .gpus
             .iter()
-            .cloned()
             .filter(|gpu| self.matches_gpu_filter(gpu, &self.gpu_filter))
+            .cloned()
             .collect();
 
         if filtered_gpus.is_empty() {
@@ -857,7 +847,7 @@ impl GpuManagerGui {
         let driver = gpu.driver.as_deref();
         let expanded = self.is_card_expanded(&gpu.address);
 
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(if is_selected {
                 egui::Color32::from_rgb(45, 55, 75)
             } else {
@@ -871,8 +861,8 @@ impl GpuManagerGui {
                     egui::Color32::from_gray(80)
                 },
             ))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::same(12.0))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let mut bulk_checked = self.bulk_selection.contains(&gpu.address);
@@ -930,34 +920,32 @@ impl GpuManagerGui {
                 ui.small(format!("{}:{}", gpu.vendor_id, gpu.device_id));
                 ui.add_space(4.0);
 
-                if expanded {
-                    if let Some(caps) = self.capabilities.get(&gpu.address) {
-                        let generation = caps
-                            .generation
-                            .as_ref()
-                            .map(|g| g.to_string())
-                            .unwrap_or_else(|| "Unknown".to_string());
-                        let min_driver = caps.minimum_driver.as_deref().unwrap_or("-");
-                        let recommended_kernel = caps.recommended_kernel.as_deref().unwrap_or("-");
-                        let tcc_status = if caps.tcc_supported { "Yes" } else { "No" };
+                if expanded && let Some(caps) = self.capabilities.get(&gpu.address) {
+                    let generation = caps
+                        .generation
+                        .as_ref()
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let min_driver = caps.minimum_driver.as_deref().unwrap_or("-");
+                    let recommended_kernel = caps.recommended_kernel.as_deref().unwrap_or("-");
+                    let tcc_status = if caps.tcc_supported { "Yes" } else { "No" };
 
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Generation: {}", generation));
-                            ui.add_space(12.0);
-                            ui.label(format!("Min Driver: {}", min_driver));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(format!("Kernel: {}", recommended_kernel));
-                            ui.add_space(12.0);
-                            ui.label(format!("TCC: {}", tcc_status));
-                        });
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Generation: {}", generation));
+                        ui.add_space(12.0);
+                        ui.label(format!("Min Driver: {}", min_driver));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Kernel: {}", recommended_kernel));
+                        ui.add_space(12.0);
+                        ui.label(format!("TCC: {}", tcc_status));
+                    });
 
-                        if let Some(vram_mb) = caps.vram_mb {
-                            ui.label(format!("VRAM: {} MB", vram_mb));
-                        }
-
-                        ui.add_space(4.0);
+                    if let Some(vram_mb) = caps.vram_mb {
+                        ui.label(format!("VRAM: {} MB", vram_mb));
                     }
+
+                    ui.add_space(4.0);
                 }
 
                 let (status_text, status_color) =

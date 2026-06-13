@@ -221,7 +221,7 @@ impl GpuDoctor {
     fn check_nvidia_drivers(&self) -> DiagnosticCheck {
         const MIN_BLACKWELL_DRIVER: &str = "560.0";
         const MIN_ADA_DRIVER: &str = "545.0";
-        const MIN_BLACKWELL_KERNEL: &str = "6.9";
+        const MIN_BLACKWELL_KERNEL: &str = "7.0";
 
         let nvidia_open_version = self.get_nvidia_open_version();
         let nvidia_proprietary = Command::new("nvidia-smi")
@@ -307,16 +307,16 @@ impl GpuDoctor {
                 }
             }
 
-            if let Some(kernel) = Self::get_kernel_version() {
-                if !Self::version_meets(&kernel, MIN_BLACKWELL_KERNEL) {
-                    message.push_str(&format!(
-                        "; kernel {} detected ({}+ recommended)",
-                        kernel.trim(),
-                        MIN_BLACKWELL_KERNEL
-                    ));
-                    fix_command
-                        .get_or_insert_with(|| "Upgrade to Linux kernel 6.9 or newer".to_string());
-                }
+            if let Some(kernel) = Self::get_kernel_version()
+                && !Self::version_meets(&kernel, MIN_BLACKWELL_KERNEL)
+            {
+                message.push_str(&format!(
+                    "; kernel {} detected ({}+ recommended)",
+                    kernel.trim(),
+                    MIN_BLACKWELL_KERNEL
+                ));
+                fix_command
+                    .get_or_insert_with(|| "Upgrade to Linux kernel 7.0 or newer".to_string());
             }
 
             message.push_str("; enable TCC mode for low-latency consoles (Looking Glass)");
@@ -347,7 +347,7 @@ impl GpuDoctor {
     fn version_meets(actual: &str, required: &str) -> bool {
         fn parse_components(input: &str) -> Vec<u32> {
             input
-                .split(|c| c == '.' || c == '-')
+                .split(['.', '-'])
                 .filter_map(|segment| segment.parse::<u32>().ok())
                 .collect()
         }
@@ -516,13 +516,13 @@ impl GpuDoctor {
         let mut conflicts = Vec::new();
 
         for gpu in gpus {
-            if let Some(driver) = &gpu.driver {
-                if driver == "nouveau" {
-                    conflicts.push(format!(
-                        "{}: nouveau (conflicts with NVIDIA passthrough)",
-                        gpu.address
-                    ));
-                }
+            if let Some(driver) = &gpu.driver
+                && driver == "nouveau"
+            {
+                conflicts.push(format!(
+                    "{}: nouveau (conflicts with NVIDIA passthrough)",
+                    gpu.address
+                ));
             }
         }
 
@@ -642,11 +642,11 @@ impl GpuDoctor {
         script.push_str("set -e\n\n");
 
         for check in &report.checks {
-            if check.status == CheckStatus::Fail || check.status == CheckStatus::Warn {
-                if let Some(fix) = &check.fix_command {
-                    script.push_str(&format!("# Fix: {}\n", check.name));
-                    script.push_str(&format!("{}\n\n", fix));
-                }
+            if (check.status == CheckStatus::Fail || check.status == CheckStatus::Warn)
+                && let Some(fix) = &check.fix_command
+            {
+                script.push_str(&format!("# Fix: {}\n", check.name));
+                script.push_str(&format!("{}\n\n", fix));
             }
         }
 

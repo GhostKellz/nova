@@ -4,7 +4,7 @@ The RTX 50-series introduces NVIDIA's Blackwell architecture. Nova now detects t
 
 ## Host Requirements
 
-- **Kernel:** Linux `6.9` or newer (CONFIG_PREEMPT_DYNAMIC recommended)
+- **Kernel:** Linux `7.0` or newer (CONFIG_PREEMPT_DYNAMIC recommended)
 - **Drivers:** `nvidia-open` `560.0+` (preferred) or proprietary `560+`
 - **Firmware:** Latest motherboard BIOS with Resizable BAR enabled
 - **IOMMU:** `intel_iommu=on iommu=pt` (Intel) or `amd_iommu=on iommu=pt` (AMD)
@@ -32,7 +32,7 @@ The RTX 50-series introduces NVIDIA's Blackwell architecture. Nova now detects t
 ## Quick Checklist
 
 1. Update system and install `nvidia-open` `560+`
-2. Reboot with kernel `6.9+` and IOMMU parameters
+2. Reboot with kernel `7.0+` and IOMMU parameters
 3. Enable TCC on the passthrough GPU
 4. Run `nova gpu doctor` and ensure all checks pass
 5. Launch Looking Glass / guest workload and monitor `journalctl -u nova`

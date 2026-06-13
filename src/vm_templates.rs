@@ -43,7 +43,11 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: true,
             iso_pattern: Some(r"(?i)win.*11.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["windows".to_string(), "gaming".to_string(), "gpu".to_string()],
+            tags: vec![
+                "windows".to_string(),
+                "gaming".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -63,7 +67,12 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)arch.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "arch".to_string(), "nvidia".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "arch".to_string(),
+                "nvidia".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -82,7 +91,12 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)fedora.*workstation.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "fedora".to_string(), "nvidia".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "fedora".to_string(),
+                "nvidia".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -101,7 +115,13 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)bazzite.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "bazzite".to_string(), "nvidia".to_string(), "gaming".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "bazzite".to_string(),
+                "nvidia".to_string(),
+                "gaming".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -120,7 +140,13 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)nobara.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "nobara".to_string(), "nvidia".to_string(), "gaming".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "nobara".to_string(),
+                "nvidia".to_string(),
+                "gaming".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -139,7 +165,12 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)pop.?os.*nvidia.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "popos".to_string(), "nvidia".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "popos".to_string(),
+                "nvidia".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -158,7 +189,12 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)(cosmic|pop.?os.*cosmic).*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "cosmic".to_string(), "nvidia".to_string(), "gpu".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "cosmic".to_string(),
+                "nvidia".to_string(),
+                "gpu".to_string(),
+            ],
         },
     );
 
@@ -178,7 +214,11 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)ubuntu.*24\.04.*server.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "ubuntu".to_string(), "server".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "ubuntu".to_string(),
+                "server".to_string(),
+            ],
         },
     );
 
@@ -197,7 +237,11 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)debian.*(12|13|bookworm|trixie).*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "debian".to_string(), "server".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "debian".to_string(),
+                "server".to_string(),
+            ],
         },
     );
 
@@ -217,7 +261,11 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)fedora.*workstation.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "fedora".to_string(), "desktop".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "fedora".to_string(),
+                "desktop".to_string(),
+            ],
         },
     );
 
@@ -236,7 +284,11 @@ pub fn builtin_templates() -> HashMap<String, VmTemplateConfig> {
             tpm: false,
             iso_pattern: Some(r"(?i)arch.*\.iso".to_string()),
             network: Some("virbr0".to_string()),
-            tags: vec!["linux".to_string(), "arch".to_string(), "minimal".to_string()],
+            tags: vec![
+                "linux".to_string(),
+                "arch".to_string(),
+                "minimal".to_string(),
+            ],
         },
     );
 
@@ -255,7 +307,10 @@ pub fn scan_iso_directories(paths: &[std::path::PathBuf]) -> Vec<IsoFile> {
         if let Ok(entries) = std::fs::read_dir(path) {
             for entry in entries.flatten() {
                 let file_path = entry.path();
-                if file_path.extension().map_or(false, |e| e.eq_ignore_ascii_case("iso")) {
+                if file_path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("iso"))
+                {
                     let name = file_path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
@@ -335,5 +390,7 @@ pub fn match_isos_to_template<'a>(
         return vec![];
     };
 
-    isos.iter().filter(|iso| regex.is_match(&iso.name)).collect()
+    isos.iter()
+        .filter(|iso| regex.is_match(&iso.name))
+        .collect()
 }

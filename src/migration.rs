@@ -330,7 +330,7 @@ impl MigrationManager {
 
         // Try live migration first
         let live_start = Instant::now();
-        if let Err(_) = self.attempt_live_migration(job).await {
+        if self.attempt_live_migration(job).await.is_err() {
             log_warn!("Live migration failed, falling back to post-copy");
 
             // Fall back to post-copy if live migration struggles
@@ -380,7 +380,7 @@ impl MigrationManager {
 
         // Get VM info from libvirt
         let output = Command::new("virsh")
-            .args(&["dominfo", vm_name])
+            .args(["dominfo", vm_name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -388,24 +388,22 @@ impl MigrationManager {
             let info = String::from_utf8_lossy(&output.stdout);
 
             // Parse memory size
-            if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory")) {
-                if let Some(mem_str) = mem_line.split_whitespace().nth(2) {
-                    analysis.memory_size_gb =
-                        mem_str.parse::<u64>().unwrap_or(2048) as f32 / 1024.0;
-                }
+            if let Some(mem_line) = info.lines().find(|line| line.contains("Max memory"))
+                && let Some(mem_str) = mem_line.split_whitespace().nth(2)
+            {
+                analysis.memory_size_gb = mem_str.parse::<u64>().unwrap_or(2048) as f32 / 1024.0;
             }
         }
 
         // Get memory dirty rate
         if let Ok(output) = Command::new("virsh")
-            .args(&["qemu-monitor-command", vm_name, "--hmp", "info migrate"])
+            .args(["qemu-monitor-command", vm_name, "--hmp", "info migrate"])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let _info = String::from_utf8_lossy(&output.stdout);
-                // Parse dirty rate from QEMU monitor
-                analysis.memory_dirty_rate = 50; // Placeholder
-            }
+            let _info = String::from_utf8_lossy(&output.stdout);
+            // Parse dirty rate from QEMU monitor
+            analysis.memory_dirty_rate = 50; // Placeholder
         }
 
         // Check if VM is critical (placeholder logic)
@@ -424,16 +422,15 @@ impl MigrationManager {
 
         // Measure latency
         if let Ok(output) = Command::new("ping")
-            .args(&["-c", "3", destination_host])
+            .args(["-c", "3", destination_host])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let ping_output = String::from_utf8_lossy(&output.stdout);
-                if let Some(avg_line) = ping_output.lines().find(|line| line.contains("avg")) {
-                    if let Some(avg_str) = avg_line.split('/').nth(4) {
-                        analysis.latency_ms = avg_str.parse().unwrap_or(10.0);
-                    }
-                }
+            let ping_output = String::from_utf8_lossy(&output.stdout);
+            if let Some(avg_line) = ping_output.lines().find(|line| line.contains("avg"))
+                && let Some(avg_str) = avg_line.split('/').nth(4)
+            {
+                analysis.latency_ms = avg_str.parse().unwrap_or(10.0);
             }
         }
 
@@ -476,7 +473,7 @@ impl MigrationManager {
 
         // Test SSH connectivity
         let output = Command::new("ssh")
-            .args(&[
+            .args([
                 "-o",
                 "ConnectTimeout=10",
                 "-o",
@@ -496,7 +493,7 @@ impl MigrationManager {
         // Test libvirt connectivity
         let libvirt_uri = format!("qemu+ssh://{}/system", host);
         let output = Command::new("virsh")
-            .args(&["-c", &libvirt_uri, "version"])
+            .args(["-c", &libvirt_uri, "version"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -539,7 +536,7 @@ impl MigrationManager {
         let dest_uri = format!("qemu+ssh://{}/system", job.destination_host);
 
         let mut migrate_cmd = Command::new("virsh");
-        migrate_cmd.args(&["migrate", "--live", "--verbose", &job.vm_name, &dest_uri]);
+        migrate_cmd.args(["migrate", "--live", "--verbose", &job.vm_name, &dest_uri]);
 
         // Add performance options
         if self.config.compress {
@@ -551,15 +548,15 @@ impl MigrationManager {
         }
 
         if self.config.parallel_connections > 1 {
-            migrate_cmd.args(&[
+            migrate_cmd.args([
                 "--parallel",
                 "--parallel-connections",
                 &self.config.parallel_connections.to_string(),
             ]);
         }
 
-        migrate_cmd.args(&["--bandwidth", &self.config.bandwidth_limit_mbps.to_string()]);
-        migrate_cmd.args(&["--timeout", &self.config.timeout_seconds.to_string()]);
+        migrate_cmd.args(["--bandwidth", &self.config.bandwidth_limit_mbps.to_string()]);
+        migrate_cmd.args(["--timeout", &self.config.timeout_seconds.to_string()]);
 
         // Start migration in background
         let _child = migrate_cmd.spawn().map_err(|e| {
@@ -615,7 +612,7 @@ impl MigrationManager {
     async fn get_migration_progress(&self, vm_name: &str) -> Result<MigrationMetrics> {
         // Get migration statistics from QEMU monitor
         let output = Command::new("virsh")
-            .args(&["qemu-monitor-command", vm_name, "--hmp", "info migrate"])
+            .args(["qemu-monitor-command", vm_name, "--hmp", "info migrate"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -717,7 +714,7 @@ impl MigrationManager {
         if let Some(job) = self.get_migration_job(job_id) {
             // Cancel the migration
             let output = Command::new("virsh")
-                .args(&["migrate", "--abort", &job.vm_name])
+                .args(["migrate", "--abort", &job.vm_name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 

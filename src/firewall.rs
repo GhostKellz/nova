@@ -239,7 +239,7 @@ impl FirewallManager {
 
     async fn load_iptables_table(&mut self, table_name: &str) -> Result<()> {
         let output = Command::new("iptables")
-            .args(&["-t", table_name, "-L", "-n", "-v", "--line-numbers"])
+            .args(["-t", table_name, "-L", "-n", "-v", "--line-numbers"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -279,7 +279,7 @@ impl FirewallManager {
                 if let Some(chain_name) = line.split_whitespace().nth(1) {
                     current_chain = Some(chain_name.to_string());
                 }
-            } else if line.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            } else if line.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 // This is a rule line, parse it
                 if let Ok(rule) = self.parse_iptables_rule_line(line, table_name) {
                     current_rules.push(rule);
@@ -331,7 +331,7 @@ impl FirewallManager {
 
     async fn load_nftables_rules(&mut self) -> Result<()> {
         let output = Command::new("nft")
-            .args(&["list", "ruleset"])
+            .args(["list", "ruleset"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -364,7 +364,7 @@ impl FirewallManager {
 
     async fn get_firewalld_zones(&self) -> Result<Vec<String>> {
         let output = Command::new("firewall-cmd")
-            .args(&["--get-zones"])
+            .args(["--get-zones"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -386,7 +386,7 @@ impl FirewallManager {
 
     async fn load_ufw_rules(&mut self) -> Result<()> {
         let output = Command::new("ufw")
-            .args(&["status", "numbered"])
+            .args(["status", "numbered"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -423,10 +423,10 @@ impl FirewallManager {
         }?;
 
         // Add to local state
-        if let Some(table) = self.tables.get_mut(&rule.table) {
-            if let Some(chain) = table.chains.get_mut(&rule.chain) {
-                chain.rules.push(rule);
-            }
+        if let Some(table) = self.tables.get_mut(&rule.table)
+            && let Some(chain) = table.chains.get_mut(&rule.chain)
+        {
+            chain.rules.push(rule);
         }
 
         // Reanalyze for conflicts
@@ -455,16 +455,16 @@ impl FirewallManager {
 
     async fn add_iptables_rule(&self, rule: &FirewallRule) -> Result<()> {
         let mut cmd = Command::new("iptables");
-        cmd.args(&["-t", &rule.table, "-A", &rule.chain]);
+        cmd.args(["-t", &rule.table, "-A", &rule.chain]);
 
         // Build iptables command from rule
         if let Some(protocol) = &rule.protocol {
             match protocol {
-                Protocol::Tcp => cmd.args(&["-p", "tcp"]),
-                Protocol::Udp => cmd.args(&["-p", "udp"]),
-                Protocol::Icmp => cmd.args(&["-p", "icmp"]),
+                Protocol::Tcp => cmd.args(["-p", "tcp"]),
+                Protocol::Udp => cmd.args(["-p", "udp"]),
+                Protocol::Icmp => cmd.args(["-p", "icmp"]),
                 Protocol::All => &mut cmd,
-                Protocol::Custom(p) => cmd.args(&["-p", p]),
+                Protocol::Custom(p) => cmd.args(["-p", p]),
             };
         }
 
@@ -472,28 +472,28 @@ impl FirewallManager {
             if source.negated {
                 cmd.arg("!");
             }
-            cmd.args(&["-s", &source.address]);
+            cmd.args(["-s", &source.address]);
         }
 
         if let Some(dest) = &rule.destination {
             if dest.negated {
                 cmd.arg("!");
             }
-            cmd.args(&["-d", &dest.address]);
+            cmd.args(["-d", &dest.address]);
         }
 
         if let Some(port_range) = &rule.port_range {
             if port_range.negated {
                 cmd.arg("!");
             }
-            cmd.args(&["--dport", &port_range.start.to_string()]);
+            cmd.args(["--dport", &port_range.start.to_string()]);
         }
 
         match &rule.target {
-            RuleTarget::Accept => cmd.args(&["-j", "ACCEPT"]),
-            RuleTarget::Drop => cmd.args(&["-j", "DROP"]),
-            RuleTarget::Reject => cmd.args(&["-j", "REJECT"]),
-            RuleTarget::Log => cmd.args(&["-j", "LOG"]),
+            RuleTarget::Accept => cmd.args(["-j", "ACCEPT"]),
+            RuleTarget::Drop => cmd.args(["-j", "DROP"]),
+            RuleTarget::Reject => cmd.args(["-j", "REJECT"]),
+            RuleTarget::Log => cmd.args(["-j", "LOG"]),
             _ => &mut cmd,
         };
 
@@ -665,7 +665,7 @@ impl FirewallManager {
 
     async fn capture_active_connections(&mut self) -> Result<()> {
         let output = Command::new("ss")
-            .args(&["-tuln"])
+            .args(["-tuln"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 

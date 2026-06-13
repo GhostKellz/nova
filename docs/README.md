@@ -1,39 +1,34 @@
-# Nova Documentation Suite · RC5
+# Nova Documentation
 
-Welcome to the RC5 "Observability & Documentation" documentation bundle. These files capture the work-in-progress guidance that powers the new docs portal, metrics stack, and support operations. Treat this directory as the source of truth for the mdBook/Docusaurus site that will go live at `https://docs.nova.dev` once RC5 ships.
+Nova documentation is organized by workflow. Keep the root of `docs/` small: this index should be the only top-level uppercase markdown file, and topic folders should use lowercase, descriptive filenames.
 
-## Structure
+## Start Here
 
-| File | Purpose |
-| ---- | ------- |
-| `observability.md` | Prometheus exporter, Grafana dashboards, and alerting runbooks. |
-| `docs-portal.md` | How we build, lint, and publish the Nova documentation portal. |
-| `support-tooling.md` | Details for the `nova support bundle` CLI, diagnostics, and escalation workflows. |
-| `release-playbook.md` | Checklist for RC5 release notes, change management, and communications cadence. |
-| `SNAPSHOTS.md` | (Existing) Weekly status digests mirrored from community calls. |
+| Topic | Description |
+| --- | --- |
+| [commands/commands.md](commands/commands.md) | CLI command reference for VM, template, snapshot, network, storage, migration, and support workflows. |
+| [networking/overview.md](networking/overview.md) | Virtual switch, bridge, NAT, capture, monitoring, and recovery documentation. |
+| [vfio/overview.md](vfio/overview.md) | GPU passthrough, RTX 50-series, IOMMU, VFIO, and host readiness guidance. |
+| [looking-glass/overview.md](looking-glass/overview.md) | Looking Glass architecture, install, configuration, tuning, and troubleshooting. |
+| [wayland/overview.md](wayland/overview.md) | Wayland quick start and integration notes for the Nova GUI. |
+| [gui/overview.md](gui/overview.md) | Theme, palette, and GUI design references. |
+| [operations/overview.md](operations/overview.md) | Observability, support bundles, diagnostics, packaging, and operational runbooks. |
+| [migration/from-virt-manager.md](migration/from-virt-manager.md) | Migration guide for users moving from virt-manager. |
+| [project/overview.md](project/overview.md) | Roadmap, release process, docs portal notes, and project snapshots. |
 
-Each document is scoped to a portion of the RC5 initiative and written to be directly reusable inside the docs portal. Additions should follow a docs-as-code mindset: open a PR, ensure CI link checks pass, and reference the relevant RC5 workstream board item.
+## Layout Rules
 
-## Writing Conventions
+- Use lowercase filenames with hyphens: `networking/commands.md`, not `NETWORKING_COMMANDS.md`.
+- Put large subjects in folders. Looking Glass, VFIO, networking, operations, GUI, and project process each own their own section.
+- Keep root-level project files limited to `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `LICENSE`, and build/config files.
+- Prefer task-oriented docs with commands, expected output, and troubleshooting notes.
+- Link with relative paths so pages work on GitHub and in a future docs portal.
 
-- **Style guide**: Prefer actionable, task-oriented language. Use full sentences, avoid passive voice, and keep call-outs concise.
-- **Front matter**: When migrating to the portal, add the appropriate Docusaurus/mdBook front matter. Keep these markdown files portable by avoiding tool-specific syntax here.
-- **Links**: Use relative links within `docs/` so they render both on GitHub and in the generated site.
-- **Command formatting**: Show shell commands in fenced blocks with comments instead of prose. Mark optional steps explicitly.
-- **Versioning**: Note minimum Nova versions (`v0.1.0-rc5+`) when introducing new flags or CLI subcommands.
+## Maintenance
 
-## Contribution Workflow
+When adding or moving docs:
 
-1. Create or update the markdown file in this directory.
-2. Run the docs lint pipeline (link and spell checks) using `cargo xtask docs:lint` once it lands in CI.
-3. Generate the static site locally via `npm run build` (Docusaurus) or `mdbook build` depending on the chosen stack.
-4. Attach rendered screenshots for GUI-heavy docs snippets to the PR description.
-5. Announce merged docs during the Monday RC5 stand-up and log the change in `SNAPSHOTS.md`.
-
-## Open Tasks
-
-- Add screenshots for the Nova metrics dashboard once the design polish lands.
-- Backfill troubleshooting examples for common exporter/CLI misconfigurations.
-- Draft a short video walkthrough for the docs portal landing page (tracked separately in the RC5 board).
-
-Have feedback or found a gap? File an issue with the `roadmap-input` label and link back to the relevant section here.
+1. Add the page under the correct topic folder.
+2. Update this index and the relevant folder `overview.md`.
+3. Check for stale links with `rg "old-file-name|OLD_FILE_NAME"`.
+4. Keep release notes and planning material under `project/`.

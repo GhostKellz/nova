@@ -37,6 +37,12 @@ pub struct MetricsHistory {
     pub timestamps: VecDeque<DateTime<Utc>>,
 }
 
+impl Default for MetricsHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsHistory {
     pub fn new() -> Self {
         Self {
@@ -114,6 +120,12 @@ struct PreviousStats {
     network_tx_bytes: u64,
 }
 
+impl Default for PerformanceCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceCollector {
     pub fn new() -> Self {
         Self {
@@ -173,23 +185,22 @@ impl PerformanceCollector {
 
                 if let Ok(domains) = connection.list_all_domains(0) {
                     for domain in domains {
-                        if let Ok(name) = domain.get_name() {
-                            if let Ok(vm_metrics) =
+                        if let Ok(name) = domain.get_name()
+                            && let Ok(vm_metrics) =
                                 Self::collect_domain_metrics(&domain, &name, &previous_stats).await
-                            {
-                                // Store current metrics
-                                metrics
-                                    .write()
-                                    .await
-                                    .insert(name.clone(), vm_metrics.clone());
+                        {
+                            // Store current metrics
+                            metrics
+                                .write()
+                                .await
+                                .insert(name.clone(), vm_metrics.clone());
 
-                                // Add to history
-                                let mut history_map = history.write().await;
-                                history_map
-                                    .entry(name.clone())
-                                    .or_insert_with(MetricsHistory::new)
-                                    .add_metrics(&vm_metrics);
-                            }
+                            // Add to history
+                            let mut history_map = history.write().await;
+                            history_map
+                                .entry(name.clone())
+                                .or_insert_with(MetricsHistory::new)
+                                .add_metrics(&vm_metrics);
                         }
                     }
                 }

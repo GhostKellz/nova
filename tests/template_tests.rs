@@ -21,26 +21,26 @@ fn test_ml_pytorch_template_validation() {
     assert!(value.get("vm").is_some(), "Should have VM configuration");
 
     // Check VM configuration
-    if let Some(vm) = value.get("vm").and_then(|v| v.as_table()) {
-        if let Some(ml_pytorch) = vm.get("ml-pytorch").and_then(|v| v.as_table()) {
-            assert!(
-                ml_pytorch.get("image").is_some(),
-                "VM should have image path"
-            );
-            assert!(ml_pytorch.get("cpu").is_some(), "VM should have CPU config");
-            assert!(
-                ml_pytorch.get("memory").is_some(),
-                "VM should have memory config"
-            );
-            assert!(
-                ml_pytorch.get("gpu_passthrough").is_some(),
-                "VM should have GPU config"
-            );
-            assert!(
-                ml_pytorch.get("network").is_some(),
-                "VM should have network config"
-            );
-        }
+    if let Some(vm) = value.get("vm").and_then(|v| v.as_table())
+        && let Some(ml_pytorch) = vm.get("ml-pytorch").and_then(|v| v.as_table())
+    {
+        assert!(
+            ml_pytorch.get("image").is_some(),
+            "VM should have image path"
+        );
+        assert!(ml_pytorch.get("cpu").is_some(), "VM should have CPU config");
+        assert!(
+            ml_pytorch.get("memory").is_some(),
+            "VM should have memory config"
+        );
+        assert!(
+            ml_pytorch.get("gpu_passthrough").is_some(),
+            "VM should have GPU config"
+        );
+        assert!(
+            ml_pytorch.get("network").is_some(),
+            "VM should have network config"
+        );
     }
 
     // Check for CUDA configuration
@@ -188,19 +188,16 @@ fn test_all_templates_have_gpu_passthrough() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let content =
-                    fs::read_to_string(&path).expect("Should be able to read template file");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let content = fs::read_to_string(&path).expect("Should be able to read template file");
 
-                assert!(
-                    content.contains("gpu_passthrough") || content.contains("gpu"),
-                    "Template {} should have GPU configuration",
-                    path.display()
-                );
-            }
+            assert!(
+                content.contains("gpu_passthrough") || content.contains("gpu"),
+                "Template {} should have GPU configuration",
+                path.display()
+            );
         }
     }
 }
@@ -216,19 +213,16 @@ fn test_all_templates_have_network_config() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let content =
-                    fs::read_to_string(&path).expect("Should be able to read template file");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let content = fs::read_to_string(&path).expect("Should be able to read template file");
 
-                assert!(
-                    content.contains("network"),
-                    "Template {} should have network configuration",
-                    path.display()
-                );
-            }
+            assert!(
+                content.contains("network"),
+                "Template {} should have network configuration",
+                path.display()
+            );
         }
     }
 }
@@ -244,26 +238,23 @@ fn test_templates_have_valid_memory_sizes() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let content =
-                    fs::read_to_string(&path).expect("Should be able to read template file");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let content = fs::read_to_string(&path).expect("Should be able to read template file");
 
-                // Check for memory specification
-                if let Some(parsed) = toml::from_str::<toml::Value>(&content).ok() {
-                    if let Some(vm) = parsed.get("vm").and_then(|v| v.as_table()) {
-                        for (_, vm_config) in vm {
-                            if let Some(memory) = vm_config.get("memory").and_then(|m| m.as_str()) {
-                                // Validate memory format (should be like "16Gi", "32G", etc.)
-                                assert!(
-                                    memory.contains('G') || memory.contains('M'),
-                                    "Memory size should have unit (G/M) in {}",
-                                    path.display()
-                                );
-                            }
-                        }
+            // Check for memory specification
+            if let Ok(parsed) = toml::from_str::<toml::Value>(&content)
+                && let Some(vm) = parsed.get("vm").and_then(|v| v.as_table())
+            {
+                for (_, vm_config) in vm {
+                    if let Some(memory) = vm_config.get("memory").and_then(|m| m.as_str()) {
+                        // Validate memory format (should be like "16Gi", "32G", etc.)
+                        assert!(
+                            memory.contains('G') || memory.contains('M'),
+                            "Memory size should have unit (G/M) in {}",
+                            path.display()
+                        );
                     }
                 }
             }
@@ -282,24 +273,21 @@ fn test_templates_have_valid_cpu_counts() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let content =
-                    fs::read_to_string(&path).expect("Should be able to read template file");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let content = fs::read_to_string(&path).expect("Should be able to read template file");
 
-                if let Some(parsed) = toml::from_str::<toml::Value>(&content).ok() {
-                    if let Some(vm) = parsed.get("vm").and_then(|v| v.as_table()) {
-                        for (_, vm_config) in vm {
-                            if let Some(cpu) = vm_config.get("cpu").and_then(|c| c.as_integer()) {
-                                assert!(
-                                    cpu > 0 && cpu <= 128,
-                                    "CPU count should be reasonable (1-128) in {}",
-                                    path.display()
-                                );
-                            }
-                        }
+            if let Ok(parsed) = toml::from_str::<toml::Value>(&content)
+                && let Some(vm) = parsed.get("vm").and_then(|v| v.as_table())
+            {
+                for (_, vm_config) in vm {
+                    if let Some(cpu) = vm_config.get("cpu").and_then(|c| c.as_integer()) {
+                        assert!(
+                            cpu > 0 && cpu <= 128,
+                            "CPU count should be reasonable (1-128) in {}",
+                            path.display()
+                        );
                     }
                 }
             }
@@ -367,7 +355,7 @@ fn test_templates_dont_have_hardcoded_secrets() {
         return;
     }
 
-    let _dangerous_patterns = vec![
+    let _dangerous_patterns = [
         "password = \"",
         "api_key = \"[A-Za-z0-9]",
         "secret = \"[A-Za-z0-9]",
@@ -376,26 +364,23 @@ fn test_templates_dont_have_hardcoded_secrets() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let content =
-                    fs::read_to_string(&path).expect("Should be able to read template file");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let content = fs::read_to_string(&path).expect("Should be able to read template file");
 
-                // Check content doesn't have hardcoded secrets
-                // Allow empty strings for placeholders
-                assert!(
-                    !content.contains("password = \"secret\""),
-                    "Template {} should not have hardcoded passwords",
-                    path.display()
-                );
-                assert!(
-                    !content.contains("api_key = \"sk-"),
-                    "Template {} should not have hardcoded API keys",
-                    path.display()
-                );
-            }
+            // Check content doesn't have hardcoded secrets
+            // Allow empty strings for placeholders
+            assert!(
+                !content.contains("password = \"secret\""),
+                "Template {} should not have hardcoded passwords",
+                path.display()
+            );
+            assert!(
+                !content.contains("api_key = \"sk-"),
+                "Template {} should not have hardcoded API keys",
+                path.display()
+            );
         }
     }
 }
@@ -439,19 +424,17 @@ fn test_templates_use_consistent_naming() {
 
     let entries = fs::read_dir(&template_dir).expect("Should be able to read template directory");
 
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                let filename = path.file_stem().unwrap().to_string_lossy();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            let filename = path.file_stem().unwrap().to_string_lossy();
 
-                // Template filenames should use kebab-case
-                assert!(
-                    filename.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
-                    "Template filename {} should use kebab-case",
-                    filename
-                );
-            }
+            // Template filenames should use kebab-case
+            assert!(
+                filename.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "Template filename {} should use kebab-case",
+                filename
+            );
         }
     }
 }

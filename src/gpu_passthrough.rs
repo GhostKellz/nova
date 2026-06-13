@@ -200,7 +200,7 @@ impl GpuManager {
     fn discover_pci_devices(&mut self) -> Result<()> {
         // Use lspci to discover GPUs
         let output = Command::new("lspci")
-            .args(&["-nn", "-D"])
+            .args(["-nn", "-D"])
             .output()
             .map_err(|e| {
                 log_error!("Failed to run lspci: {}", e);
@@ -215,14 +215,13 @@ impl GpuManager {
 
         for line in stdout.lines() {
             // Look for VGA/3D/Display controllers
-            if line.contains("VGA compatible controller")
+            if (line.contains("VGA compatible controller")
                 || line.contains("3D controller")
-                || line.contains("Display controller")
+                || line.contains("Display controller"))
+                && let Some(device) = self.parse_lspci_line(line)
             {
-                if let Some(device) = self.parse_lspci_line(line) {
-                    log_debug!("Found GPU: {} ({})", device.device_name, device.address);
-                    self.gpus.push(device);
-                }
+                log_debug!("Found GPU: {} ({})", device.device_name, device.address);
+                self.gpus.push(device);
             }
         }
 
@@ -286,10 +285,10 @@ impl GpuManager {
     fn get_device_driver(address: &str) -> Option<String> {
         let driver_path = format!("/sys/bus/pci/devices/{}/driver", address);
 
-        if let Ok(link) = fs::read_link(&driver_path) {
-            if let Some(driver) = link.file_name() {
-                return Some(driver.to_string_lossy().to_string());
-            }
+        if let Ok(link) = fs::read_link(&driver_path)
+            && let Some(driver) = link.file_name()
+        {
+            return Some(driver.to_string_lossy().to_string());
         }
 
         None
@@ -308,37 +307,36 @@ impl GpuManager {
         for gpu in &mut self.gpus {
             let group_path = format!("/sys/bus/pci/devices/{}/iommu_group", gpu.address);
 
-            if let Ok(link) = fs::read_link(&group_path) {
-                if let Some(group_name) = link.file_name() {
-                    if let Ok(group_id) = group_name.to_string_lossy().parse::<u32>() {
-                        gpu.iommu_group = Some(group_id);
-                    }
-                }
+            if let Ok(link) = fs::read_link(&group_path)
+                && let Some(group_name) = link.file_name()
+                && let Ok(group_id) = group_name.to_string_lossy().parse::<u32>()
+            {
+                gpu.iommu_group = Some(group_id);
             }
         }
 
         // Build IOMMU group list
         if let Ok(entries) = fs::read_dir(iommu_path) {
             for entry in entries.flatten() {
-                if let Some(group_id_str) = entry.file_name().to_str() {
-                    if let Ok(group_id) = group_id_str.parse::<u32>() {
-                        let devices = self.get_iommu_group_devices(group_id);
+                if let Some(group_id_str) = entry.file_name().to_str()
+                    && let Ok(group_id) = group_id_str.parse::<u32>()
+                {
+                    let devices = self.get_iommu_group_devices(group_id);
 
-                        // Skip groups that do not contain any discoverable GPUs
-                        if devices.is_empty() {
-                            continue;
-                        }
-
-                        let isolated = devices.len() == 1;
-                        let viable = isolated || self.is_group_viable(&devices);
-
-                        self.iommu_groups.push(IommuGroup {
-                            id: group_id,
-                            devices: devices.clone(),
-                            isolated,
-                            viable_for_passthrough: viable,
-                        });
+                    // Skip groups that do not contain any discoverable GPUs
+                    if devices.is_empty() {
+                        continue;
                     }
+
+                    let isolated = devices.len() == 1;
+                    let viable = isolated || self.is_group_viable(&devices);
+
+                    self.iommu_groups.push(IommuGroup {
+                        id: group_id,
+                        devices: devices.clone(),
+                        isolated,
+                        viable_for_passthrough: viable,
+                    });
                 }
             }
         }
@@ -449,15 +447,14 @@ impl GpuManager {
                         .map(|s| s.trim().to_string())
                         .unwrap_or_default();
                     current_addr = Some(addr);
-                } else if trimmed.starts_with("Memory:") && trimmed.contains("MB") {
-                    if let Some(memory_str) = trimmed
+                } else if trimmed.starts_with("Memory:")
+                    && trimmed.contains("MB")
+                    && let Some(memory_str) = trimmed
                         .split_whitespace()
                         .find(|s| s.chars().all(|c| c.is_ascii_digit()))
-                    {
-                        if let Ok(memory_mb) = memory_str.parse::<u64>() {
-                            current_memory = Some(memory_mb);
-                        }
-                    }
+                    && let Ok(memory_mb) = memory_str.parse::<u64>()
+                {
+                    current_memory = Some(memory_mb);
                 }
             }
 
@@ -477,7 +474,7 @@ impl GpuManager {
         log_info!("Using nvidia-smi for GPU capability discovery");
 
         let output = Command::new("nvidia-smi")
-            .args(&[
+            .args([
                 "--query-gpu=pci.bus_id,name,memory.total,pcie.link.gen.current,pcie.link.width.current,compute_cap",
                 "--format=csv,noheader",
             ])
@@ -552,7 +549,7 @@ impl GpuManager {
 
     fn apply_blackwell_requirements(caps: &mut GpuCapabilities) {
         caps.minimum_driver = Some("560.0".to_string());
-        caps.recommended_kernel = Some("6.9".to_string());
+        caps.recommended_kernel = Some("7.0".to_string());
         caps.vgpu_capable = true;
         caps.sriov_capable = true;
         caps.tcc_supported = true;
@@ -745,7 +742,7 @@ impl GpuManager {
 
         let probe_path = Path::new("/sys/bus/pci/drivers_probe");
         if probe_path.exists() {
-            if let Err(err) = fs::write(probe_path, format!("{}", device_address)) {
+            if let Err(err) = fs::write(probe_path, device_address) {
                 log_error!(
                     "Failed to trigger drivers_probe for {}: {}",
                     device_address,
@@ -930,7 +927,7 @@ impl GpuManager {
             .any(|caps| matches!(caps.generation, Some(GpuGeneration::Blackwell)))
         {
             issues.push(
-                "RTX 50-series detected — ensure NVIDIA driver 560+, Linux kernel 6.9+, and TCC mode for low-latency consoles (Looking Glass)."
+                "RTX 50-series detected — ensure NVIDIA driver 560+, Linux kernel 7.0+, and TCC mode for low-latency consoles (Looking Glass)."
                     .to_string(),
             );
         }
@@ -1021,18 +1018,18 @@ impl GpuPassthroughConfig {
             args.push(device);
         }
 
-        if let Some(audio) = &self.audio_device {
-            if !audio.is_empty() {
-                args.push("-device".to_string());
-                args.push(format!("vfio-pci,host={}", audio));
-            }
+        if let Some(audio) = &self.audio_device
+            && !audio.is_empty()
+        {
+            args.push("-device".to_string());
+            args.push(format!("vfio-pci,host={}", audio));
         }
 
-        if let Some(controller) = &self.usb_controller {
-            if !controller.is_empty() {
-                args.push("-device".to_string());
-                args.push(format!("vfio-pci,host={}", controller));
-            }
+        if let Some(controller) = &self.usb_controller
+            && !controller.is_empty()
+        {
+            args.push("-device".to_string());
+            args.push(format!("vfio-pci,host={}", controller));
         }
 
         args

@@ -369,7 +369,7 @@ impl PortMonitor {
 
         // Use netstat to get listening ports
         let output = Command::new("netstat")
-            .args(&["-tulnp"])
+            .args(["-tulnp"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -382,7 +382,7 @@ impl PortMonitor {
 
         // Also use ss for more detailed info
         let ss_output = Command::new("ss")
-            .args(&["-tulnp"])
+            .args(["-tulnp"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -739,29 +739,27 @@ impl PortMonitor {
         // Check for suspicious patterns
         if self.is_global_ip(&connection.remote_addr.ip())
             && !self.is_known_service_ip(&connection.remote_addr.ip())
+            && let Some(geo_info) = self.get_geographic_info(&connection.remote_addr.ip()).await
+            && (geo_info.is_suspicious || geo_info.threat_score > 0.7)
         {
-            if let Some(geo_info) = self.get_geographic_info(&connection.remote_addr.ip()).await {
-                if geo_info.is_suspicious || geo_info.threat_score > 0.7 {
-                    return Some(SecurityAlert {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        alert_type: AlertType::SuspiciousConnection,
-                        severity: AlertSeverity::Medium,
-                        title: "Suspicious external connection detected".to_string(),
-                        description: format!(
-                            "Connection to {} from {}",
-                            connection.remote_addr, geo_info.country
-                        ),
-                        source_ip: Some(connection.remote_addr.ip()),
-                        dest_port: Some(connection.local_addr.port()),
-                        process_name: Some(connection.process_name.clone()),
-                        timestamp: SystemTime::now(),
-                        resolved: false,
-                        false_positive: false,
-                        remediation_steps: self
-                            .generate_remediation_steps(&AlertType::SuspiciousConnection),
-                    });
-                }
-            }
+            return Some(SecurityAlert {
+                id: uuid::Uuid::new_v4().to_string(),
+                alert_type: AlertType::SuspiciousConnection,
+                severity: AlertSeverity::Medium,
+                title: "Suspicious external connection detected".to_string(),
+                description: format!(
+                    "Connection to {} from {}",
+                    connection.remote_addr, geo_info.country
+                ),
+                source_ip: Some(connection.remote_addr.ip()),
+                dest_port: Some(connection.local_addr.port()),
+                process_name: Some(connection.process_name.clone()),
+                timestamp: SystemTime::now(),
+                resolved: false,
+                false_positive: false,
+                remediation_steps: self
+                    .generate_remediation_steps(&AlertType::SuspiciousConnection),
+            });
         }
 
         // Check for port scanning
@@ -873,7 +871,7 @@ impl PortMonitor {
                 self.communication_matrix
                     .internal_communications
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(flow);
             } else {
                 let key = format!(
@@ -884,7 +882,7 @@ impl PortMonitor {
                 self.communication_matrix
                     .external_communications
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(flow);
             }
         }
@@ -984,10 +982,10 @@ impl PortMonitor {
         // Collect vulnerable services to avoid borrow checker issues
         let mut vulnerable_services = Vec::new();
         for port_info in self.listening_ports.values() {
-            if let Some(service) = &port_info.service_name {
-                if self.has_known_vulnerabilities(service, port_info.port) {
-                    vulnerable_services.push(port_info.clone());
-                }
+            if let Some(service) = &port_info.service_name
+                && self.has_known_vulnerabilities(service, port_info.port)
+            {
+                vulnerable_services.push(port_info.clone());
             }
         }
 
@@ -1108,7 +1106,7 @@ impl PortMonitor {
             PortPattern::Exact(pattern_port) => port == *pattern_port,
             PortPattern::Range(start, end) => port >= *start && port <= *end,
             PortPattern::WellKnown => port < 1024,
-            PortPattern::Registered => port >= 1024 && port < 49152,
+            PortPattern::Registered => (1024..49152).contains(&port),
             PortPattern::Dynamic => port >= 49152,
         }
     }
@@ -1126,6 +1124,9 @@ impl PortMonitor {
         }
     }
 
+    // Internal alert constructor; the fields map 1:1 to SecurityAlert and a
+    // parameter struct would just duplicate that type.
+    #[allow(clippy::too_many_arguments)]
     async fn create_security_alert(
         &mut self,
         alert_type: AlertType,
@@ -1198,10 +1199,7 @@ impl PortMonitor {
             process_name: None,
         };
 
-        self.port_history
-            .entry(port)
-            .or_insert_with(Vec::new)
-            .push(event);
+        self.port_history.entry(port).or_default().push(event);
     }
 
     async fn check_port_security_risk(&mut self, port_info: &ListeningPort) {

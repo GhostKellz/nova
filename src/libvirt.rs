@@ -97,7 +97,7 @@ impl LibvirtManager {
 
         // Get list of all networks (active and inactive)
         let output = Command::new("virsh")
-            .args(&["net-list", "--all", "--name"])
+            .args(["net-list", "--all", "--name"])
             .output()
             .map_err(|e| {
                 log_error!("Failed to list libvirt networks: {}", e);
@@ -114,10 +114,10 @@ impl LibvirtManager {
 
         for line in network_names.lines() {
             let name = line.trim();
-            if !name.is_empty() {
-                if let Ok(network) = self.get_network_info(name).await {
-                    self.networks.push(network);
-                }
+            if !name.is_empty()
+                && let Ok(network) = self.get_network_info(name).await
+            {
+                self.networks.push(network);
             }
         }
 
@@ -153,7 +153,7 @@ impl LibvirtManager {
 
         // Get network XML definition
         let output = Command::new("virsh")
-            .args(&["net-dumpxml", name])
+            .args(["net-dumpxml", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -182,77 +182,75 @@ impl LibvirtManager {
         };
 
         // Extract UUID
-        if let Some(start) = xml_content.find("<uuid>") {
-            if let Some(end) = xml_content[start..].find("</uuid>") {
-                let uuid_start = start + 6; // len("<uuid>")
-                let uuid_end = start + end;
-                network.uuid = Some(xml_content[uuid_start..uuid_end].to_string());
-            }
+        if let Some(start) = xml_content.find("<uuid>")
+            && let Some(end) = xml_content[start..].find("</uuid>")
+        {
+            let uuid_start = start + 6; // len("<uuid>")
+            let uuid_end = start + end;
+            network.uuid = Some(xml_content[uuid_start..uuid_end].to_string());
         }
 
         // Extract bridge information
-        if let Some(bridge_start) = xml_content.find("<bridge") {
-            if let Some(bridge_end) = xml_content[bridge_start..].find("/>") {
-                let bridge_tag = &xml_content[bridge_start..bridge_start + bridge_end + 2];
+        if let Some(bridge_start) = xml_content.find("<bridge")
+            && let Some(bridge_end) = xml_content[bridge_start..].find("/>")
+        {
+            let bridge_tag = &xml_content[bridge_start..bridge_start + bridge_end + 2];
 
-                let bridge_name = self
-                    .extract_attribute(bridge_tag, "name")
-                    .unwrap_or_else(|| format!("virbr-{}", name));
+            let bridge_name = self
+                .extract_attribute(bridge_tag, "name")
+                .unwrap_or_else(|| format!("virbr-{}", name));
 
-                let stp = self
-                    .extract_attribute(bridge_tag, "stp")
-                    .and_then(|s| s.parse::<bool>().ok());
+            let stp = self
+                .extract_attribute(bridge_tag, "stp")
+                .and_then(|s| s.parse::<bool>().ok());
 
-                let delay = self
-                    .extract_attribute(bridge_tag, "delay")
-                    .and_then(|s| s.parse::<u32>().ok());
+            let delay = self
+                .extract_attribute(bridge_tag, "delay")
+                .and_then(|s| s.parse::<u32>().ok());
 
-                network.bridge = Some(BridgeConfig {
-                    name: bridge_name,
-                    stp,
-                    delay,
+            network.bridge = Some(BridgeConfig {
+                name: bridge_name,
+                stp,
+                delay,
+            });
+        }
+
+        // Extract forward mode
+        if let Some(forward_start) = xml_content.find("<forward")
+            && let Some(forward_end) = xml_content[forward_start..].find("/>")
+        {
+            let forward_tag = &xml_content[forward_start..forward_start + forward_end + 2];
+
+            if let Some(mode) = self.extract_attribute(forward_tag, "mode") {
+                let dev = self.extract_attribute(forward_tag, "dev");
+
+                network.forward = Some(ForwardMode {
+                    mode,
+                    dev,
+                    interfaces: Vec::new(), // Would need more complex parsing for interfaces
                 });
             }
         }
 
-        // Extract forward mode
-        if let Some(forward_start) = xml_content.find("<forward") {
-            if let Some(forward_end) = xml_content[forward_start..].find("/>") {
-                let forward_tag = &xml_content[forward_start..forward_start + forward_end + 2];
-
-                if let Some(mode) = self.extract_attribute(forward_tag, "mode") {
-                    let dev = self.extract_attribute(forward_tag, "dev");
-
-                    network.forward = Some(ForwardMode {
-                        mode,
-                        dev,
-                        interfaces: Vec::new(), // Would need more complex parsing for interfaces
-                    });
-                }
-            }
-        }
-
         // Extract IP configuration
-        if let Some(ip_start) = xml_content.find("<ip") {
-            if let Some(ip_end) = xml_content[ip_start..].find(">") {
-                let ip_tag = &xml_content[ip_start..ip_start + ip_end + 1];
+        if let Some(ip_start) = xml_content.find("<ip")
+            && let Some(ip_end) = xml_content[ip_start..].find(">")
+        {
+            let ip_tag = &xml_content[ip_start..ip_start + ip_end + 1];
 
-                if let Some(address_str) = self.extract_attribute(ip_tag, "address") {
-                    if let Ok(address) = Ipv4Addr::from_str(&address_str) {
-                        if let Some(netmask_str) = self.extract_attribute(ip_tag, "netmask") {
-                            if let Ok(netmask) = Ipv4Addr::from_str(&netmask_str) {
-                                // Look for DHCP range
-                                let dhcp = self.extract_dhcp_config(&xml_content);
+            if let Some(address_str) = self.extract_attribute(ip_tag, "address")
+                && let Ok(address) = Ipv4Addr::from_str(&address_str)
+                && let Some(netmask_str) = self.extract_attribute(ip_tag, "netmask")
+                && let Ok(netmask) = Ipv4Addr::from_str(&netmask_str)
+            {
+                // Look for DHCP range
+                let dhcp = self.extract_dhcp_config(xml_content);
 
-                                network.ip = Some(IpConfig {
-                                    address,
-                                    netmask,
-                                    dhcp,
-                                });
-                            }
-                        }
-                    }
-                }
+                network.ip = Some(IpConfig {
+                    address,
+                    netmask,
+                    dhcp,
+                });
             }
         }
 
@@ -271,30 +269,28 @@ impl LibvirtManager {
     }
 
     fn extract_dhcp_config(&self, xml_content: &str) -> Option<DhcpRange> {
-        if let Some(dhcp_start) = xml_content.find("<dhcp>") {
-            if let Some(dhcp_end) = xml_content[dhcp_start..].find("</dhcp>") {
-                let dhcp_section = &xml_content[dhcp_start..dhcp_start + dhcp_end];
+        if let Some(dhcp_start) = xml_content.find("<dhcp>")
+            && let Some(dhcp_end) = xml_content[dhcp_start..].find("</dhcp>")
+        {
+            let dhcp_section = &xml_content[dhcp_start..dhcp_start + dhcp_end];
 
-                // Look for range
-                if let Some(range_start) = dhcp_section.find("<range") {
-                    if let Some(range_end) = dhcp_section[range_start..].find("/>") {
-                        let range_tag = &dhcp_section[range_start..range_start + range_end + 2];
+            // Look for range
+            if let Some(range_start) = dhcp_section.find("<range")
+                && let Some(range_end) = dhcp_section[range_start..].find("/>")
+            {
+                let range_tag = &dhcp_section[range_start..range_start + range_end + 2];
 
-                        if let (Some(start_str), Some(end_str)) = (
-                            self.extract_attribute(range_tag, "start"),
-                            self.extract_attribute(range_tag, "end"),
-                        ) {
-                            if let (Ok(start), Ok(end)) =
-                                (Ipv4Addr::from_str(&start_str), Ipv4Addr::from_str(&end_str))
-                            {
-                                return Some(DhcpRange {
-                                    start,
-                                    end,
-                                    hosts: Vec::new(), // Would need more parsing for static hosts
-                                });
-                            }
-                        }
-                    }
+                if let (Some(start_str), Some(end_str)) = (
+                    self.extract_attribute(range_tag, "start"),
+                    self.extract_attribute(range_tag, "end"),
+                ) && let (Ok(start), Ok(end)) =
+                    (Ipv4Addr::from_str(&start_str), Ipv4Addr::from_str(&end_str))
+                {
+                    return Some(DhcpRange {
+                        start,
+                        end,
+                        hosts: Vec::new(), // Would need more parsing for static hosts
+                    });
                 }
             }
         }
@@ -303,7 +299,7 @@ impl LibvirtManager {
 
     fn is_network_active(&self, name: &str) -> bool {
         Command::new("virsh")
-            .args(&["net-info", name])
+            .args(["net-info", name])
             .output()
             .map(|output| {
                 if output.status.success() {
@@ -331,7 +327,7 @@ impl LibvirtManager {
 
         // Define the network
         let output = Command::new("virsh")
-            .args(&["net-define", &temp_file])
+            .args(["net-define", &temp_file])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -345,7 +341,7 @@ impl LibvirtManager {
 
         // Start the network
         let output = Command::new("virsh")
-            .args(&["net-start", &network.name])
+            .args(["net-start", &network.name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -357,7 +353,7 @@ impl LibvirtManager {
         // Set autostart if requested
         if network.autostart {
             let _ = Command::new("virsh")
-                .args(&["net-autostart", &network.name])
+                .args(["net-autostart", &network.name])
                 .output();
         }
 
@@ -490,11 +486,11 @@ impl LibvirtManager {
         log_info!("Deleting libvirt network: {}", name);
 
         // Stop the network if it's running
-        let _ = Command::new("virsh").args(&["net-destroy", name]).output();
+        let _ = Command::new("virsh").args(["net-destroy", name]).output();
 
         // Undefine the network
         let output = Command::new("virsh")
-            .args(&["net-undefine", name])
+            .args(["net-undefine", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -516,7 +512,7 @@ impl LibvirtManager {
         log_info!("Starting libvirt network: {}", name);
 
         let output = Command::new("virsh")
-            .args(&["net-start", name])
+            .args(["net-start", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -533,7 +529,7 @@ impl LibvirtManager {
         log_info!("Stopping libvirt network: {}", name);
 
         let output = Command::new("virsh")
-            .args(&["net-destroy", name])
+            .args(["net-destroy", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 

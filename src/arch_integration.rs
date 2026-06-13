@@ -100,7 +100,7 @@ impl ArchNetworkManager {
 
     async fn is_systemd_networkd_active(&self) -> bool {
         Command::new("systemctl")
-            .args(&["is-active", "systemd-networkd"])
+            .args(["is-active", "systemd-networkd"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -108,7 +108,7 @@ impl ArchNetworkManager {
 
     async fn is_network_manager_active(&self) -> bool {
         Command::new("systemctl")
-            .args(&["is-active", "NetworkManager"])
+            .args(["is-active", "NetworkManager"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -126,16 +126,13 @@ impl ArchNetworkManager {
 
         for config_dir in &config_dirs {
             if let Ok(entries) = fs::read_dir(config_dir) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        let path = entry.path();
-                        if let Some(extension) = path.extension() {
-                            if extension == "network" || extension == "netdev" {
-                                if let Ok(config) = self.parse_systemd_config(&path).await {
-                                    self.systemd_configs.insert(config.name.clone(), config);
-                                }
-                            }
-                        }
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(extension) = path.extension()
+                        && (extension == "network" || extension == "netdev")
+                        && let Ok(config) = self.parse_systemd_config(&path).await
+                    {
+                        self.systemd_configs.insert(config.name.clone(), config);
                     }
                 }
             }
@@ -197,19 +194,17 @@ impl ArchNetworkManager {
                         .unwrap_or(false);
                 } else if line.starts_with("Gateway=") {
                     config.gateway = line.split('=').nth(1).map(|v| v.trim().to_string());
-                } else if line.starts_with("DNS=") {
-                    if let Some(dns_list) = line.split('=').nth(1) {
-                        config
-                            .dns
-                            .extend(dns_list.split_whitespace().map(|s| s.to_string()));
-                    }
+                } else if line.starts_with("DNS=")
+                    && let Some(dns_list) = line.split('=').nth(1)
+                {
+                    config
+                        .dns
+                        .extend(dns_list.split_whitespace().map(|s| s.to_string()));
                 }
             }
 
-            if in_address_section {
-                if line.starts_with("Address=") {
-                    config.static_ip = line.split('=').nth(1).map(|v| v.trim().to_string());
-                }
+            if in_address_section && line.starts_with("Address=") {
+                config.static_ip = line.split('=').nth(1).map(|v| v.trim().to_string());
             }
         }
 
@@ -290,7 +285,7 @@ Bridge={}
 
     async fn restart_systemd_networkd(&self) -> Result<()> {
         let output = Command::new("systemctl")
-            .args(&["restart", "systemd-networkd"])
+            .args(["restart", "systemd-networkd"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -309,7 +304,7 @@ Bridge={}
         log_debug!("Discovering NetworkManager profiles");
 
         let output = Command::new("nmcli")
-            .args(&[
+            .args([
                 "-t",
                 "-f",
                 "NAME,UUID,TYPE,DEVICE,AUTOCONNECT",
@@ -351,7 +346,7 @@ Bridge={}
 
         // Create bridge connection
         let output = Command::new("nmcli")
-            .args(&[
+            .args([
                 "connection",
                 "add",
                 "type",
@@ -374,7 +369,7 @@ Bridge={}
         for interface in interfaces {
             let slave_name = format!("{}-slave-{}", bridge_name, interface);
             let output = Command::new("nmcli")
-                .args(&[
+                .args([
                     "connection",
                     "add",
                     "type",
@@ -400,7 +395,7 @@ Bridge={}
 
         // Bring up the bridge
         let output = Command::new("nmcli")
-            .args(&["connection", "up", bridge_name])
+            .args(["connection", "up", bridge_name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -419,7 +414,7 @@ Bridge={}
 
         // Get interface list
         let output = Command::new("ip")
-            .args(&["-j", "link", "show"])
+            .args(["-j", "link", "show"])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -466,10 +461,10 @@ Bridge={}
 
     async fn get_interface_driver(&self, interface: &str) -> Result<String> {
         let driver_path = format!("/sys/class/net/{}/device/driver", interface);
-        if let Ok(link) = fs::read_link(&driver_path) {
-            if let Some(driver_name) = link.file_name() {
-                return Ok(driver_name.to_string_lossy().to_string());
-            }
+        if let Ok(link) = fs::read_link(&driver_path)
+            && let Some(driver_name) = link.file_name()
+        {
+            return Ok(driver_name.to_string_lossy().to_string());
         }
         Err(NovaError::NetworkNotFound(interface.to_string()))
     }
@@ -489,15 +484,15 @@ Bridge={}
         // Check if managed by NetworkManager
         if self.config.use_network_manager {
             let output = Command::new("nmcli")
-                .args(&["-t", "-f", "DEVICE", "device", "status"])
+                .args(["-t", "-f", "DEVICE", "device", "status"])
                 .output();
 
-            if let Ok(output) = output {
-                if output.status.success() {
-                    let devices = String::from_utf8_lossy(&output.stdout);
-                    if devices.lines().any(|line| line.trim() == interface) {
-                        return InterfaceManager::NetworkManager;
-                    }
+            if let Ok(output) = output
+                && output.status.success()
+            {
+                let devices = String::from_utf8_lossy(&output.stdout);
+                if devices.lines().any(|line| line.trim() == interface) {
+                    return InterfaceManager::NetworkManager;
                 }
             }
         }
@@ -509,15 +504,15 @@ Bridge={}
 
         // Check if manually configured
         let output = Command::new("ip")
-            .args(&["addr", "show", interface])
+            .args(["addr", "show", interface])
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let addr_info = String::from_utf8_lossy(&output.stdout);
-                if addr_info.contains("inet ") {
-                    return InterfaceManager::Manual;
-                }
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let addr_info = String::from_utf8_lossy(&output.stdout);
+            if addr_info.contains("inet ") {
+                return InterfaceManager::Manual;
             }
         }
 
@@ -613,7 +608,7 @@ DefaultLimitMEMLOCK=infinity
 
         for group in &groups {
             let output = Command::new("getent")
-                .args(&["group", group])
+                .args(["group", group])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 

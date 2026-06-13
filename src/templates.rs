@@ -1777,7 +1777,7 @@ impl TemplateManager {
     pub fn deploy_template(&self, template_name: &str, project_name: &str) -> Result<String> {
         let template = self
             .get_template(template_name)
-            .ok_or_else(|| crate::NovaError::InvalidConfig)?;
+            .ok_or(crate::NovaError::InvalidConfig)?;
 
         let mut nova_file = format!(
             "# Generated NovaFile for {} template
@@ -1909,10 +1909,7 @@ impl TemplateManager {
                 }
             }
 
-            nova_file.push_str(
-                "
-",
-            );
+            nova_file.push('\n');
         }
 
         // Generate network configurations
@@ -1922,10 +1919,10 @@ impl TemplateManager {
 ",
                 network.name
             ));
-            nova_file.push_str(&format!(
+            nova_file.push_str(
                 "type = \"bridge\"
-"
-            ));
+",
+            );
             if let Some(subnet) = &network.subnet {
                 nova_file.push_str(&format!(
                     "subnet = \"{}\"
@@ -1933,10 +1930,7 @@ impl TemplateManager {
                     subnet
                 ));
             }
-            nova_file.push_str(
-                "
-",
-            );
+            nova_file.push('\n');
         }
 
         Ok(nova_file)

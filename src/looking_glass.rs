@@ -332,7 +332,7 @@ The application will minimize to system tray
 
         // Create shared memory file
         let output = Command::new("dd")
-            .args(&[
+            .args([
                 "if=/dev/zero",
                 &format!("of={}", shmem_path.display()),
                 "bs=1M",
@@ -350,13 +350,13 @@ The application will minimize to system tray
 
         // Set permissions for QEMU access
         Command::new("chmod")
-            .args(&["660", &shmem_path.display().to_string()])
+            .args(["660", &shmem_path.display().to_string()])
             .output()
             .map_err(|e| format!("Failed to set permissions: {}", e))?;
 
         // Change ownership to libvirt-qemu user
         Command::new("chown")
-            .args(&["libvirt-qemu:kvm", &shmem_path.display().to_string()])
+            .args(["libvirt-qemu:kvm", &shmem_path.display().to_string()])
             .output()
             .map_err(|e| format!("Failed to set ownership: {}", e))?;
 
@@ -440,7 +440,7 @@ vsync={}
         println!("Installing Looking Glass from AUR...");
 
         let output = Command::new("yay")
-            .args(&["-S", "--noconfirm", "looking-glass"])
+            .args(["-S", "--noconfirm", "looking-glass"])
             .output()
             .map_err(|e| format!("Failed to install: {}", e))?;
 
@@ -493,11 +493,131 @@ vsync={}
         Ok(())
     }
 
+    /// Check if auto-connect is enabled for a VM
+    pub fn is_auto_connect_enabled(vm_name: &str) -> bool {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+            .join("nova");
+        let auto_file = config_dir.join(format!("lg-auto-{}.enabled", vm_name));
+        auto_file.exists()
+    }
+
+    /// Enable auto-connect for a VM
+    pub fn enable_auto_connect(vm_name: &str) -> Result<(), String> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+            .join("nova");
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("Failed to create config dir: {}", e))?;
+
+        let auto_file = config_dir.join(format!("lg-auto-{}.enabled", vm_name));
+        std::fs::write(&auto_file, "1")
+            .map_err(|e| format!("Failed to write auto-connect file: {}", e))?;
+
+        println!(
+            "✅ Auto-connect enabled for VM '{}' at {}",
+            vm_name,
+            auto_file.display()
+        );
+        Ok(())
+    }
+
+    /// Disable auto-connect for a VM
+    pub fn disable_auto_connect(vm_name: &str) -> Result<(), String> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+            .join("nova");
+        let auto_file = config_dir.join(format!("lg-auto-{}.enabled", vm_name));
+
+        if auto_file.exists() {
+            std::fs::remove_file(&auto_file)
+                .map_err(|e| format!("Failed to remove auto-connect file: {}", e))?;
+        }
+
+        println!("✅ Auto-connect disabled for VM '{}'", vm_name);
+        Ok(())
+    }
+
+    /// Auto-launch Looking Glass client if enabled for VM
+    /// Call this after VM starts
+    pub async fn auto_connect_if_enabled(
+        &self,
+        vm_name: &str,
+        config: Option<&LookingGlassConfig>,
+    ) -> Result<(), String> {
+        if !Self::is_auto_connect_enabled(vm_name) {
+            return Ok(());
+        }
+
+        println!(
+            "Auto-connect enabled for VM '{}', launching Looking Glass client...",
+            vm_name
+        );
+
+        // Wait a moment for VM to initialize IVSHMEM
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        let default_config = LookingGlassConfig::default();
+        let config = config.unwrap_or(&default_config);
+
+        // Check if client is already running
+        let check = Command::new("pgrep")
+            .args(["-f", "looking-glass-client"])
+            .output();
+
+        if let Ok(output) = check
+            && output.status.success()
+        {
+            println!("Looking Glass client already running");
+            return Ok(());
+        }
+
+        self.launch_client(config).await
+    }
+
+    /// Load saved Looking Glass config for a VM
+    pub fn load_vm_config(vm_name: &str) -> Option<LookingGlassConfig> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+            .join("nova");
+        let config_file = config_dir.join(format!("lg-config-{}.json", vm_name));
+
+        if config_file.exists() {
+            std::fs::read_to_string(&config_file)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            None
+        }
+    }
+
+    /// Save Looking Glass config for a VM
+    pub fn save_vm_config(vm_name: &str, config: &LookingGlassConfig) -> Result<(), String> {
+        let config_dir = dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.config"))
+            .join("nova");
+        std::fs::create_dir_all(&config_dir)
+            .map_err(|e| format!("Failed to create config dir: {}", e))?;
+
+        let config_file = config_dir.join(format!("lg-config-{}.json", vm_name));
+        let json = serde_json::to_string_pretty(config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+
+        std::fs::write(&config_file, json).map_err(|e| format!("Failed to write config: {}", e))?;
+
+        println!(
+            "✅ Config saved for VM '{}' at {}",
+            vm_name,
+            config_file.display()
+        );
+        Ok(())
+    }
+
     /// Setup KVMFR kernel module (if available)
     pub async fn setup_kvmfr_module(&self) -> Result<(), String> {
         // Check if kvmfr module is available
         let module_check = Command::new("modprobe")
-            .args(&["-n", "kvmfr"])
+            .args(["-n", "kvmfr"])
             .output()
             .map_err(|e| format!("Failed to check module: {}", e))?;
 
@@ -655,7 +775,7 @@ vsync={}
 
         // Check KVMFR module
         reqs.kvmfr_available = Command::new("modprobe")
-            .args(&["-n", "kvmfr"])
+            .args(["-n", "kvmfr"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);

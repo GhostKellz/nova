@@ -43,6 +43,12 @@ pub struct PciPassthroughManager {
     assignments: HashMap<String, String>, // pci_address -> vm_name
 }
 
+impl Default for PciPassthroughManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PciPassthroughManager {
     pub fn new() -> Self {
         Self {
@@ -274,21 +280,21 @@ impl PciPassthroughManager {
         };
 
         // Check IOMMU group
-        if device.iommu_group.is_none() {
+        if let Some(iommu_group) = device.iommu_group {
+            // Check if IOMMU group has multiple devices
+            let group_devices = self.get_iommu_group_devices(iommu_group);
+            if group_devices.len() > 1 {
+                viability.warnings.push(format!(
+                    "IOMMU group {} contains {} devices - all must be passed through together",
+                    iommu_group,
+                    group_devices.len()
+                ));
+            }
+        } else {
             viability.viable = false;
             viability
                 .errors
                 .push("Device not in IOMMU group (IOMMU not enabled?)".to_string());
-        } else {
-            // Check if IOMMU group has multiple devices
-            let group_devices = self.get_iommu_group_devices(device.iommu_group.unwrap());
-            if group_devices.len() > 1 {
-                viability.warnings.push(format!(
-                    "IOMMU group {} contains {} devices - all must be passed through together",
-                    device.iommu_group.unwrap(),
-                    group_devices.len()
-                ));
-            }
         }
 
         // Check if device is critical for system

@@ -113,11 +113,11 @@ impl EnhancedVmManager {
         // Check if VM is already running
         {
             let instances = self.instances.lock().unwrap();
-            if let Some(instance) = instances.get(name) {
-                if instance.is_running() {
-                    log_warn!("VM '{}' is already running", name);
-                    return Ok(());
-                }
+            if let Some(instance) = instances.get(name)
+                && instance.is_running()
+            {
+                log_warn!("VM '{}' is already running", name);
+                return Ok(());
             }
         }
 
@@ -258,7 +258,7 @@ impl EnhancedVmManager {
 
         // Shutdown the domain gracefully
         let output = Command::new("virsh")
-            .args(&["shutdown", name])
+            .args(["shutdown", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -270,7 +270,7 @@ impl EnhancedVmManager {
 
             // Force destroy if graceful shutdown fails
             let output = Command::new("virsh")
-                .args(&["destroy", name])
+                .args(["destroy", name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -321,7 +321,7 @@ impl EnhancedVmManager {
         // Alternative: use pkill to find and kill QEMU process
         let output = Command::new("pkill")
             .arg("-f")
-            .arg(&format!("qemu.*{}", name))
+            .arg(format!("qemu.*{}", name))
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -346,7 +346,7 @@ impl EnhancedVmManager {
 
     async fn check_libvirt_domain_exists(&self, name: &str) -> bool {
         Command::new("virsh")
-            .args(&["dominfo", name])
+            .args(["dominfo", name])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -367,7 +367,7 @@ impl EnhancedVmManager {
 
         // Define the domain
         let output = Command::new("virsh")
-            .args(&["define", &temp_file])
+            .args(["define", &temp_file])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -543,21 +543,20 @@ impl EnhancedVmManager {
                 cmd.arg(arg);
             }
 
-            if matches!(config.display, DisplayMode::LookingGlass) {
-                if let Err(err) = self
+            if matches!(config.display, DisplayMode::LookingGlass)
+                && let Err(err) = self
                     .prepare_looking_glass(name, &vm_config.looking_glass, cmd)
                     .await
-                {
-                    let mut manager = self.gpu_manager.lock().unwrap();
-                    if let Err(release_err) = manager.release_gpu(&config.device_address) {
-                        log_warn!(
-                            "Failed to release GPU {} after Looking Glass error: {}",
-                            config.device_address,
-                            release_err
-                        );
-                    }
-                    return Err(err);
+            {
+                let mut manager = self.gpu_manager.lock().unwrap();
+                if let Err(release_err) = manager.release_gpu(&config.device_address) {
+                    log_warn!(
+                        "Failed to release GPU {} after Looking Glass error: {}",
+                        config.device_address,
+                        release_err
+                    );
                 }
+                return Err(err);
             }
 
             let mut allocations = self.gpu_allocations.lock().unwrap();
@@ -582,12 +581,14 @@ impl EnhancedVmManager {
             .or_else(|| manager.list_gpus().first())
             .ok_or_else(|| NovaError::ConfigError("No GPUs available for passthrough".into()))?;
 
-        let mut config = GpuPassthroughConfig::default();
-        config.device_address = gpu.address.clone();
-        config.display = if vm_config.looking_glass.enabled {
-            DisplayMode::LookingGlass
-        } else {
-            DisplayMode::None
+        let config = GpuPassthroughConfig {
+            device_address: gpu.address.clone(),
+            display: if vm_config.looking_glass.enabled {
+                DisplayMode::LookingGlass
+            } else {
+                DisplayMode::None
+            },
+            ..Default::default()
         };
 
         Ok(config)
@@ -685,7 +686,7 @@ impl EnhancedVmManager {
     pub async fn pause_vm(&self, name: &str) -> Result<()> {
         if self.use_libvirt {
             let output = Command::new("virsh")
-                .args(&["suspend", name])
+                .args(["suspend", name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -705,7 +706,7 @@ impl EnhancedVmManager {
     pub async fn resume_vm(&self, name: &str) -> Result<()> {
         if self.use_libvirt {
             let output = Command::new("virsh")
-                .args(&["resume", name])
+                .args(["resume", name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -725,7 +726,7 @@ impl EnhancedVmManager {
     pub async fn restart_vm(&self, name: &str) -> Result<()> {
         if self.use_libvirt {
             let output = Command::new("virsh")
-                .args(&["reboot", name])
+                .args(["reboot", name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -748,7 +749,7 @@ impl EnhancedVmManager {
     pub async fn get_vm_console_url(&self, name: &str) -> Result<String> {
         if self.use_libvirt {
             let output = Command::new("virsh")
-                .args(&["domdisplay", name])
+                .args(["domdisplay", name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 

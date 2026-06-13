@@ -59,11 +59,9 @@ pub async fn generate_support_bundle(mut opts: SupportBundleOptions) -> Result<P
         None
     };
 
-    let bundle_path = task::spawn_blocking(move || create_support_bundle(opts, metrics_snapshot))
+    task::spawn_blocking(move || create_support_bundle(opts, metrics_snapshot))
         .await
-        .map_err(|err| NovaError::IoError(io::Error::new(io::ErrorKind::Other, err.to_string())))?;
-
-    bundle_path
+        .map_err(|err| NovaError::IoError(io::Error::other(err.to_string())))?
 }
 
 fn create_support_bundle(
@@ -86,7 +84,7 @@ fn create_support_bundle(
 
     write_manifest(bundle_root, &opts, metrics_snapshot_bytes)?;
 
-    let output_dir = opts.output_dir.unwrap_or_else(|| std::env::temp_dir());
+    let output_dir = opts.output_dir.unwrap_or_else(std::env::temp_dir);
     fs::create_dir_all(&output_dir)?;
 
     let timestamp = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -146,15 +144,15 @@ fn collect_nova_state(
     fs::create_dir_all(&nova_dir)?;
     let mut metrics_snapshot_bytes = None;
 
-    if let Some(config_path) = opts.config_path.as_ref() {
-        if config_path.exists() {
-            let dest = nova_dir.join(
-                config_path
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("NovaFile")),
-            );
-            fs::copy(config_path, &dest)?;
-        }
+    if let Some(config_path) = opts.config_path.as_ref()
+        && config_path.exists()
+    {
+        let dest = nova_dir.join(
+            config_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("NovaFile")),
+        );
+        fs::copy(config_path, &dest)?;
     }
 
     write_command_output(
@@ -179,7 +177,7 @@ fn collect_nova_state(
             observability_dir.join("prometheus-metrics.txt"),
             maybe_redact(metrics, opts.redact),
         )?;
-        metrics_snapshot_bytes = Some(metrics.as_bytes().len());
+        metrics_snapshot_bytes = Some(metrics.len());
     }
 
     if opts.include_diagnostics {
@@ -427,9 +425,9 @@ fn status_str(value: bool) -> &'static str {
 }
 
 pub async fn run_diagnostics() -> Result<DiagnosticReport> {
-    task::spawn_blocking(|| diagnostics_inner())
+    task::spawn_blocking(diagnostics_inner)
         .await
-        .map_err(|err| NovaError::IoError(io::Error::new(io::ErrorKind::Other, err.to_string())))?
+        .map_err(|err| NovaError::IoError(io::Error::other(err.to_string())))?
 }
 
 fn diagnostics_inner() -> Result<DiagnosticReport> {
@@ -516,13 +514,15 @@ mod tests {
             std::env::set_var("NOVA_FAKE_GPU_CAPS", fake_caps);
         }
 
-        let mut opts = SupportBundleOptions::default();
-        opts.output_dir = Some(output_dir.path().to_path_buf());
-        opts.config_path = Some(config_path.clone());
-        opts.include_logs = false;
-        opts.include_system = false;
-        opts.include_metrics = false;
-        opts.include_diagnostics = false;
+        let opts = SupportBundleOptions {
+            output_dir: Some(output_dir.path().to_path_buf()),
+            config_path: Some(config_path.clone()),
+            include_logs: false,
+            include_system: false,
+            include_metrics: false,
+            include_diagnostics: false,
+            ..Default::default()
+        };
 
         let bundle_path = generate_support_bundle(opts).await.expect("bundle path");
         assert!(bundle_path.exists());

@@ -20,6 +20,7 @@ pub mod migration;
 pub mod monitoring;
 pub mod network;
 pub mod pci_passthrough;
+pub mod performance;
 pub mod performance_monitor;
 pub mod port_monitor;
 pub mod preflight;

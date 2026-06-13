@@ -262,7 +262,7 @@ impl SpiceManager {
         // USB redirection channels
         if config.usb_redirection {
             for i in 0..config.usb_redirector_count {
-                xml.push_str(&format!("  <redirdev bus='usb' type='spicevmc'>\n"));
+                xml.push_str("  <redirdev bus='usb' type='spicevmc'>\n");
                 xml.push_str(&format!(
                     "    <address type='usb' bus='0' port='{}'/>\n",
                     i + 1
@@ -292,7 +292,7 @@ impl SpiceManager {
 
         // Update VM definition
         let output = Command::new("virsh")
-            .args(&["define", &temp_file])
+            .args(["define", &temp_file])
             .output()
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
@@ -316,7 +316,7 @@ impl SpiceManager {
     ) -> Result<SpiceConnectionInfo, String> {
         // Get SPICE port from virsh
         let output = Command::new("virsh")
-            .args(&["domdisplay", "--type", "spice", vm_name])
+            .args(["domdisplay", "--type", "spice", vm_name])
             .output()
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
@@ -434,7 +434,7 @@ impl SpiceManager {
     /// Install SPICE client on Arch Linux
     pub async fn install_client_arch(&self) -> Result<(), String> {
         let output = Command::new("sudo")
-            .args(&["pacman", "-S", "--noconfirm", "virt-viewer"])
+            .args(["pacman", "-S", "--noconfirm", "virt-viewer"])
             .output()
             .map_err(|e| format!("Failed to install virt-viewer: {}", e))?;
 

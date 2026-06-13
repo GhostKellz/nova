@@ -721,10 +721,8 @@ impl PrometheusExporter {
     async fn get_disk_usage() -> Result<(u64, u64)> {
         let stats = tokio::task::spawn_blocking(|| nix::sys::statfs::statfs(Path::new("/")))
             .await
-            .map_err(|err| NovaError::IoError(std::io::Error::new(std::io::ErrorKind::Other, err)))?
-            .map_err(|err| {
-                NovaError::IoError(std::io::Error::new(std::io::ErrorKind::Other, err))
-            })?;
+            .map_err(|err| NovaError::IoError(std::io::Error::other(err)))?
+            .map_err(|err| NovaError::IoError(std::io::Error::other(err)))?;
 
         let block_size = stats.block_size() as u64;
         let total = stats.blocks() as u64 * block_size;
@@ -782,7 +780,7 @@ impl PrometheusExporter {
 
     fn check_libvirt_connection() -> bool {
         std::process::Command::new("virsh")
-            .args(&["version"])
+            .args(["version"])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)
@@ -824,8 +822,7 @@ impl PrometheusExporter {
             return Ok((idle_all, total));
         }
 
-        Err(NovaError::IoError(io::Error::new(
-            io::ErrorKind::Other,
+        Err(NovaError::IoError(io::Error::other(
             "Unable to parse /proc/stat",
         )))
     }
@@ -843,8 +840,7 @@ impl PrometheusExporter {
         }
 
         let total_kb = total_kb.ok_or_else(|| {
-            NovaError::IoError(io::Error::new(
-                io::ErrorKind::Other,
+            NovaError::IoError(io::Error::other(
                 "Unable to parse MemTotal from /proc/meminfo",
             ))
         })?;
@@ -875,6 +871,12 @@ impl PrometheusExporter {
         }
 
         (rx_total, tx_total)
+    }
+}
+
+impl Default for MetricsRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

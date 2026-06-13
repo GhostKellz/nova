@@ -52,7 +52,7 @@ fn test_iommu_group_detection() {
         );
 
         assert!(
-            group.devices.len() > 0,
+            !group.devices.is_empty(),
             "IOMMU group should have at least one device"
         );
     }
@@ -259,7 +259,7 @@ fn test_display_mode_variants() {
     use nova::gpu_passthrough::DisplayMode;
 
     // Test all display mode variants exist
-    let modes = vec![
+    let modes = [
         DisplayMode::None,
         DisplayMode::Spice,
         DisplayMode::LookingGlass,
@@ -274,7 +274,7 @@ fn test_passthrough_mode_variants() {
     use nova::gpu_passthrough::PassthroughMode;
 
     // Test all passthrough mode variants
-    let modes = vec![
+    let modes = [
         PassthroughMode::Full,
         PassthroughMode::SrIov,
         PassthroughMode::Vgpu,

@@ -118,25 +118,25 @@ impl ConsoleManager {
         let mut vnc_cmd = if enhanced {
             // Use x11vnc with better performance and features
             let mut cmd = Command::new("x11vnc");
-            cmd.args(&["-create", "-shared", "-forever"]);
-            cmd.args(&["-rfbport", &port.to_string()]);
+            cmd.args(["-create", "-shared", "-forever"]);
+            cmd.args(["-rfbport", &port.to_string()]);
 
             if self.config.auth_required {
                 // Generate random password
                 let password = self.generate_password();
-                cmd.args(&["-passwd", &password]);
+                cmd.args(["-passwd", &password]);
             }
 
-            if self.config.ssl_enabled {
-                if let Some(cert_path) = &self.config.certificate_path {
-                    cmd.args(&["-ssl", cert_path]);
-                }
+            if self.config.ssl_enabled
+                && let Some(cert_path) = &self.config.certificate_path
+            {
+                cmd.args(["-ssl", cert_path]);
             }
 
             // Performance optimizations
-            cmd.args(&["-noxdamage", "-noxfixes", "-noxrandr"]);
-            cmd.args(&["-wireframe", "-scrollcopyrect"]);
-            cmd.args(&["-ncache", "10"]);
+            cmd.args(["-noxdamage", "-noxfixes", "-noxrandr"]);
+            cmd.args(["-wireframe", "-scrollcopyrect"]);
+            cmd.args(["-ncache", "10"]);
 
             cmd
         } else {
@@ -405,7 +405,7 @@ impl ConsoleManager {
     async fn start_novnc_proxy(&self, vnc_session: &ConsoleSession) -> Result<()> {
         // Start websockify proxy for noVNC
         let _websockify_cmd = Command::new("websockify")
-            .args(&[
+            .args([
                 &format!(
                     "{}:{}",
                     self.config.web_console_port, vnc_session.connection_info.port
@@ -524,7 +524,7 @@ impl ConsoleManager {
 
     async fn send_guest_agent_command(&self, vm_name: &str, command: &str) -> Result<()> {
         let output = Command::new("virsh")
-            .args(&[
+            .args([
                 "qemu-agent-command",
                 vm_name,
                 &format!("{{\"execute\":\"{}\"}}", command),
@@ -653,16 +653,16 @@ impl ConsoleManager {
     }
 
     fn generate_password(&self) -> String {
-        use rand::Rng;
+        use rand::RngExt;
         const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
                                 abcdefghijklmnopqrstuvwxyz\
                                 0123456789";
         const PASSWORD_LEN: usize = 12;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         (0..PASSWORD_LEN)
             .map(|_| {
-                let idx = rng.gen_range(0..CHARSET.len());
+                let idx = rng.random_range(0..CHARSET.len());
                 CHARSET[idx] as char
             })
             .collect()

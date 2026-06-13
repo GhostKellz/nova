@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NovaConfig {
     pub project: Option<String>,
     #[serde(default)]
@@ -48,7 +48,9 @@ fn default_iso_paths() -> Vec<PathBuf> {
     vec![
         PathBuf::from("/data/iso"),
         PathBuf::from("/var/lib/libvirt/images"),
-        PathBuf::from("/home").join(std::env::var("USER").unwrap_or_default()).join("ISOs"),
+        PathBuf::from("/home")
+            .join(std::env::var("USER").unwrap_or_default())
+            .join("ISOs"),
     ]
 }
 
@@ -201,17 +203,12 @@ pub struct VmStorageConfig {
     pub create_if_missing: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VmBootType {
+    #[default]
     Legacy,
     Uefi,
-}
-
-impl Default for VmBootType {
-    fn default() -> Self {
-        VmBootType::Legacy
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,17 +232,24 @@ impl Default for VmFirmwareConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum VmTpmVersion {
     V1_2,
+    #[default]
     V2_0,
 }
 
-impl Default for VmTpmVersion {
-    fn default() -> Self {
-        VmTpmVersion::V2_0
-    }
+/// TPM backend type: use host hardware TPM or software emulation
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VmTpmBackend {
+    /// Use swtpm software emulation (default, works everywhere)
+    #[default]
+    Emulated,
+    /// Passthrough host's hardware TPM device (/dev/tpm0)
+    /// Requires host TPM 2.0 and proper permissions
+    Hardware,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +258,8 @@ pub struct VmTpmConfig {
     pub enabled: bool,
     #[serde(default = "default_tpm_version")]
     pub version: VmTpmVersion,
+    #[serde(default)]
+    pub backend: VmTpmBackend,
 }
 
 impl Default for VmTpmConfig {
@@ -261,6 +267,7 @@ impl Default for VmTpmConfig {
         Self {
             enabled: default_tpm_enabled(),
             version: default_tpm_version(),
+            backend: VmTpmBackend::default(),
         }
     }
 }
@@ -271,14 +278,15 @@ pub enum VmComplianceProfile {
     Windows11,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DiskFormat {
+    #[default]
     Qcow2,
     Raw,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContainerConfig {
     pub capsule: Option<String>,
     #[serde(default)]
@@ -334,21 +342,6 @@ pub enum NetworkType {
     Overlay,
     Host,
     None,
-}
-
-impl Default for NovaConfig {
-    fn default() -> Self {
-        Self {
-            project: None,
-            vm: HashMap::new(),
-            container: HashMap::new(),
-            network: HashMap::new(),
-            storage: HashMap::new(),
-            ui: UiConfig::default(),
-            iso: IsoConfig::default(),
-            templates: TemplatesConfig::default(),
-        }
-    }
 }
 
 impl Default for VmConfig {
@@ -412,26 +405,6 @@ impl Default for VmStorageConfig {
             format: default_disk_format(),
             size: default_disk_size(),
             create_if_missing: default_create_if_missing(),
-        }
-    }
-}
-
-impl Default for DiskFormat {
-    fn default() -> Self {
-        DiskFormat::Qcow2
-    }
-}
-
-impl Default for ContainerConfig {
-    fn default() -> Self {
-        Self {
-            capsule: None,
-            volumes: Vec::new(),
-            network: None,
-            env: HashMap::new(),
-            autostart: false,
-            runtime: None, // Auto-detect
-            bolt: BoltConfig::default(),
         }
     }
 }
@@ -581,15 +554,19 @@ impl DiskFormat {
     }
 }
 
+impl std::str::FromStr for NovaConfig {
+    type Err = NovaError;
+
+    fn from_str(contents: &str) -> Result<Self> {
+        let config: NovaConfig = toml::from_str(contents)?;
+        Ok(config)
+    }
+}
+
 impl NovaConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let contents = fs::read_to_string(path)?;
         let config: NovaConfig = toml::from_str(&contents)?;
-        Ok(config)
-    }
-
-    pub fn from_str(contents: &str) -> Result<Self> {
-        let config: NovaConfig = toml::from_str(contents)?;
         Ok(config)
     }
 
@@ -711,13 +688,13 @@ driver = "quic"
 dns = true
 "#;
 
-        let config = NovaConfig::from_str(toml_str).unwrap();
+        let config: NovaConfig = toml_str.parse().unwrap();
         assert_eq!(config.project, Some("test-lab".to_string()));
 
         let vm = config.get_vm("win11").unwrap();
         assert_eq!(vm.cpu, 8);
         assert_eq!(vm.memory, "16Gi");
-        assert_eq!(vm.gpu_passthrough, true);
+        assert!(vm.gpu_passthrough);
 
         let container = config.get_container("api").unwrap();
         assert_eq!(container.capsule, Some("ubuntu:22.04".to_string()));

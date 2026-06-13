@@ -1,222 +1,148 @@
-## Nova
+<p align="center">
+  <img src="assets/nova-logo.png" alt="Nova" width="180" height="180">
+</p>
 
-<div align="center">
-  <img src="assets/nova-logo.png" alt="Nova Logo" width="128" height="128">
+<h1 align="center">Nova</h1>
 
-**Wayland-Native Virtualization & Container Manager**  
-*Bare metal speed. Declarative control. GPU-first.*
+<p align="center">
+  <strong>Wayland-Native Virtualization and Container Manager</strong>
+</p>
 
-🎨 **Tokyo Night Storm remains the default palette.** Material Ocean ships as an opt-in preset if you want the softer cyan/aqua look, but screenshots still reflect the classic Tokyo Night experience.
+<p align="center">
+  <strong>Bare metal speed. Declarative control. GPU-first Linux infrastructure.</strong>
+</p>
 
-</div>
-
----
-
-## Badges
-
-![Rust](https://img.shields.io/badge/Rust-1.82+-orange?logo=rust)  
-![VM](https://img.shields.io/badge/Virtualization-KVM%2FQEMU-blue?logo=linux)  
-![Containers](https://img.shields.io/badge/Containers-Capsules-green?logo=docker)  
-![Networking](https://img.shields.io/badge/Networking-Bridges%20%7C%20Overlay-orange?logo=networkx)  
-![GUI](https://img.shields.io/badge/Interface-Wayland-purple?logo=wayland)  
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-1.96+-B7410E?style=for-the-badge&logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Linux-KVM%2FQEMU-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux KVM/QEMU">
+  <img src="https://img.shields.io/badge/Wayland-Native-76B900?style=for-the-badge&logo=wayland&logoColor=white" alt="Wayland Native">
+  <img src="https://img.shields.io/badge/GUI-egui-3178C6?style=for-the-badge" alt="egui">
+  <img src="https://img.shields.io/badge/GPU-VFIO%20Passthrough-8A2BE2?style=for-the-badge&logo=nvidia&logoColor=white" alt="VFIO GPU Passthrough">
+  <img src="https://img.shields.io/badge/Networking-Bridges%20%7C%20NAT%20%7C%20Overlay-E57000?style=for-the-badge" alt="Networking">
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="MIT License">
+</p>
 
 ---
 
 ## Overview
 
-**Nova** is a high-performance virtualization and container orchestration platform built entirely in Rust. It unifies **KVM/QEMU virtual machines**, **lightweight Capsule containers**, and **software-defined networking** under a single declarative interface.
+Nova is a Rust virtualization and container management platform for modern Linux desktops and homelabs. It brings KVM/QEMU virtual machines, lightweight container workflows, GPU passthrough, virtual networking, monitoring, and a Wayland-native GUI into one cohesive tool.
 
-Designed for modern Linux environments, Nova delivers bare-metal performance with enterprise-grade features through both an intuitive CLI and a native Wayland GUI. Perfect for developers, homelabs, and production deployments seeking alternatives to traditional virtualization stacks.
+Nova is built for users who want a cleaner local alternative to sprawling virtualization stacks: declarative configuration, practical diagnostics, low-latency display paths, and a first-class Arch/NVIDIA/VFIO workflow without losing sight of general Linux support.
 
----
+## Core Features
 
-## Key Features
+- **KVM/QEMU VM lifecycle**: Create, start, stop, clone, snapshot, and inspect virtual machines from the CLI or GUI.
+- **Wayland-native management UI**: egui desktop shell with Tokyo Night defaults, Material Ocean preset, monitoring panes, and GPU/network dashboards.
+- **Declarative NovaFile config**: TOML project definitions for repeatable VM, container, and network setup.
+- **VFIO and GPU passthrough**: NVIDIA-focused diagnostics, RTX 50-series guidance, bulk bind/reset workflows, and Looking Glass support paths.
+- **Looking Glass integration**: Host/guest guidance for IVSHMEM, KVMFR, Windows guests, and low-latency display capture.
+- **Virtual networking**: Linux bridge, NAT, libvirt network, uplink, DHCP, capture, and monitoring workflows.
+- **Support tooling**: Redacted support bundles, preflight checks, diagnostics output, and operational runbooks.
+- **Observability**: Prometheus/Grafana examples and exporter-oriented documentation for lab and fleet monitoring.
 
-- ⚡ **Zero-Overhead Runtime** – Rust's compile-time optimizations deliver consistent, predictable performance
-- 🖥 **Enterprise Virtualization** – Full KVM/QEMU integration with advanced GPU passthrough capabilities  
-- 📦 **Lightweight Capsules** – Container technology with built-in snapshots, persistence, and isolation
-- 🧩 **Infrastructure as Code** – Declarative TOML configuration for reproducible, version-controlled deployments
-- 🌐 **Software-Defined Networking** – Advanced bridge, overlay, and QUIC-based mesh networking
-- 🎨 **Modern Interface** – Native Wayland GUI with Tokyo Night defaults, opt-in Material Ocean styling, persisted preferences, and real-time monitoring controls
-- 🔐 **Security-First Design** – Cryptographic signing, encrypted networking, and secure defaults  
+## Quick Start
 
----
+```bash
+# Build the CLI and GUI
+cargo build --release
 
-## Example: NovaFile (TOML)
+# Inspect available commands
+cargo run --bin nova -- --help
+
+# Run host readiness checks
+cargo run --bin nova -- support preflight
+
+# Launch the GUI
+cargo run --bin nova-gui
+```
+
+Common workflows:
+
+```bash
+# Generate a VM definition interactively
+nova wizard vm win11 --preset gpu-labs --apply
+
+# List known virtual machines and networks
+nova list --all
+nova network list
+
+# Create a support bundle with redaction
+nova support bundle --redact
+
+# Inspect GPU passthrough readiness
+nova gpu doctor
+```
+
+## NovaFile Example
 
 ```toml
-project = "dev-lab"
+project = "gpu-lab"
 
 [vm.win11]
 image = "/var/lib/nova/images/win11.qcow2"
 cpu = 8
 memory = "16Gi"
 gpu_passthrough = true
-network = "bridge0"
+network = "lab-nat"
 
 [container.api]
-capsule = "ubuntu:22.04"
+capsule = "ubuntu:24.04"
 volumes = ["./api:/srv/api"]
-network = "nova-net"
-env.API_KEY = "secret"
+network = "lab-overlay"
 
-[network.bridge0]
+[network.lab-nat]
 type = "bridge"
-interfaces = ["enp6s0"]
-
-[network.nova-net]
-type = "overlay"
-driver = "quic"
-dns = true
+profile = "nat"
+subnet = "192.168.220.1/24"
+dhcp_range = "192.168.220.50-192.168.220.150"
 ```
 
----
+## Documentation
 
-## Quick Start
+The documentation is organized by operational topic under [docs/README.md](docs/README.md).
 
-```bash
-# Launch a virtual machine
-nova run vm win11
+| Area | Start Here |
+| --- | --- |
+| Commands | [docs/commands/commands.md](docs/commands/commands.md) |
+| Networking | [docs/networking/overview.md](docs/networking/overview.md) |
+| VFIO / GPU passthrough | [docs/vfio/overview.md](docs/vfio/overview.md) |
+| Looking Glass | [docs/looking-glass/overview.md](docs/looking-glass/overview.md) |
+| Wayland | [docs/wayland/overview.md](docs/wayland/overview.md) |
+| GUI and themes | [docs/gui/overview.md](docs/gui/overview.md) |
+| Operations and support | [docs/operations/overview.md](docs/operations/overview.md) |
+| Project planning | [docs/project/overview.md](docs/project/overview.md) |
 
-# Start a container
-nova run container api
+## Project Structure
 
-# List all networks
-nova net ls
-
-# Create VM snapshot
-nova snapshot vm win11
-
-# View container logs
-nova logs container api
-``` 
-
-## What's New (RC4 Sprint)
-
-- **Material Ocean preset**: New optional palette sits beside the Tokyo Night variants in Settings → Appearance for teams that prefer softer gradients.
-- **Windows 11 presets**: `nova wizard vm` pulls in official Win11 tweaks (TPM layout, secure boot toggle, ballooned RAM guidance) without manual editing.
-- **Capture auto-scan & toasts**: Networking view remembers your discovery cadence, surfaces info toasts for manual rescans, and debounces storage churn.
-- **Monitoring controls**: Live bandwidth panes expose poll intervals, offline thresholds, and notification toggles so you can dial in the right fidelity per lab.
-- **GPU passthrough board**: Quick filters persist between sessions, bulk VFIO bind/unbind/reset actions are one click away, and diagnostics bubbles flag cards that need attention.
-- **Arch preflight CLI**: `nova support preflight` runs kernel/userland readiness checks (KVM, VFIO, virsh, nmcli) so you can validate Arch boxes before migrating off virt-manager.
-
-## Documentation & Playbooks
-
-- [`docs/rtx50-series.md`](docs/rtx50-series.md) — RTX 50-series passthrough checklist (driver/kernel requirements, TCC guidance, validation matrix)
-- `COMMANDS.md` → Diagnostics & Support — details on `nova gpu list/info` output and the enriched support bundles (now capture GPU capabilities, metrics, and redacted system snapshots)
-- `nova support bundle --redact` — quickest way to gather logs, metrics, and per-GPU requirements for bug reports
-
-## Networking Persistence, Capture & Monitoring
-
-Nova now keeps track of managed switches so they survive daemon or host restarts. Key points:
-
-- Every Nova-managed bridge is serialized to `~/.local/share/nova/networks/<switch>.json` (falling back to `/var/lib/nova/networks` when XDG paths are unavailable).
-- On startup the networking subsystem recreates missing bridges, reapplies NAT/DHCP settings, and reattaches uplinks for `external` and `nat` profiles.
-- The CLI supports profile-aware creation. Example:
-
-```bash
-nova net create hyperv0 --type bridge \
-  --profile nat --uplink enp6s0 \
-  --subnet 192.168.220.1/24 --dhcp-range 192.168.220.50-192.168.220.150
+```text
+nova/
+├── src/                  # Rust CLI, GUI, VM, network, GPU, and support modules
+├── docs/                 # Topic-organized documentation
+├── examples/             # NovaFile, Prometheus, Grafana, and systemd examples
+├── packaging/            # Arch, Debian, Fedora, Flatpak, AppImage, systemd, udev
+├── tests/                # Integration and feature tests
+├── assets/               # Logo and icon assets
+├── SECURITY.md           # Vulnerability reporting policy
+└── CONTRIBUTING.md       # Development and documentation contribution guide
 ```
 
-### Verifying restart recovery
-
-1. Create a persistent switch (see above) and confirm the JSON state file exists.
-2. Restart the Nova service or reload the binary.
-3. Run `nova net ls` — the bridge should report `Active`, NAT masquerade should be present, and uplinks should still be attached.
-4. For automated regression coverage run:
+## Development
 
 ```bash
-cargo test network::tests::hydrate_restoration_behaviors
+# Format and check
+cargo fmt --all
+cargo check
+
+# Run tests
+cargo test
+
+# Audit dependencies
+cargo audit
 ```
 
-### Monitoring cadence & capture tuning
+Nova currently targets current stable Rust and modern Linux hosts with KVM, libvirt, QEMU, and Wayland compositor support. Some GPU passthrough and Looking Glass workflows require host-specific kernel modules, IOMMU configuration, and guest setup.
 
-Inside the Wayland shell you can now:
+## License
 
-- Set the **capture auto-scan interval** (15–120 seconds) and keep it synced to disk, so Nova only hits `~/.local/share/nova/captures` when you expect it.
-- Fire a manual refresh for a single host and watch an **info toast** confirm what was scanned and when.
-- Adjust **monitoring poll intervals** per interface (sampled metrics stay smooth around 5s, long-haul links can stretch to 60s) and tweak the **offline threshold** so flapping uplinks do not spam alerts.
-- Mute or enable **offline notifications** entirely when running noisy soak tests.
-
-Monitoring regression coverage is rolling out alongside RC5 observability; follow `tests/network.rs` for the latest offline heuristics cases.
-
-## GPU Passthrough Board
-
-The GPU dashboard now preserves exactly how you left it:
-
-- **Quick filters** (vendor, generation, host) sync to disk, so hopping between consoles or restarts keeps the same triage view.
-- **Card expansion state** sticks, letting you pin the adapters you babysit without repeatedly hunting for toggles.
-- **Bulk actions** perform VFIO bind/unbind/reset or driver reattach across the currently selected cards with status toasts for each device.
-- **Diagnostics badges** summarize health (`OK`, `Degraded`, `Action Needed`) next to the refresh button before you dive into a specific GPU.
-
-To compare board state from the CLI, the wizard exposes matching presets:
-
-```bash
-nova wizard vm win11 --preset gpu-labs
-```
-
-Pair the wizard with `COMMANDS.md` → Diagnostics & Support for deep dives, and watch for the upcoming GPU manager regression cases landing during the RC5 observability push.
-
-## Roadmap
-
-### Phase 1 – Core
-- [ ] VM lifecycle management (KVM + QEMU via Rust bindings)  
-- [ ] Capsule containers (namespaces + cgroups)  
-- [ ] TOML NovaFile parser  
-- [ ] Basic CLI (`nova run`, `nova ls`)  
-
-### Phase 2 – Networking
-- [ ] Bridge + tap device support  
-- [ ] Overlay networks (QUIC via `quinn`)  
-- [ ] Built-in service discovery (`trust-dns`)  
-- [ ] Firewall rules + NAT  
-
-### Phase 3 – GUI
-- [ ] Wayland-native GUI (Nova Manager)  
-- [ ] Resource graphs (CPU, memory, disk, network)  
-- [ ] VM/Container lifecycle dashboard  
-- [ ] Network topology viewer  
-
-### Phase 4 – Advanced
-- [ ] GPU passthrough (NVIDIA VFIO, SR-IOV)  
-- [ ] Live migration between hosts  
-- [ ] Cluster management with Surge integration  
-- [ ] Declarative reproducible builds (Nix-inspired)  
-
----
-
-## Comparisons
-
-| Feature              | Virt-Manager | Proxmox | LXC | Docker | **Nova** |
-|----------------------|--------------|---------|-----|--------|----------|
-| Wayland-native GUI   | ❌           | ❌      | ❌  | ❌     | ✅ |
-| VMs (KVM/QEMU)       | ✅           | ✅      | ❌  | ❌     | ✅ |
-| Lightweight containers | ❌         | ✅      | ✅  | ✅     | ✅ (Capsules) |
-| Declarative configs  | XML          | Conf    | Conf| YAML   | ✅ (TOML) |
-| GPU passthrough      | Limited      | ✅      | ❌  | ❌     | ✅ |
-| Overlay networking   | Limited      | ✅      | ❌  | ❌     | ✅ |
-| Arch/NVIDIA focus    | ❌           | ❌      | ❌  | ❌     | ✅ |
-
----
-
-## Architecture & Design Philosophy
-
-Nova embodies the principles of modern systems design:
-
-- **Performance First**: Rust's zero-cost abstractions and memory safety eliminate runtime overhead
-- **Declarative Infrastructure**: TOML-based configuration ensures reproducible and version-controlled deployments  
-- **Unified Management**: Single interface for VMs, containers, and networking reduces operational complexity
-- **Native Integration**: Built for Wayland compositors and modern Linux distributions
-
-From single-node development environments to distributed production clusters, Nova provides the performance and developer experience that traditional virtualization platforms lack.
-
----
-
-<div align="center">
-
-✨ *Nova — Light up your compute universe.* ✨
-
-</div>
-
+Nova is licensed under the [MIT License](LICENSE).

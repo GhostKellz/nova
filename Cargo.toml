@@ -2,7 +2,7 @@
 name = "nova"
 version = "0.1.0"
 edition = "2024"
-authors = ["Nova Team"]
+authors = ["Christopher Kelley <ckelley@ghostkellz.sh>"]
 description = "Wayland-Native Virtualization & Container Manager"
 license = "MIT"
 
@@ -20,27 +20,27 @@ path = "src/gui_main.rs"
 
 [dependencies]
 # CLI and config
-clap = { version = "4.4", features = ["derive"] }
-toml = "0.8"
+clap = { version = "4.6", features = ["derive"] }
+toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-dirs = "5.0"
+dirs = "6.0"
 flate2 = "1.0"
 tar = "0.4"
 tempfile = "3.8"
 regex = "1.10"
 
 # System and process management
-nix = { version = "0.27", features = ["fs", "hostname"] }
+nix = { version = "0.31", features = ["fs", "hostname"] }
 tokio = { version = "1.0", features = ["full"] }
 
 # GUI framework
-egui = "0.24"
-eframe = { version = "0.24", default-features = false, features = [
+egui = "0.34"
+eframe = { version = "0.34", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "glow",
@@ -50,7 +50,7 @@ eframe = { version = "0.24", default-features = false, features = [
 # Async and utilities
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-rand = "0.8"
-base64 = "0.21"
+rand = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]

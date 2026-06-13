@@ -49,6 +49,12 @@ pub struct UsbManager {
     assignments: HashMap<String, String>, // device_key -> vm_name
 }
 
+impl Default for UsbManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UsbManager {
     pub fn new() -> Self {
         Self {
@@ -165,7 +171,7 @@ impl UsbManager {
         fs::write(&temp_xml, &xml).map_err(|e| format!("Failed to write temp XML: {}", e))?;
 
         let output = Command::new("virsh")
-            .args(&["attach-device", vm_name, &temp_xml, "--live"])
+            .args(["attach-device", vm_name, &temp_xml, "--live"])
             .output()
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
@@ -199,7 +205,7 @@ impl UsbManager {
         fs::write(&temp_xml, &xml).map_err(|e| format!("Failed to write temp XML: {}", e))?;
 
         let output = Command::new("virsh")
-            .args(&["detach-device", vm_name, &temp_xml, "--live"])
+            .args(["detach-device", vm_name, &temp_xml, "--live"])
             .output()
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 
@@ -259,7 +265,7 @@ impl UsbManager {
         fs::write(temp_xml, &xml).map_err(|e| format!("Failed to write XML: {}", e))?;
 
         let output = Command::new("virsh")
-            .args(&["attach-device", vm_name, temp_xml, "--config"])
+            .args(["attach-device", vm_name, temp_xml, "--config"])
             .output()
             .map_err(|e| format!("Failed to execute virsh: {}", e))?;
 

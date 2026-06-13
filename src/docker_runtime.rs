@@ -245,7 +245,7 @@ impl ContainerRuntime for DockerRuntime {
             log_info!("Stopping Docker container: {}", id_or_name);
 
             let output = Command::new("docker")
-                .args(&["stop", id_or_name])
+                .args(["stop", id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::StopFailed(format!(
@@ -330,7 +330,7 @@ impl ContainerRuntime for DockerRuntime {
             log_info!("Pulling Docker image: {}", image);
 
             let output = Command::new("docker")
-                .args(&["pull", image])
+                .args(["pull", image])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute docker pull: {}", e))
@@ -355,7 +355,7 @@ impl ContainerRuntime for DockerRuntime {
     fn get_logs<'a>(&'a self, id_or_name: &'a str, lines: usize) -> RuntimeFuture<'a, Vec<String>> {
         Box::pin(async move {
             let output = Command::new("docker")
-                .args(&["logs", "--tail", &lines.to_string(), id_or_name])
+                .args(["logs", "--tail", &lines.to_string(), id_or_name])
                 .output()
                 .map_err(|e| {
                     ContainerRuntimeError::Other(format!("Failed to execute docker logs: {}", e))

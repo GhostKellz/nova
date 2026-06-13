@@ -1,5 +1,6 @@
 use eframe::egui;
 use nova::{
+    ArchNetworkManager, LibvirtManager, NetworkMonitor,
     config::{NovaConfig, default_ui_font_family, default_ui_font_size},
     console_enhanced::{
         ActiveProtocol, EnhancedConsoleConfig, EnhancedConsoleManager, UnifiedConsoleSession,
@@ -12,15 +13,8 @@ use nova::{
     instance::{Instance, InstanceStatus, InstanceType},
     logger,
     network::{
-        InterfaceState,
-        NetworkInterface,
-        NetworkManager,
-        NetworkSummary,
-        SwitchOrigin,
-        SwitchProfile,
-        SwitchStatus,
-        SwitchType,
-        VirtualSwitch,
+        InterfaceState, NetworkInterface, NetworkManager, NetworkSummary, SwitchOrigin,
+        SwitchProfile, SwitchStatus, SwitchType, VirtualSwitch,
     },
     preflight::PreflightSummary,
     sriov::SriovManager,
@@ -29,7 +23,6 @@ use nova::{
     theme::{self, ButtonIntent, ButtonRole},
     usb_passthrough::{UsbDevice, UsbManager},
     vm::VmManager,
-    ArchNetworkManager, LibvirtManager, NetworkMonitor,
 };
 
 use chrono::{DateTime, Local, Utc};
@@ -116,23 +109,23 @@ struct ContainerLogsState {
 
 #[derive(Clone)]
 struct SriovDeviceInfo {
-    pf_address: String,   // e.g., "0000:06:00.0"
-    device_name: String,  // e.g., "Intel X710"
+    pf_address: String,  // e.g., "0000:06:00.0"
+    device_name: String, // e.g., "Intel X710"
     vendor: String,
     driver: String,
     max_vfs: u32,
     active_vfs: u32,
-    device_type: String,  // "GPU", "NIC", "Other"
+    device_type: String, // "GPU", "NIC", "Other"
 }
 
 #[derive(Clone)]
 struct FirewallRuleInfo {
     chain: String,
     table: String,
-    action: String,      // ACCEPT, DROP, REJECT
-    protocol: String,    // tcp, udp, icmp, all
-    port: String,        // e.g., "22", "80:443", ""
-    source: String,      // e.g., "0.0.0.0/0", "192.168.1.0/24"
+    action: String,   // ACCEPT, DROP, REJECT
+    protocol: String, // tcp, udp, icmp, all
+    port: String,     // e.g., "22", "80:443", ""
+    source: String,   // e.g., "0.0.0.0/0", "192.168.1.0/24"
     destination: String,
     comment: String,
     packets: u64,
@@ -153,7 +146,7 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "Nova Manager",
         options,
-        Box::new(|cc| Box::new(NovaApp::new(cc))),
+        Box::new(|cc| Ok(Box::new(NovaApp::new(cc)))),
     )
 }
 
@@ -197,7 +190,7 @@ struct TemplateCatalogSummary {
 impl TemplateCatalogSummary {
     fn from_manager(manager: &TemplateManager) -> Self {
         let mut templates: Vec<&VmTemplate> = manager.list_templates();
-        templates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        templates.sort_by_key(|t| std::cmp::Reverse(t.created_at));
 
         let mut summary = TemplateCatalogSummary {
             total: templates.len(),
@@ -260,8 +253,16 @@ struct NovaApp {
     vm_manager: Arc<VmManager>,
     container_manager: Arc<ContainerManager>,
     network_manager: Arc<Mutex<NetworkManager>>,
+    // Canonical, app-root instances of the networking managers. They are shared
+    // by `Arc::clone` into `networking_gui`, which owns all direct interaction
+    // (discovery, create/delete, monitoring, arch tuning). NovaApp retains them
+    // as the single source of truth so manager state survives even if the
+    // networking view is rebuilt; access is therefore intentionally indirect.
+    #[allow(dead_code)]
     libvirt_manager: Arc<Mutex<LibvirtManager>>,
+    #[allow(dead_code)]
     network_monitor: Arc<Mutex<NetworkMonitor>>,
+    #[allow(dead_code)]
     arch_network_manager: Arc<Mutex<ArchNetworkManager>>,
     enhanced_console: Arc<AsyncMutex<EnhancedConsoleManager>>,
     template_manager: Arc<AsyncMutex<TemplateManager>>,
@@ -375,7 +376,11 @@ struct NovaApp {
     storage_pools_cache: Vec<(String, String, String, String, u64, u64, u64)>, // name, type, path, state, capacity, used, available
     sriov_devices_cache: Vec<SriovDeviceInfo>, // SR-IOV capable devices
     firewall_rules_cache: Vec<FirewallRuleInfo>, // Firewall rules from nft/iptables
-    firewall_backend: String, // nftables, iptables, firewalld
+    firewall_backend: String,                  // nftables, iptables, firewalld
+    firewall_chain_filter: String,             // INPUT, OUTPUT, FORWARD, NAT
+    firewall_conflicts: Vec<String>,           // Rule conflicts from FirewallManager analysis
+    firewall_optimizations: Vec<String>,       // Optimization hints from FirewallManager
+    firewall_analyzed: bool,                   // Whether an analysis pass has run
     preflight_result: Option<PreflightSummary>,
     migration_dest_host: String,
     migration_offline: bool,
@@ -512,14 +517,12 @@ impl NovaApp {
         let show_insights = config.ui.show_insights;
         let confirm_instance_actions = config.ui.confirm_instance_actions;
 
-        if config_dirty {
-            if let Err(err) = config.save_to_file(&config_path) {
-                warn!(
-                    "Unable to persist updated UI defaults in {}: {}",
-                    config_path.display(),
-                    err
-                );
-            }
+        if config_dirty && let Err(err) = config.save_to_file(&config_path) {
+            warn!(
+                "Unable to persist updated UI defaults in {}: {}",
+                config_path.display(),
+                err
+            );
         }
 
         let vm_manager = Arc::new(VmManager::new());
@@ -565,12 +568,10 @@ impl NovaApp {
         let usb_manager = Arc::new(Mutex::new(UsbManager::new()));
         let storage_pool_manager = Arc::new(Mutex::new(StoragePoolManager::new()));
         let sriov_manager = Arc::new(Mutex::new(SriovManager::new()));
-        let firewall_manager = Arc::new(Mutex::new(
-            FirewallManager::new().unwrap_or_else(|e| {
-                warn!("Failed to initialize firewall manager: {:?}", e);
-                FirewallManager::default()
-            })
-        ));
+        let firewall_manager = Arc::new(Mutex::new(FirewallManager::new().unwrap_or_else(|e| {
+            warn!("Failed to initialize firewall manager: {:?}", e);
+            FirewallManager::default()
+        })));
 
         let runtime = Runtime::new().expect("failed to initialize Tokio runtime");
 
@@ -692,11 +693,19 @@ impl NovaApp {
             sriov_devices_cache: Vec::new(),
             firewall_rules_cache: Vec::new(),
             firewall_backend: String::new(),
+            firewall_chain_filter: "INPUT".to_string(),
+            firewall_conflicts: Vec::new(),
+            firewall_optimizations: Vec::new(),
+            firewall_analyzed: false,
             preflight_result: None,
             migration_dest_host: String::new(),
             migration_offline: false,
             migration_copy_storage: false,
         };
+
+        // Share the app's Tokio runtime with the networking GUI so it can drive
+        // the libvirt/monitor/arch managers' async APIs from the UI thread.
+        app.networking_gui.set_runtime(app.runtime.handle().clone());
 
         app.ensure_font_definitions(&cc.egui_ctx);
         app.apply_text_style_overrides(&cc.egui_ctx);
@@ -727,7 +736,7 @@ impl NovaApp {
 
         let mut all_instances = self.vm_manager.list_vms();
         all_instances.extend(self.container_manager.list_containers());
-        all_instances.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        all_instances.sort_by_key(|a| a.name.to_lowercase());
 
         self.instances_cache = all_instances;
         self.summary = InstanceSummary::from_instances(&self.instances_cache);
@@ -767,10 +776,11 @@ impl NovaApp {
 
     fn populate_instance_ips(&mut self) {
         for instance in self.instances_cache.iter_mut() {
-            if instance.instance_type == InstanceType::Vm && instance.ip_address.is_none() {
-                if let Some(ip) = Self::probe_vm_ip(&instance.name) {
-                    instance.ip_address = Some(ip);
-                }
+            if instance.instance_type == InstanceType::Vm
+                && instance.ip_address.is_none()
+                && let Some(ip) = Self::probe_vm_ip(&instance.name)
+            {
+                instance.ip_address = Some(ip);
             }
         }
     }
@@ -838,8 +848,7 @@ impl NovaApp {
                         .into_iter()
                         .cloned()
                         .collect::<Vec<_>>();
-                    self.network_switches
-                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    self.network_switches.sort_by_key(|a| a.name.to_lowercase());
 
                     self.network_interfaces = manager
                         .list_interfaces()
@@ -847,7 +856,7 @@ impl NovaApp {
                         .cloned()
                         .collect::<Vec<_>>();
                     self.network_interfaces
-                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        .sort_by_key(|a| a.name.to_lowercase());
 
                     self.network_attach_selection.retain(|_, iface| {
                         self.network_interfaces
@@ -953,7 +962,7 @@ impl NovaApp {
                     "Theme set to {} via menu",
                     option.label()
                 )));
-                ui.close_menu();
+                ui.close();
             }
         }
     }
@@ -970,7 +979,7 @@ impl NovaApp {
                 Some(bytes) => {
                     fonts.font_data.insert(
                         "nova.pref.fira".to_string(),
-                        egui::FontData::from_owned((*bytes).clone()),
+                        egui::FontData::from_owned((*bytes).clone()).into(),
                     );
                     fonts
                         .families
@@ -999,7 +1008,7 @@ impl NovaApp {
     }
 
     fn apply_text_style_overrides(&mut self, ctx: &egui::Context) {
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         let font_size = self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         if (font_size - self.font_size).abs() > f32::EPSILON {
             self.font_size = font_size;
@@ -1039,18 +1048,18 @@ impl NovaApp {
         if self.compact_layout {
             style.spacing.item_spacing = egui::vec2(6.0, 4.0);
             style.spacing.button_padding = egui::vec2(12.0, 6.0);
-            style.spacing.menu_margin = egui::Margin::symmetric(8.0, 6.0);
+            style.spacing.menu_margin = egui::Margin::symmetric(8, 6);
             style.spacing.indent = 18.0;
-            style.spacing.window_margin = egui::Margin::symmetric(10.0, 8.0);
+            style.spacing.window_margin = egui::Margin::symmetric(10, 8);
         } else {
             style.spacing.item_spacing = egui::vec2(10.0, 8.0);
             style.spacing.button_padding = egui::vec2(16.0, 8.0);
-            style.spacing.menu_margin = egui::Margin::same(10.0);
+            style.spacing.menu_margin = egui::Margin::same(10);
             style.spacing.indent = 24.0;
-            style.spacing.window_margin = egui::Margin::same(12.0);
+            style.spacing.window_margin = egui::Margin::same(12);
         }
 
-        ctx.set_style(style);
+        ctx.set_global_style(style);
     }
 
     fn resolve_font_bytes(&mut self, font_id: &str) -> Option<Arc<Vec<u8>>> {
@@ -1232,7 +1241,7 @@ impl NovaApp {
                 }
 
                 ui.add_space(8.0);
-                egui::ComboBox::from_id_source("nova.pref.font.family")
+                egui::ComboBox::from_id_salt("nova.pref.font.family")
                     .selected_text(self.font_choice_label())
                     .show_ui(ui, |ui| {
                         for choice in FONT_CHOICES.iter() {
@@ -1426,13 +1435,11 @@ impl NovaApp {
                             self.preferences_dirty,
                         )
                         .clicked()
-                    {
-                        if self
+                        && self
                             .persist_ui_preferences(Some("Saved Nova UI preferences".to_string()))
-                        {
-                            self.preferences_backup = None;
-                            self.show_preferences = false;
-                        }
+                    {
+                        self.preferences_backup = None;
+                        self.show_preferences = false;
                     }
 
                     if self
@@ -1723,7 +1730,7 @@ impl NovaApp {
 
                 ui.add_space(6.0);
                 ui.label("Switch type");
-                egui::ComboBox::from_id_source("nova.new_switch.type")
+                egui::ComboBox::from_id_salt("nova.new_switch.type")
                     .selected_text(match self.new_switch_type {
                         SwitchType::LinuxBridge => "Linux bridge",
                         SwitchType::OpenVSwitch => "Open vSwitch",
@@ -1774,7 +1781,7 @@ impl NovaApp {
                         .iter()
                         .map(|iface| iface.name.clone())
                         .collect();
-                    available.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                    available.sort_by_key(|a| a.to_lowercase());
 
                     if available.is_empty() {
                         ui.colored_label(
@@ -1787,7 +1794,7 @@ impl NovaApp {
                         }
 
                         let mut selection = self.new_switch_uplink.clone();
-                        egui::ComboBox::from_id_source("nova.new_switch.uplink")
+                        egui::ComboBox::from_id_salt("nova.new_switch.uplink")
                             .selected_text(selection.clone())
                             .width(220.0)
                             .show_ui(ui, |ui| {
@@ -2129,11 +2136,11 @@ impl NovaApp {
 
     fn summary_chip(ui: &mut egui::Ui, label: &str, value: usize, color: egui::Color32) {
         let visuals = ui.visuals().clone();
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(visuals.widgets.noninteractive.bg_fill)
-            .rounding(egui::Rounding::same(6.0))
+            .corner_radius(egui::CornerRadius::same(6))
             .stroke(egui::Stroke::new(1.0, color))
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(label).color(color));
@@ -2486,13 +2493,12 @@ impl NovaApp {
                                 .desired_width(220.0),
                         );
 
-                        if !self.container_logs_filter.is_empty() {
-                            if self
+                        if !self.container_logs_filter.is_empty()
+                            && self
                                 .themed_button(ui, "Clear", ButtonRole::Secondary, true)
                                 .clicked()
-                            {
-                                self.container_logs_filter.clear();
-                            }
+                        {
+                            self.container_logs_filter.clear();
                         }
                     });
 
@@ -2531,7 +2537,7 @@ impl NovaApp {
                                 .map(|line| line.as_str())
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            ui.output_mut(|out| out.copied_text = joined);
+                            ui.ctx().copy_text(joined);
                         }
                         if self
                             .themed_button(
@@ -2573,7 +2579,7 @@ impl NovaApp {
                     }
 
                     egui::ScrollArea::vertical()
-                        .id_source(format!("nova.container.logs.{}", state.name))
+                        .id_salt(format!("nova.container.logs.{}", state.name))
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
                             for line in filtered_lines {
@@ -2867,13 +2873,12 @@ impl NovaApp {
             {
                 logs_requested = true;
             }
-            if let Some(detail) = detail_opt.as_ref() {
-                if self
+            if let Some(detail) = detail_opt.as_ref()
+                && self
                     .themed_button(ui, "Pull image", ButtonRole::Secondary, true)
                     .clicked()
-                {
-                    pull_image = Some(detail.info.image.clone());
-                }
+            {
+                pull_image = Some(detail.info.image.clone());
             }
         });
 
@@ -3189,7 +3194,7 @@ impl NovaApp {
         } else {
             let switches = self.network_switches.clone();
             egui::ScrollArea::vertical()
-                .id_source("nova.network.switches")
+                .id_salt("nova.network.switches")
                 .max_height(260.0)
                 .show(ui, |ui| {
                     for switch in switches.iter() {
@@ -3197,7 +3202,7 @@ impl NovaApp {
                             "{} ({:?})",
                             switch.name, switch.switch_type
                         ))
-                        .id_source(format!("nova.switch.{}", switch.name))
+                        .id_salt(format!("nova.switch.{}", switch.name))
                         .default_open(true)
                         .show(ui, |ui| {
                             let (status_icon, status_color, status_text) = match &switch.status {
@@ -3291,7 +3296,7 @@ impl NovaApp {
                                 let entry = self
                                     .network_attach_selection
                                     .entry(switch.name.clone())
-                                    .or_insert_with(String::new);
+                                    .or_default();
 
                                 if entry.is_empty() {
                                     if let Some(first) = available.first() {
@@ -3302,7 +3307,7 @@ impl NovaApp {
                                 }
 
                                 let mut selection = entry.clone();
-                                egui::ComboBox::from_id_source(format!(
+                                egui::ComboBox::from_id_salt(format!(
                                     "nova.switch.attach.{}",
                                     switch.name
                                 ))
@@ -3400,7 +3405,7 @@ impl NovaApp {
 
         ui.add_space(10.0);
         egui::CollapsingHeader::new("Host interfaces")
-            .id_source("nova.network.interfaces")
+            .id_salt("nova.network.interfaces")
             .default_open(false)
             .show(ui, |ui| {
                 if self.network_interfaces.is_empty() {
@@ -3553,8 +3558,8 @@ impl NovaApp {
             });
     }
 
-    fn draw_header(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("nova.header").show(ctx, |ui| {
+    fn draw_header(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("nova.header").show_inside(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("Nova Hypervisor Manager");
@@ -3603,22 +3608,22 @@ impl NovaApp {
         });
     }
 
-    fn draw_navigation_panel(&mut self, ctx: &egui::Context, filter: &str) {
-        egui::SidePanel::left("nova.navigation")
-            .default_width(260.0)
-            .min_width(220.0)
-            .show(ctx, |ui| {
+    fn draw_navigation_panel(&mut self, ui: &mut egui::Ui, filter: &str) {
+        egui::Panel::left("nova.navigation")
+            .default_size(260.0)
+            .min_size(220.0)
+            .show_inside(ui, |ui| {
                 ui.heading("Instances");
                 ui.separator();
                 self.draw_instance_tree(ui, filter);
             });
     }
 
-    fn draw_event_log_panel(&self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("nova.event_log")
-            .default_height(170.0)
-            .min_height(120.0)
-            .show(ctx, |ui| {
+    fn draw_event_log_panel(&self, ui: &mut egui::Ui) {
+        egui::Panel::bottom("nova.event_log")
+            .default_size(170.0)
+            .min_size(120.0)
+            .show_inside(ui, |ui| {
                 ui.heading("Event log");
                 ui.separator();
                 egui::ScrollArea::vertical()
@@ -3642,8 +3647,7 @@ impl NovaApp {
         let ready_session = self.selected_instance().and_then(|instance| {
             self.active_sessions
                 .iter()
-                .filter(|session| session.vm_name == instance.name && session.active)
-                .last()
+                .rfind(|session| session.vm_name == instance.name && session.active)
                 .map(|session| session.session_id.clone())
         });
         ui.horizontal(|ui| {
@@ -3693,10 +3697,9 @@ impl NovaApp {
             if self
                 .themed_button(ui, "🚀 Session", ButtonRole::Secondary, has_selection)
                 .clicked()
+                && let Some(instance) = self.selected_instance_owned()
             {
-                if let Some(instance) = self.selected_instance_owned() {
-                    self.request_session_launch(&instance);
-                }
+                self.request_session_launch(&instance);
             }
             if self
                 .themed_button(
@@ -3706,10 +3709,9 @@ impl NovaApp {
                     ready_session.is_some(),
                 )
                 .clicked()
+                && let Some(session_id) = ready_session.clone()
             {
-                if let Some(session_id) = ready_session.clone() {
-                    self.request_session_launch_client(session_id);
-                }
+                self.request_session_launch_client(session_id);
             }
             if self
                 .themed_button(ui, "🛡 Checkpoint", ButtonRole::Secondary, has_selection)
@@ -3811,82 +3813,95 @@ impl NovaApp {
                 template_keys.sort();
 
                 // Group templates by category
-                let gpu_templates: Vec<_> = template_keys.iter()
+                let gpu_templates: Vec<_> = template_keys
+                    .iter()
                     .filter(|k| k.starts_with("nv-") || k.contains("gaming"))
                     .cloned()
                     .collect();
-                let server_templates: Vec<_> = template_keys.iter()
+                let server_templates: Vec<_> = template_keys
+                    .iter()
                     .filter(|k| k.contains("server"))
                     .cloned()
                     .collect();
-                let desktop_templates: Vec<_> = template_keys.iter()
-                    .filter(|k| !k.starts_with("nv-") && !k.contains("gaming") && !k.contains("server"))
+                let desktop_templates: Vec<_> = template_keys
+                    .iter()
+                    .filter(|k| {
+                        !k.starts_with("nv-") && !k.contains("gaming") && !k.contains("server")
+                    })
                     .cloned()
                     .collect();
 
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    // GPU Passthrough Templates
-                    if !gpu_templates.is_empty() {
-                        ui.collapsing("🎮 GPU Passthrough", |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for key in &gpu_templates {
-                                    if let Some(template) = self.available_templates.get(key) {
-                                        let selected = self.new_vm_selected_template.as_ref() == Some(key);
-                                        if ui.selectable_label(selected, &template.name)
-                                            .on_hover_text(&template.description)
-                                            .clicked()
-                                        {
-                                            self.apply_template(key.clone());
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        // GPU Passthrough Templates
+                        if !gpu_templates.is_empty() {
+                            ui.collapsing("🎮 GPU Passthrough", |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for key in &gpu_templates {
+                                        if let Some(template) = self.available_templates.get(key) {
+                                            let selected =
+                                                self.new_vm_selected_template.as_ref() == Some(key);
+                                            if ui
+                                                .selectable_label(selected, &template.name)
+                                                .on_hover_text(&template.description)
+                                                .clicked()
+                                            {
+                                                self.apply_template(key.clone());
+                                            }
                                         }
                                     }
-                                }
+                                });
                             });
-                        });
-                    }
+                        }
 
-                    // Server Templates
-                    if !server_templates.is_empty() {
-                        ui.collapsing("🖥 Servers", |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for key in &server_templates {
-                                    if let Some(template) = self.available_templates.get(key) {
-                                        let selected = self.new_vm_selected_template.as_ref() == Some(key);
-                                        if ui.selectable_label(selected, &template.name)
-                                            .on_hover_text(&template.description)
-                                            .clicked()
-                                        {
-                                            self.apply_template(key.clone());
+                        // Server Templates
+                        if !server_templates.is_empty() {
+                            ui.collapsing("🖥 Servers", |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for key in &server_templates {
+                                        if let Some(template) = self.available_templates.get(key) {
+                                            let selected =
+                                                self.new_vm_selected_template.as_ref() == Some(key);
+                                            if ui
+                                                .selectable_label(selected, &template.name)
+                                                .on_hover_text(&template.description)
+                                                .clicked()
+                                            {
+                                                self.apply_template(key.clone());
+                                            }
                                         }
                                     }
-                                }
+                                });
                             });
-                        });
-                    }
+                        }
 
-                    // Desktop Templates
-                    if !desktop_templates.is_empty() {
-                        ui.collapsing("🖵 Desktop/General", |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                for key in &desktop_templates {
-                                    if let Some(template) = self.available_templates.get(key) {
-                                        let selected = self.new_vm_selected_template.as_ref() == Some(key);
-                                        if ui.selectable_label(selected, &template.name)
-                                            .on_hover_text(&template.description)
-                                            .clicked()
-                                        {
-                                            self.apply_template(key.clone());
+                        // Desktop Templates
+                        if !desktop_templates.is_empty() {
+                            ui.collapsing("🖵 Desktop/General", |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    for key in &desktop_templates {
+                                        if let Some(template) = self.available_templates.get(key) {
+                                            let selected =
+                                                self.new_vm_selected_template.as_ref() == Some(key);
+                                            if ui
+                                                .selectable_label(selected, &template.name)
+                                                .on_hover_text(&template.description)
+                                                .clicked()
+                                            {
+                                                self.apply_template(key.clone());
+                                            }
                                         }
                                     }
-                                }
+                                });
                             });
-                        });
-                    }
-                });
+                        }
+                    });
 
-                if self.new_vm_selected_template.is_some() {
-                    if ui.small_button("Clear template").clicked() {
-                        self.new_vm_selected_template = None;
-                    }
+                if self.new_vm_selected_template.is_some()
+                    && ui.small_button("Clear template").clicked()
+                {
+                    self.new_vm_selected_template = None;
                 }
 
                 ui.add_space(8.0);
@@ -3902,11 +3917,13 @@ impl NovaApp {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         ui.label("Name:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_vm_name).hint_text("my-vm"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_vm_name).hint_text("my-vm"),
+                        );
                         ui.end_row();
 
                         ui.label("CPUs:");
-                        ui.add(egui::DragValue::new(&mut self.new_vm_cpu).clamp_range(1..=64));
+                        ui.add(egui::DragValue::new(&mut self.new_vm_cpu).range(1..=64));
                         ui.end_row();
 
                         ui.label("Memory:");
@@ -3914,7 +3931,9 @@ impl NovaApp {
                         ui.end_row();
 
                         ui.label("Disk Size:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_vm_disk_size).hint_text("64G"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_vm_disk_size).hint_text("64G"),
+                        );
                         ui.end_row();
 
                         ui.label("ISO:");
@@ -3929,18 +3948,23 @@ impl NovaApp {
                                     .unwrap_or_else(|| self.new_vm_iso_path.clone())
                             };
 
-                            egui::ComboBox::from_id_source("iso_select")
+                            egui::ComboBox::from_id_salt("iso_select")
                                 .selected_text(&current_iso)
                                 .width(350.0)
                                 .show_ui(ui, |ui| {
                                     if !self.available_isos.is_empty() {
                                         for iso in &self.available_isos {
                                             let label = format!("{} ({})", iso.name, iso.os_type);
-                                            if ui.selectable_label(
-                                                self.new_vm_iso_path == iso.path.to_string_lossy(),
-                                                &label
-                                            ).clicked() {
-                                                self.new_vm_iso_path = iso.path.to_string_lossy().to_string();
+                                            if ui
+                                                .selectable_label(
+                                                    self.new_vm_iso_path
+                                                        == iso.path.to_string_lossy(),
+                                                    &label,
+                                                )
+                                                .clicked()
+                                            {
+                                                self.new_vm_iso_path =
+                                                    iso.path.to_string_lossy().to_string();
                                             }
                                         }
                                         ui.separator();
@@ -3952,14 +3976,19 @@ impl NovaApp {
                                 });
 
                             // Manual path input
-                            ui.add(egui::TextEdit::singleline(&mut self.new_vm_iso_path)
-                                .hint_text("/path/to/installer.iso")
-                                .desired_width(350.0));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_vm_iso_path)
+                                    .hint_text("/path/to/installer.iso")
+                                    .desired_width(350.0),
+                            );
                         });
                         ui.end_row();
 
                         ui.label("Network:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_vm_network).hint_text("virbr0"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_vm_network)
+                                .hint_text("virbr0"),
+                        );
                         ui.end_row();
 
                         ui.label("Firmware:");
@@ -3983,19 +4012,29 @@ impl NovaApp {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if self.themed_button(ui, "Create VM", ButtonRole::Primary, !self.new_vm_name.is_empty()).clicked() {
+                    if self
+                        .themed_button(
+                            ui,
+                            "Create VM",
+                            ButtonRole::Primary,
+                            !self.new_vm_name.is_empty(),
+                        )
+                        .clicked()
+                    {
                         self.create_new_vm();
                         self.show_new_vm_dialog = false;
                     }
-                    if self.themed_button(ui, "Cancel", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.show_new_vm_dialog = false;
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("🔄 Rescan ISOs").clicked() {
-                            self.available_isos = nova::vm_templates::scan_iso_directories(
-                                &self._config.iso.paths
-                            );
+                            self.available_isos =
+                                nova::vm_templates::scan_iso_directories(&self._config.iso.paths);
                             self.log_console(format!("Found {} ISOs", self.available_isos.len()));
                         }
                     });
@@ -4021,13 +4060,13 @@ impl NovaApp {
             }
 
             // Try to auto-select matching ISO
-            if let Some(pattern) = &template.iso_pattern {
-                if let Ok(regex) = regex::Regex::new(pattern) {
-                    for iso in &self.available_isos {
-                        if regex.is_match(&iso.name) {
-                            self.new_vm_iso_path = iso.path.to_string_lossy().to_string();
-                            break;
-                        }
+            if let Some(pattern) = &template.iso_pattern
+                && let Ok(regex) = regex::Regex::new(pattern)
+            {
+                for iso in &self.available_isos {
+                    if regex.is_match(&iso.name) {
+                        self.new_vm_iso_path = iso.path.to_string_lossy().to_string();
+                        break;
                     }
                 }
             }
@@ -4046,15 +4085,30 @@ impl NovaApp {
 
         // Log configuration details
         let mut features = Vec::new();
-        if self.new_vm_enable_gpu { features.push("GPU passthrough"); }
-        if self.new_vm_enable_uefi { features.push("UEFI"); }
-        if self.new_vm_enable_secure_boot { features.push("Secure Boot"); }
-        if self.new_vm_enable_tpm { features.push("TPM 2.0"); }
+        if self.new_vm_enable_gpu {
+            features.push("GPU passthrough");
+        }
+        if self.new_vm_enable_uefi {
+            features.push("UEFI");
+        }
+        if self.new_vm_enable_secure_boot {
+            features.push("Secure Boot");
+        }
+        if self.new_vm_enable_tpm {
+            features.push("TPM 2.0");
+        }
 
         self.log_console(format!(
             "Creating VM '{}': {} CPUs, {} RAM, {} disk{}",
-            name, self.new_vm_cpu, self.new_vm_memory, self.new_vm_disk_size,
-            if features.is_empty() { String::new() } else { format!(" [{}]", features.join(", ")) }
+            name,
+            self.new_vm_cpu,
+            self.new_vm_memory,
+            self.new_vm_disk_size,
+            if features.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", features.join(", "))
+            }
         ));
 
         if !self.new_vm_iso_path.is_empty() {
@@ -4064,15 +4118,24 @@ impl NovaApp {
         // Build virt-install command
         let mut cmd = std::process::Command::new("virt-install");
 
-        cmd.arg("--name").arg(&name)
-            .arg("--vcpus").arg(self.new_vm_cpu.to_string())
-            .arg("--memory").arg(self.parse_memory_for_virt_install(&self.new_vm_memory))
-            .arg("--disk").arg(format!("size={}", self.parse_disk_size_gb(&self.new_vm_disk_size)))
-            .arg("--os-variant").arg(self.detect_os_variant());
+        cmd.arg("--name")
+            .arg(&name)
+            .arg("--vcpus")
+            .arg(self.new_vm_cpu.to_string())
+            .arg("--memory")
+            .arg(self.parse_memory_for_virt_install(&self.new_vm_memory))
+            .arg("--disk")
+            .arg(format!(
+                "size={}",
+                self.parse_disk_size_gb(&self.new_vm_disk_size)
+            ))
+            .arg("--os-variant")
+            .arg(self.detect_os_variant());
 
         // Network
         if !self.new_vm_network.is_empty() {
-            cmd.arg("--network").arg(format!("bridge={}", self.new_vm_network));
+            cmd.arg("--network")
+                .arg(format!("bridge={}", self.new_vm_network));
         } else {
             cmd.arg("--network").arg("default");
         }
@@ -4095,7 +4158,8 @@ impl NovaApp {
 
         // TPM
         if self.new_vm_enable_tpm {
-            cmd.arg("--tpm").arg("backend.type=emulator,backend.version=2.0,model=tpm-crb");
+            cmd.arg("--tpm")
+                .arg("backend.type=emulator,backend.version=2.0,model=tpm-crb");
         }
 
         // Graphics
@@ -4150,10 +4214,10 @@ impl NovaApp {
         // Convert memory string like "8G" or "16384M" to MB for virt-install
         let memory = memory.trim().to_uppercase();
         if memory.ends_with('G') {
-            let gb: u32 = memory[..memory.len()-1].parse().unwrap_or(4);
+            let gb: u32 = memory[..memory.len() - 1].parse().unwrap_or(4);
             (gb * 1024).to_string()
         } else if memory.ends_with('M') {
-            memory[..memory.len()-1].to_string()
+            memory[..memory.len() - 1].to_string()
         } else {
             // Assume GB if no unit
             let gb: u32 = memory.parse().unwrap_or(4);
@@ -4165,12 +4229,12 @@ impl NovaApp {
         // Convert disk size to GB number for virt-install
         let size = size.trim().to_uppercase();
         if size.ends_with('G') {
-            size[..size.len()-1].to_string()
+            size[..size.len() - 1].to_string()
         } else if size.ends_with('T') {
-            let tb: u32 = size[..size.len()-1].parse().unwrap_or(1);
+            let tb: u32 = size[..size.len() - 1].parse().unwrap_or(1);
             (tb * 1024).to_string()
         } else if size.ends_with('M') {
-            let mb: u32 = size[..size.len()-1].parse().unwrap_or(65536);
+            let mb: u32 = size[..size.len() - 1].parse().unwrap_or(65536);
             (mb / 1024).to_string()
         } else {
             // Assume GB
@@ -4180,45 +4244,54 @@ impl NovaApp {
 
     fn detect_os_variant(&self) -> String {
         // Try to detect OS variant from selected template or ISO path
-        if let Some(ref template_key) = self.new_vm_selected_template {
-            if let Some(template) = self.available_templates.get(template_key) {
-                return match template.os_type.as_str() {
-                    "windows" => {
-                        if template.name.contains("11") {
-                            "win11".to_string()
-                        } else {
-                            "win10".to_string()
-                        }
+        if let Some(ref template_key) = self.new_vm_selected_template
+            && let Some(template) = self.available_templates.get(template_key)
+        {
+            return match template.os_type.as_str() {
+                "windows" => {
+                    if template.name.contains("11") {
+                        "win11".to_string()
+                    } else {
+                        "win10".to_string()
                     }
-                    "linux" => {
-                        let name_lower = template.name.to_lowercase();
-                        if name_lower.contains("ubuntu") {
-                            "ubuntu24.04".to_string()
-                        } else if name_lower.contains("debian") {
-                            "debian12".to_string()
-                        } else if name_lower.contains("fedora") || name_lower.contains("nobara") || name_lower.contains("bazzite") {
-                            "fedora40".to_string()
-                        } else if name_lower.contains("arch") {
-                            "archlinux".to_string()
-                        } else {
-                            "linux2022".to_string()
-                        }
+                }
+                "linux" => {
+                    let name_lower = template.name.to_lowercase();
+                    if name_lower.contains("ubuntu") {
+                        "ubuntu24.04".to_string()
+                    } else if name_lower.contains("debian") {
+                        "debian12".to_string()
+                    } else if name_lower.contains("fedora")
+                        || name_lower.contains("nobara")
+                        || name_lower.contains("bazzite")
+                    {
+                        "fedora40".to_string()
+                    } else if name_lower.contains("arch") {
+                        "archlinux".to_string()
+                    } else {
+                        "linux2022".to_string()
                     }
-                    _ => "linux2022".to_string(),
-                };
-            }
+                }
+                _ => "linux2022".to_string(),
+            };
         }
 
         // Fallback: try to detect from ISO path
         let iso_lower = self.new_vm_iso_path.to_lowercase();
         if iso_lower.contains("win") {
-            if iso_lower.contains("11") { "win11".to_string() }
-            else { "win10".to_string() }
+            if iso_lower.contains("11") {
+                "win11".to_string()
+            } else {
+                "win10".to_string()
+            }
         } else if iso_lower.contains("ubuntu") {
             "ubuntu24.04".to_string()
         } else if iso_lower.contains("debian") {
             "debian12".to_string()
-        } else if iso_lower.contains("fedora") || iso_lower.contains("nobara") || iso_lower.contains("bazzite") {
+        } else if iso_lower.contains("fedora")
+            || iso_lower.contains("nobara")
+            || iso_lower.contains("bazzite")
+        {
             "fedora40".to_string()
         } else if iso_lower.contains("arch") {
             "archlinux".to_string()
@@ -4245,27 +4318,45 @@ impl NovaApp {
                     .spacing([12.0, 8.0])
                     .show(ui, |ui| {
                         ui.label("Name:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_name).hint_text("my-container"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_name)
+                                .hint_text("my-container"),
+                        );
                         ui.end_row();
 
                         ui.label("Image:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_image).hint_text("nginx:latest"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_image)
+                                .hint_text("nginx:latest"),
+                        );
                         ui.end_row();
 
                         ui.label("Ports:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_ports).hint_text("8080:80, 443:443"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_ports)
+                                .hint_text("8080:80, 443:443"),
+                        );
                         ui.end_row();
 
                         ui.label("Volumes:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_volumes).hint_text("/host/path:/container/path"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_volumes)
+                                .hint_text("/host/path:/container/path"),
+                        );
                         ui.end_row();
 
                         ui.label("Environment:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_env_vars).hint_text("KEY=value, FOO=bar"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_env_vars)
+                                .hint_text("KEY=value, FOO=bar"),
+                        );
                         ui.end_row();
 
                         ui.label("Network:");
-                        ui.add(egui::TextEdit::singleline(&mut self.new_container_network).hint_text("bridge"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_container_network)
+                                .hint_text("bridge"),
+                        );
                         ui.end_row();
                     });
 
@@ -4274,12 +4365,19 @@ impl NovaApp {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    let can_create = !self.new_container_name.is_empty() && !self.new_container_image.is_empty();
-                    if self.themed_button(ui, "Create Container", ButtonRole::Primary, can_create).clicked() {
+                    let can_create =
+                        !self.new_container_name.is_empty() && !self.new_container_image.is_empty();
+                    if self
+                        .themed_button(ui, "Create Container", ButtonRole::Primary, can_create)
+                        .clicked()
+                    {
                         self.create_new_container();
                         self.show_new_container_dialog = false;
                     }
-                    if self.themed_button(ui, "Cancel", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.show_new_container_dialog = false;
                     }
                 });
@@ -4293,11 +4391,67 @@ impl NovaApp {
     fn create_new_container(&mut self) {
         let name = self.new_container_name.clone();
         let image = self.new_container_image.clone();
+        let ports_str = self.new_container_ports.clone();
+        let volumes_str = self.new_container_volumes.clone();
+        let env_str = self.new_container_env_vars.clone();
+        let network = if self.new_container_network.is_empty() {
+            None
+        } else {
+            Some(self.new_container_network.clone())
+        };
 
-        self.log_console(format!("Creating container '{}' from image '{}'", name, image));
+        self.log_console(format!(
+            "Creating container '{}' from image '{}'",
+            name, image
+        ));
 
-        // TODO: Actually create container via ContainerManager
-        self.log_console(format!("Container '{}' created", name));
+        // Parse volumes (comma or newline separated)
+        let volumes: Vec<String> = volumes_str
+            .split([',', '\n'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Parse environment variables (KEY=VALUE format, comma or newline separated)
+        let mut env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for entry in env_str.split([',', '\n']) {
+            let entry = entry.trim();
+            if let Some((key, value)) = entry.split_once('=') {
+                env.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+
+        // Parse ports (comma or newline separated)
+        let _ports: Vec<String> = ports_str
+            .split([',', '\n'])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Build config
+        let config = nova::config::ContainerConfig {
+            capsule: Some(image.clone()),
+            volumes,
+            network,
+            env,
+            autostart: false,
+            runtime: None,
+            bolt: nova::config::BoltConfig::default(),
+        };
+
+        // Start container via ContainerManager
+        let container_manager = self.container_manager.clone();
+        let name_for_task = name.clone();
+        self.runtime.spawn(async move {
+            if let Err(err) = container_manager
+                .start_container(&name_for_task, Some(&config))
+                .await
+            {
+                tracing::error!("Failed to create container '{}': {:?}", name_for_task, err);
+            }
+        });
+
+        self.log_console(format!("Container '{}' creation initiated", name));
 
         // Reset form
         self.new_container_name.clear();
@@ -4344,7 +4498,10 @@ impl NovaApp {
                     ui.add_space(16.0);
                     ui.separator();
                     ui.add_space(8.0);
-                    ui.hyperlink_to("GitHub Repository", "https://github.com/nova-hypervisor/nova");
+                    ui.hyperlink_to(
+                        "GitHub Repository",
+                        "https://github.com/nova-hypervisor/nova",
+                    );
                     ui.add_space(16.0);
                 });
             });
@@ -4370,64 +4527,108 @@ impl NovaApp {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if self.themed_button(ui, "Refresh Devices", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Refresh Devices", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.refresh_usb_devices();
                     }
                 });
 
                 ui.add_space(8.0);
-                ui.label(format!("Available USB Devices ({})", self.usb_devices_cache.len()));
+                ui.label(format!(
+                    "Available USB Devices ({})",
+                    self.usb_devices_cache.len()
+                ));
 
                 let devices = self.usb_devices_cache.clone();
                 let selected_vm = self.selected_instance.clone();
 
-                egui::ScrollArea::vertical().max_height(350.0).show(ui, |ui| {
-                    if devices.is_empty() {
-                        ui.label("No USB devices found. Click Refresh to scan.");
-                    }
-                    for device in &devices {
-                        ui.group(|ui| {
-                            ui.horizontal(|ui| {
-                                let label = format!(
-                                    "Bus {:03} Device {:03}: {} {}",
-                                    device.bus, device.device,
-                                    device.vendor_name, device.product_name
-                                );
-                                ui.label(&label);
+                egui::ScrollArea::vertical()
+                    .max_height(350.0)
+                    .show(ui, |ui| {
+                        if devices.is_empty() {
+                            ui.label("No USB devices found. Click Refresh to scan.");
+                        }
+                        for device in &devices {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    let label = format!(
+                                        "Bus {:03} Device {:03}: {} {}",
+                                        device.bus,
+                                        device.device,
+                                        device.vendor_name,
+                                        device.product_name
+                                    );
+                                    ui.label(&label);
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if let Some(vm) = &device.attached_to_vm {
-                                        ui.colored_label(theme::STATUS_RUNNING, format!("→ {}", vm));
-                                        if self.themed_button(ui, "Detach", ButtonRole::Stop, true).clicked() {
-                                            self.detach_usb_device(device.bus, device.device);
-                                        }
-                                    } else {
-                                        let can_attach = selected_vm.is_some();
-                                        if self.themed_button(ui, "Attach", ButtonRole::Primary, can_attach).clicked() {
-                                            if let Some(vm) = &selected_vm {
-                                                self.attach_usb_device(vm, device.bus, device.device);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if let Some(vm) = &device.attached_to_vm {
+                                                ui.colored_label(
+                                                    theme::STATUS_RUNNING,
+                                                    format!("→ {}", vm),
+                                                );
+                                                if self
+                                                    .themed_button(
+                                                        ui,
+                                                        "Detach",
+                                                        ButtonRole::Stop,
+                                                        true,
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.detach_usb_device(
+                                                        device.bus,
+                                                        device.device,
+                                                    );
+                                                }
+                                            } else {
+                                                let can_attach = selected_vm.is_some();
+                                                if self
+                                                    .themed_button(
+                                                        ui,
+                                                        "Attach",
+                                                        ButtonRole::Primary,
+                                                        can_attach,
+                                                    )
+                                                    .clicked()
+                                                    && let Some(vm) = &selected_vm
+                                                {
+                                                    self.attach_usb_device(
+                                                        vm,
+                                                        device.bus,
+                                                        device.device,
+                                                    );
+                                                }
                                             }
-                                        }
-                                    }
+                                        },
+                                    );
                                 });
+                                ui.small(format!(
+                                    "ID {:04x}:{:04x} | {:?} | {:?}",
+                                    u16::from_str_radix(&device.vendor_id, 16).unwrap_or(0),
+                                    u16::from_str_radix(&device.product_id, 16).unwrap_or(0),
+                                    device.device_class,
+                                    device.speed
+                                ));
                             });
-                            ui.small(format!(
-                                "ID {:04x}:{:04x} | {:?} | {:?}",
-                                u16::from_str_radix(&device.vendor_id, 16).unwrap_or(0),
-                                u16::from_str_radix(&device.product_id, 16).unwrap_or(0),
-                                device.device_class,
-                                device.speed
-                            ));
-                        });
-                    }
-                });
+                        }
+                    });
 
                 ui.add_space(8.0);
                 ui.separator();
                 if selected_vm.is_some() {
-                    ui.small(format!("Target VM: {}", selected_vm.as_deref().unwrap_or("")));
+                    ui.small(format!(
+                        "Target VM: {}",
+                        selected_vm.as_deref().unwrap_or("")
+                    ));
                 } else {
-                    ui.colored_label(theme::STATUS_WARNING, "Select a VM first to attach USB devices");
+                    ui.colored_label(
+                        theme::STATUS_WARNING,
+                        "Select a VM first to attach USB devices",
+                    );
                 }
             });
     }
@@ -4449,10 +4650,15 @@ impl NovaApp {
     }
 
     fn attach_usb_device(&mut self, vm_name: &str, bus: u8, device: u8) {
-        self.log_console(format!("Attaching USB {}:{} to VM '{}'", bus, device, vm_name));
+        self.log_console(format!(
+            "Attaching USB {}:{} to VM '{}'",
+            bus, device, vm_name
+        ));
 
         // Find the device in cache
-        let device_opt = self.usb_devices_cache.iter()
+        let device_opt = self
+            .usb_devices_cache
+            .iter()
             .find(|d| d.bus == bus && d.device == device)
             .cloned();
 
@@ -4493,40 +4699,42 @@ impl NovaApp {
         self.log_console(format!("Detaching USB {}:{}", bus, device));
 
         // Find the device and its VM
-        let device_opt = self.usb_devices_cache.iter()
+        let device_opt = self
+            .usb_devices_cache
+            .iter()
             .find(|d| d.bus == bus && d.device == device)
             .cloned();
 
-        if let Some(usb_device) = device_opt {
-            if let Some(vm_name) = &usb_device.attached_to_vm {
-                // Generate USB XML for virsh detach
-                let usb_xml = format!(
-                    r#"<hostdev mode='subsystem' type='usb' managed='yes'>
+        if let Some(usb_device) = device_opt
+            && let Some(vm_name) = &usb_device.attached_to_vm
+        {
+            // Generate USB XML for virsh detach
+            let usb_xml = format!(
+                r#"<hostdev mode='subsystem' type='usb' managed='yes'>
                         <source>
                             <vendor id='0x{}'/>
                             <product id='0x{}'/>
                         </source>
                     </hostdev>"#,
-                    usb_device.vendor_id, usb_device.product_id
-                );
+                usb_device.vendor_id, usb_device.product_id
+            );
 
-                let tmp_path = format!("/tmp/nova-usb-detach-{}-{}.xml", bus, device);
-                if fs::write(&tmp_path, &usb_xml).is_ok() {
-                    match Command::new("virsh")
-                        .args(["detach-device", vm_name, &tmp_path, "--live"])
-                        .output()
-                    {
-                        Ok(output) if output.status.success() => {
-                            self.log_console("USB device detached");
-                        }
-                        Ok(output) => {
-                            let err = String::from_utf8_lossy(&output.stderr);
-                            self.log_console(format!("Failed to detach: {}", err.trim()));
-                        }
-                        Err(e) => self.log_console(format!("Failed to run virsh: {}", e)),
+            let tmp_path = format!("/tmp/nova-usb-detach-{}-{}.xml", bus, device);
+            if fs::write(&tmp_path, &usb_xml).is_ok() {
+                match Command::new("virsh")
+                    .args(["detach-device", vm_name, &tmp_path, "--live"])
+                    .output()
+                {
+                    Ok(output) if output.status.success() => {
+                        self.log_console("USB device detached");
                     }
-                    let _ = fs::remove_file(&tmp_path);
+                    Ok(output) => {
+                        let err = String::from_utf8_lossy(&output.stderr);
+                        self.log_console(format!("Failed to detach: {}", err.trim()));
+                    }
+                    Err(e) => self.log_console(format!("Failed to run virsh: {}", e)),
                 }
+                let _ = fs::remove_file(&tmp_path);
             }
         }
     }
@@ -4622,14 +4830,13 @@ impl NovaApp {
                                         }
                                     }
 
-                                    if self.themed_button(ui, "Browse", ButtonRole::Secondary, true).clicked() {
-                                        if let Err(e) = std::process::Command::new("xdg-open")
+                                    if self.themed_button(ui, "Browse", ButtonRole::Secondary, true).clicked()
+                                        && let Err(e) = std::process::Command::new("xdg-open")
                                             .arg(path)
                                             .spawn()
                                         {
                                             self.log_console(format!("Failed to open: {}", e));
                                         }
-                                    }
                                 });
                             });
                             ui.add_space(4.0);
@@ -4643,125 +4850,65 @@ impl NovaApp {
         self.log_console("Refreshing storage pools...");
         self.storage_pools_cache.clear();
 
-        // Get pool list from virsh
-        let output = std::process::Command::new("virsh")
-            .args(["pool-list", "--all"])
-            .output();
+        // Discover pools through the storage pool manager so the GUI and the
+        // backend share a single implementation.
+        let manager = Arc::clone(&self.storage_pool_manager);
+        // Lock held across the await: sound because `block_on` runs the future
+        // synchronously on the UI thread; the guard is released before it
+        // returns and no other thread contends for it.
+        #[allow(clippy::await_holding_lock)]
+        let discovery = self.runtime.block_on(async {
+            let mut mgr = manager.lock().unwrap();
+            mgr.discover_pools().await
+        });
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines().skip(2) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 2 {
-                        let name = parts[0].to_string();
-                        let state = parts[1].to_string();
+        if let Err(e) = discovery {
+            self.log_console(format!("Failed to discover storage pools: {:?}", e));
+            return;
+        }
 
-                        // Get pool details
-                        if let Some(pool_info) = self.get_pool_details(&name) {
-                            self.storage_pools_cache.push(pool_info);
-                        } else {
-                            self.storage_pools_cache.push((
-                                name,
-                                "unknown".to_string(),
-                                "unknown".to_string(),
-                                state,
-                                0, 0, 0
-                            ));
-                        }
-                    }
-                }
-                self.log_console(format!("Found {} storage pools", self.storage_pools_cache.len()));
-            }
+        let mgr = self.storage_pool_manager.lock().unwrap();
+        for pool in mgr.list_pools() {
+            let capacity = pool.capacity.as_ref();
+            self.storage_pools_cache.push((
+                pool.name.clone(),
+                Self::pool_type_label(&pool.pool_type).to_string(),
+                pool.path.display().to_string(),
+                Self::pool_state_label(&pool.state).to_string(),
+                capacity.map(|c| c.total_bytes).unwrap_or(0),
+                capacity.map(|c| c.used_bytes).unwrap_or(0),
+                capacity.map(|c| c.available_bytes).unwrap_or(0),
+            ));
+        }
+        drop(mgr);
+
+        self.log_console(format!(
+            "Found {} storage pools",
+            self.storage_pools_cache.len()
+        ));
+    }
+
+    fn pool_type_label(pool_type: &nova::storage_pool::PoolType) -> &'static str {
+        use nova::storage_pool::PoolType;
+        match pool_type {
+            PoolType::Directory => "dir",
+            PoolType::Btrfs => "btrfs",
+            PoolType::Zfs => "zfs",
+            PoolType::Nfs => "nfs",
+            PoolType::Iscsi => "iscsi",
+            PoolType::Ceph => "ceph",
+            PoolType::Lvm => "lvm",
         }
     }
 
-    fn get_pool_details(&self, name: &str) -> Option<(String, String, String, String, u64, u64, u64)> {
-        // Get pool info
-        let info_output = std::process::Command::new("virsh")
-            .args(["pool-info", name])
-            .output()
-            .ok()?;
-
-        if !info_output.status.success() {
-            return None;
-        }
-
-        let info_str = String::from_utf8_lossy(&info_output.stdout);
-        let mut state = "unknown".to_string();
-        let mut capacity: u64 = 0;
-        let mut allocation: u64 = 0;
-        let mut available: u64 = 0;
-
-        for line in info_str.lines() {
-            if line.starts_with("State:") {
-                state = line.split_whitespace().last().unwrap_or("unknown").to_string();
-            } else if line.starts_with("Capacity:") {
-                capacity = self.parse_virsh_size(line);
-            } else if line.starts_with("Allocation:") {
-                allocation = self.parse_virsh_size(line);
-            } else if line.starts_with("Available:") {
-                available = self.parse_virsh_size(line);
-            }
-        }
-
-        // Get pool XML for type and path
-        let xml_output = std::process::Command::new("virsh")
-            .args(["pool-dumpxml", name])
-            .output()
-            .ok()?;
-
-        let xml_str = String::from_utf8_lossy(&xml_output.stdout);
-        let pool_type = if xml_str.contains("type='dir'") {
-            "dir"
-        } else if xml_str.contains("type='netfs'") {
-            "nfs"
-        } else if xml_str.contains("type='logical'") {
-            "lvm"
-        } else if xml_str.contains("type='iscsi'") {
-            "iscsi"
-        } else if xml_str.contains("type='rbd'") {
-            "ceph"
-        } else {
-            "unknown"
-        };
-
-        // Extract path
-        let path = if let Some(start) = xml_str.find("<path>") {
-            if let Some(end) = xml_str[start..].find("</path>") {
-                xml_str[start + 6..start + end].to_string()
-            } else {
-                "N/A".to_string()
-            }
-        } else {
-            "N/A".to_string()
-        };
-
-        Some((
-            name.to_string(),
-            pool_type.to_string(),
-            path,
-            state,
-            capacity,
-            allocation,
-            available
-        ))
-    }
-
-    fn parse_virsh_size(&self, line: &str) -> u64 {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let value: f64 = parts[1].parse().unwrap_or(0.0);
-            let unit = parts.get(2).unwrap_or(&"B");
-            match *unit {
-                "TiB" => (value * 1_099_511_627_776.0) as u64,
-                "GiB" => (value * 1_073_741_824.0) as u64,
-                "MiB" => (value * 1_048_576.0) as u64,
-                "KiB" => (value * 1024.0) as u64,
-                _ => value as u64,
-            }
-        } else {
-            0
+    fn pool_state_label(state: &nova::storage_pool::PoolState) -> &'static str {
+        use nova::storage_pool::PoolState;
+        match state {
+            PoolState::Active => "running",
+            PoolState::Inactive => "inactive",
+            PoolState::Building => "building",
+            PoolState::Degraded => "degraded",
+            PoolState::Error(_) => "error",
         }
     }
 
@@ -4823,10 +4970,16 @@ impl NovaApp {
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if self.themed_button(ui, "Scan Devices", ButtonRole::Primary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Scan Devices", ButtonRole::Primary, true)
+                        .clicked()
+                    {
                         self.scan_sriov_devices();
                     }
-                    if self.themed_button(ui, "Refresh", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Refresh", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.scan_sriov_devices();
                     }
                 });
@@ -4842,14 +4995,18 @@ impl NovaApp {
                 if !iommu_enabled {
                     ui.horizontal(|ui| {
                         ui.colored_label(theme::STATUS_WARNING, "⚠");
-                        ui.label("IOMMU not detected. SR-IOV requires IOMMU enabled in BIOS and kernel.");
+                        ui.label(
+                            "IOMMU not detected. SR-IOV requires IOMMU enabled in BIOS and kernel.",
+                        );
                     });
                     ui.add_space(4.0);
                 }
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.sriov_devices_cache.is_empty() {
-                        ui.label("No SR-IOV capable devices found. Click 'Scan Devices' to search.");
+                        ui.label(
+                            "No SR-IOV capable devices found. Click 'Scan Devices' to search.",
+                        );
                         ui.add_space(8.0);
                         ui.collapsing("Setup Instructions", |ui| {
                             ui.label("1. Enable IOMMU in BIOS (Intel VT-d / AMD-Vi)");
@@ -4870,13 +5027,17 @@ impl NovaApp {
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("PCI: {} | Vendor: {} | Driver: {}",
-                                        device.pf_address, device.vendor, device.driver));
+                                    ui.label(format!(
+                                        "PCI: {} | Vendor: {} | Driver: {}",
+                                        device.pf_address, device.vendor, device.driver
+                                    ));
                                 });
 
                                 ui.horizontal(|ui| {
-                                    ui.label(format!("Max VFs: {} | Active VFs: {}",
-                                        device.max_vfs, device.active_vfs));
+                                    ui.label(format!(
+                                        "Max VFs: {} | Active VFs: {}",
+                                        device.max_vfs, device.active_vfs
+                                    ));
 
                                     if device.active_vfs > 0 {
                                         ui.colored_label(theme::STATUS_RUNNING, "● VFs Active");
@@ -4888,16 +5049,40 @@ impl NovaApp {
                                 ui.horizontal(|ui| {
                                     // Enable VFs button
                                     if device.active_vfs == 0 {
-                                        if self.themed_button(ui, "Enable VFs", ButtonRole::Start, true).clicked() {
+                                        if self
+                                            .themed_button(
+                                                ui,
+                                                "Enable VFs",
+                                                ButtonRole::Start,
+                                                true,
+                                            )
+                                            .clicked()
+                                        {
                                             self.enable_sriov_vfs(&device.pf_address, 4); // Default to 4 VFs
                                         }
                                     } else {
-                                        if self.themed_button(ui, "Disable VFs", ButtonRole::Stop, true).clicked() {
+                                        if self
+                                            .themed_button(
+                                                ui,
+                                                "Disable VFs",
+                                                ButtonRole::Stop,
+                                                true,
+                                            )
+                                            .clicked()
+                                        {
                                             self.disable_sriov_vfs(&device.pf_address);
                                         }
                                     }
 
-                                    if self.themed_button(ui, "View IOMMU Group", ButtonRole::Secondary, true).clicked() {
+                                    if self
+                                        .themed_button(
+                                            ui,
+                                            "View IOMMU Group",
+                                            ButtonRole::Secondary,
+                                            true,
+                                        )
+                                        .clicked()
+                                    {
                                         self.show_iommu_group(&device.pf_address);
                                     }
                                 });
@@ -4917,60 +5102,41 @@ impl NovaApp {
         self.log_console("Scanning for SR-IOV capable devices...");
         self.sriov_devices_cache.clear();
 
-        let pci_path = std::path::Path::new("/sys/bus/pci/devices");
-        if !pci_path.exists() {
-            self.log_console("PCI sysfs not available");
-            return;
-        }
+        // Discover devices through the SR-IOV manager (authoritative source for
+        // VF state, driver binding and capability detection).
+        let devices = {
+            let mut mgr = self.sriov_manager.lock().unwrap();
+            mgr.discover_sriov_devices()
+        };
 
-        if let Ok(entries) = std::fs::read_dir(pci_path) {
-            for entry in entries.flatten() {
-                let device_path = entry.path();
-                let address = entry.file_name().to_string_lossy().to_string();
-
-                // Check for SR-IOV capability
-                let sriov_totalvfs = device_path.join("sriov_totalvfs");
-                if sriov_totalvfs.exists() {
-                    if let Ok(max_vfs_str) = std::fs::read_to_string(&sriov_totalvfs) {
-                        if let Ok(max_vfs) = max_vfs_str.trim().parse::<u32>() {
-                            if max_vfs > 0 {
-                                // Get device info
-                                let vendor_id = std::fs::read_to_string(device_path.join("vendor"))
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default();
-                                let device_id = std::fs::read_to_string(device_path.join("device"))
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default();
-                                let active_vfs = std::fs::read_to_string(device_path.join("sriov_numvfs"))
-                                    .ok()
-                                    .and_then(|s| s.trim().parse().ok())
-                                    .unwrap_or(0);
-                                let driver = device_path.join("driver")
-                                    .read_link()
-                                    .ok()
-                                    .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
-                                    .unwrap_or_else(|| "none".to_string());
-
-                                let (vendor_name, device_name, device_type) =
-                                    self.lookup_pci_device(&vendor_id, &device_id);
-
-                                self.sriov_devices_cache.push(SriovDeviceInfo {
-                                    pf_address: address,
-                                    device_name,
-                                    vendor: vendor_name,
-                                    driver,
-                                    max_vfs,
-                                    active_vfs,
-                                    device_type,
-                                });
-                            }
-                        }
-                    }
-                }
+        let devices = match devices {
+            Ok(devices) => devices,
+            Err(e) => {
+                self.log_console(format!("SR-IOV scan failed: {}", e));
+                return;
             }
+        };
+
+        for device in devices {
+            // Enrich the manager's data with lspci-based naming for nicer labels.
+            let (vendor_name, device_name, device_type) =
+                self.lookup_pci_device(&device.vendor_id, &device.device_id);
+
+            self.sriov_devices_cache.push(SriovDeviceInfo {
+                pf_address: device.pf_address,
+                device_name,
+                vendor: vendor_name,
+                driver: device.driver.unwrap_or_else(|| "none".to_string()),
+                max_vfs: device.max_vfs,
+                active_vfs: device.current_vfs,
+                device_type,
+            });
         }
 
-        self.log_console(format!("Found {} SR-IOV capable devices", self.sriov_devices_cache.len()));
+        self.log_console(format!(
+            "Found {} SR-IOV capable devices",
+            self.sriov_devices_cache.len()
+        ));
     }
 
     fn lookup_pci_device(&self, vendor_id: &str, device_id: &str) -> (String, String, String) {
@@ -4980,7 +5146,14 @@ impl NovaApp {
         let (vendor_name, device_type) = match vendor {
             "10de" => ("NVIDIA", "GPU"),
             "1002" => ("AMD", "GPU"),
-            "8086" => ("Intel", if device.starts_with("15") { "NIC" } else { "Other" }),
+            "8086" => (
+                "Intel",
+                if device.starts_with("15") {
+                    "NIC"
+                } else {
+                    "Other"
+                },
+            ),
             "14e4" => ("Broadcom", "NIC"),
             "15b3" => ("Mellanox", "NIC"),
             "1924" => ("Solarflare", "NIC"),
@@ -4995,38 +5168,41 @@ impl NovaApp {
             .ok()
             .and_then(|o| {
                 if o.status.success() {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .next()
-                        .map(|l| l.split(':').last().unwrap_or("Unknown").trim().to_string())
+                    String::from_utf8_lossy(&o.stdout).lines().next().map(|l| {
+                        l.split(':')
+                            .next_back()
+                            .unwrap_or("Unknown")
+                            .trim()
+                            .to_string()
+                    })
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| format!("{} Device", vendor_name));
 
-        (vendor_name.to_string(), device_name, device_type.to_string())
+        (
+            vendor_name.to_string(),
+            device_name,
+            device_type.to_string(),
+        )
     }
 
     fn enable_sriov_vfs(&mut self, pf_address: &str, num_vfs: u32) {
         self.log_console(format!("Enabling {} VFs on {}...", num_vfs, pf_address));
 
-        let sysfs_path = format!("/sys/bus/pci/devices/{}/sriov_numvfs", pf_address);
+        let result = {
+            let mut mgr = self.sriov_manager.lock().unwrap();
+            mgr.enable_sriov(pf_address, num_vfs)
+        };
 
-        // First disable existing VFs
-        if let Err(e) = std::fs::write(&sysfs_path, "0") {
-            self.log_console(format!("Warning: Failed to reset VFs: {}", e));
-        }
-
-        // Enable new VFs
-        match std::fs::write(&sysfs_path, num_vfs.to_string()) {
+        match result {
             Ok(_) => {
                 self.log_console(format!("Enabled {} VFs on {}", num_vfs, pf_address));
-                std::thread::sleep(std::time::Duration::from_millis(500));
                 self.scan_sriov_devices();
             }
             Err(e) => {
-                self.log_console(format!("Failed to enable VFs: {}. Try running with sudo.", e));
+                self.log_console(format!("Failed to enable VFs: {}", e));
             }
         }
     }
@@ -5034,9 +5210,12 @@ impl NovaApp {
     fn disable_sriov_vfs(&mut self, pf_address: &str) {
         self.log_console(format!("Disabling VFs on {}...", pf_address));
 
-        let sysfs_path = format!("/sys/bus/pci/devices/{}/sriov_numvfs", pf_address);
+        let result = {
+            let mut mgr = self.sriov_manager.lock().unwrap();
+            mgr.disable_sriov(pf_address)
+        };
 
-        match std::fs::write(&sysfs_path, "0") {
+        match result {
             Ok(_) => {
                 self.log_console(format!("Disabled VFs on {}", pf_address));
                 self.scan_sriov_devices();
@@ -5051,7 +5230,8 @@ impl NovaApp {
         let iommu_link = format!("/sys/bus/pci/devices/{}/iommu_group", pf_address);
 
         if let Ok(target) = std::fs::read_link(&iommu_link) {
-            let group = target.file_name()
+            let group = target
+                .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             self.log_console(format!("Device {} is in IOMMU group {}", pf_address, group));
@@ -5077,7 +5257,7 @@ impl NovaApp {
         let mut open = true;
         egui::Window::new("Migrate Virtual Machine")
             .id(egui::Id::new("nova.migration"))
-            .default_size([450.0, 300.0])
+            .default_size([450.0, 350.0])
             .resizable(false)
             .collapsible(false)
             .open(&mut open)
@@ -5094,21 +5274,48 @@ impl NovaApp {
 
                 ui.add_space(8.0);
                 ui.label("Destination Host:");
-                // TODO: Add destination host input
-                ui.text_edit_singleline(&mut String::new());
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.migration_dest_host)
+                        .hint_text("e.g., user@192.168.1.100 or qemu+ssh://host/system")
+                        .desired_width(350.0),
+                );
+
+                ui.add_space(12.0);
+                ui.checkbox(
+                    &mut self.migration_offline,
+                    "Offline migration (stop VM first)",
+                );
+                ui.checkbox(
+                    &mut self.migration_copy_storage,
+                    "Copy storage to destination",
+                );
 
                 ui.add_space(8.0);
-                ui.checkbox(&mut false, "Offline migration (stop VM first)");
-                ui.checkbox(&mut false, "Copy storage");
+                ui.group(|ui| {
+                    ui.small("Note: Destination host must have:");
+                    ui.small("  • SSH access configured (key-based recommended)");
+                    ui.small("  • libvirt running with same network/storage access");
+                    if self.migration_copy_storage {
+                        ui.small("  • Sufficient disk space for VM images");
+                    }
+                });
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    let can_migrate = self.selected_instance.is_some();
-                    if self.themed_button(ui, "Start Migration", ButtonRole::Primary, can_migrate).clicked() {
-                        self.log_console("Starting VM migration...");
+                    let can_migrate = self.selected_instance.is_some()
+                        && !self.migration_dest_host.trim().is_empty();
+                    if self
+                        .themed_button(ui, "Start Migration", ButtonRole::Primary, can_migrate)
+                        .clicked()
+                    {
+                        self.start_vm_migration();
                         self.show_migration_dialog = false;
                     }
-                    if self.themed_button(ui, "Cancel", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.show_migration_dialog = false;
                     }
                 });
@@ -5117,6 +5324,88 @@ impl NovaApp {
         if !open {
             self.show_migration_dialog = false;
         }
+    }
+
+    fn start_vm_migration(&mut self) {
+        let Some(vm_name) = self.selected_instance.clone() else {
+            self.log_console("No VM selected for migration");
+            return;
+        };
+
+        let dest_host = self.migration_dest_host.trim().to_string();
+        if dest_host.is_empty() {
+            self.log_console("Destination host is required");
+            return;
+        }
+
+        let offline = self.migration_offline;
+        let copy_storage = self.migration_copy_storage;
+
+        self.log_console(format!(
+            "Starting {} migration of '{}' to '{}'{}",
+            if offline { "offline" } else { "live" },
+            vm_name,
+            dest_host,
+            if copy_storage {
+                " (with storage copy)"
+            } else {
+                ""
+            }
+        ));
+
+        // Build destination URI - support both simple host and full URI
+        let dest_uri = if dest_host.contains("://") {
+            dest_host.clone()
+        } else {
+            format!("qemu+ssh://{}/system", dest_host)
+        };
+
+        // Build virsh migrate command
+        let vm_name_clone = vm_name.clone();
+        let dest_uri_clone = dest_uri.clone();
+        self.runtime.spawn(async move {
+            let mut cmd = tokio::process::Command::new("virsh");
+            cmd.arg("migrate");
+
+            if !offline {
+                cmd.arg("--live");
+            }
+
+            cmd.arg("--verbose");
+
+            if copy_storage {
+                cmd.arg("--copy-storage-all");
+            }
+
+            cmd.arg("--persistent");
+            cmd.arg("--undefinesource");
+            cmd.arg(&vm_name_clone);
+            cmd.arg(&dest_uri_clone);
+
+            match cmd.output().await {
+                Ok(output) => {
+                    if output.status.success() {
+                        tracing::info!("Migration of '{}' completed successfully", vm_name_clone);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        tracing::error!("Migration of '{}' failed: {}", vm_name_clone, stderr);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start migration for '{}': {}", vm_name_clone, e);
+                }
+            }
+        });
+
+        self.log_console(format!(
+            "Migration initiated for '{}' -> check logs for progress",
+            vm_name
+        ));
+
+        // Reset form
+        self.migration_dest_host.clear();
+        self.migration_offline = false;
+        self.migration_copy_storage = false;
     }
 
     fn draw_preflight_dialog(&mut self, ctx: &egui::Context) {
@@ -5136,7 +5425,10 @@ impl NovaApp {
                 ui.separator();
                 ui.add_space(8.0);
 
-                if self.themed_button(ui, "Run Checks", ButtonRole::Primary, true).clicked() {
+                if self
+                    .themed_button(ui, "Run Checks", ButtonRole::Primary, true)
+                    .clicked()
+                {
                     self.run_preflight_checks();
                 }
 
@@ -5160,9 +5452,15 @@ impl NovaApp {
 
                     // Overall status
                     if result.is_ready() {
-                        ui.colored_label(theme::STATUS_RUNNING, "✓ System is ready for Nova workloads");
+                        ui.colored_label(
+                            theme::STATUS_RUNNING,
+                            "✓ System is ready for Nova workloads",
+                        );
                     } else {
-                        ui.colored_label(theme::STATUS_WARNING, format!("⚠ {} issues found", result.issues.len()));
+                        ui.colored_label(
+                            theme::STATUS_WARNING,
+                            format!("⚠ {} issues found", result.issues.len()),
+                        );
                     }
 
                     ui.add_space(8.0);
@@ -5175,7 +5473,11 @@ impl NovaApp {
                                     ui,
                                     module.name,
                                     module.loaded,
-                                    if module.loaded { "loaded" } else { "not loaded" }
+                                    if module.loaded {
+                                        "loaded"
+                                    } else {
+                                        "not loaded"
+                                    },
                                 );
                             }
                         });
@@ -5183,28 +5485,54 @@ impl NovaApp {
                         // Additional checks not in preflight module
                         ui.collapsing("Hardware Features", |ui| {
                             // IOMMU check
-                            let iommu_enabled = std::path::Path::new("/sys/kernel/iommu_groups").exists()
+                            let iommu_enabled = std::path::Path::new("/sys/kernel/iommu_groups")
+                                .exists()
                                 && std::fs::read_dir("/sys/kernel/iommu_groups")
                                     .map(|d| d.count() > 0)
                                     .unwrap_or(false);
-                            Self::preflight_item(ui, "IOMMU", iommu_enabled,
-                                if iommu_enabled { "IOMMU groups detected" } else { "No IOMMU groups (check BIOS)" });
+                            Self::preflight_item(
+                                ui,
+                                "IOMMU",
+                                iommu_enabled,
+                                if iommu_enabled {
+                                    "IOMMU groups detected"
+                                } else {
+                                    "No IOMMU groups (check BIOS)"
+                                },
+                            );
 
                             // Hugepages
                             let hugepages = std::fs::read_to_string("/proc/sys/vm/nr_hugepages")
                                 .ok()
                                 .and_then(|s| s.trim().parse::<u64>().ok())
                                 .unwrap_or(0);
-                            Self::preflight_item(ui, "Hugepages", hugepages > 0,
-                                &format!("{} pages configured", hugepages));
+                            Self::preflight_item(
+                                ui,
+                                "Hugepages",
+                                hugepages > 0,
+                                &format!("{} pages configured", hugepages),
+                            );
 
                             // Nested virtualization
-                            let nested = std::fs::read_to_string("/sys/module/kvm_intel/parameters/nested")
-                                .or_else(|_| std::fs::read_to_string("/sys/module/kvm_amd/parameters/nested"))
-                                .map(|s| s.trim() == "Y" || s.trim() == "1")
-                                .unwrap_or(false);
-                            Self::preflight_item(ui, "Nested Virt", nested,
-                                if nested { "enabled" } else { "disabled (optional)" });
+                            let nested =
+                                std::fs::read_to_string("/sys/module/kvm_intel/parameters/nested")
+                                    .or_else(|_| {
+                                        std::fs::read_to_string(
+                                            "/sys/module/kvm_amd/parameters/nested",
+                                        )
+                                    })
+                                    .map(|s| s.trim() == "Y" || s.trim() == "1")
+                                    .unwrap_or(false);
+                            Self::preflight_item(
+                                ui,
+                                "Nested Virt",
+                                nested,
+                                if nested {
+                                    "enabled"
+                                } else {
+                                    "disabled (optional)"
+                                },
+                            );
                         });
 
                         // Tools
@@ -5214,7 +5542,11 @@ impl NovaApp {
                                     ui,
                                     tool.name,
                                     tool.available,
-                                    if tool.available { "available" } else { "not found in PATH" }
+                                    if tool.available {
+                                        "available"
+                                    } else {
+                                        "not found in PATH"
+                                    },
                                 );
                             }
 
@@ -5224,16 +5556,28 @@ impl NovaApp {
                                 .output()
                                 .map(|o| o.status.success())
                                 .unwrap_or(false);
-                            Self::preflight_item(ui, "Looking Glass", looking_glass,
-                                if looking_glass { "client installed" } else { "not installed (optional)" });
+                            Self::preflight_item(
+                                ui,
+                                "Looking Glass",
+                                looking_glass,
+                                if looking_glass {
+                                    "client installed"
+                                } else {
+                                    "not installed (optional)"
+                                },
+                            );
 
                             let podman = std::process::Command::new("which")
                                 .arg("podman")
                                 .output()
                                 .map(|o| o.status.success())
                                 .unwrap_or(false);
-                            Self::preflight_item(ui, "Podman", podman,
-                                if podman { "available" } else { "not installed" });
+                            Self::preflight_item(
+                                ui,
+                                "Podman",
+                                podman,
+                                if podman { "available" } else { "not installed" },
+                            );
                         });
 
                         // Services
@@ -5243,16 +5587,32 @@ impl NovaApp {
                                 .output()
                                 .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
                                 .unwrap_or(false);
-                            Self::preflight_item(ui, "libvirtd", libvirtd,
-                                if libvirtd { "service running" } else { "not running" });
+                            Self::preflight_item(
+                                ui,
+                                "libvirtd",
+                                libvirtd,
+                                if libvirtd {
+                                    "service running"
+                                } else {
+                                    "not running"
+                                },
+                            );
 
                             let virtlogd = std::process::Command::new("systemctl")
                                 .args(["is-active", "virtlogd"])
                                 .output()
                                 .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
                                 .unwrap_or(false);
-                            Self::preflight_item(ui, "virtlogd", virtlogd,
-                                if virtlogd { "service running" } else { "not running" });
+                            Self::preflight_item(
+                                ui,
+                                "virtlogd",
+                                virtlogd,
+                                if virtlogd {
+                                    "service running"
+                                } else {
+                                    "not running"
+                                },
+                            );
                         });
 
                         // Issues
@@ -5327,8 +5687,12 @@ impl NovaApp {
                 ui.horizontal(|ui| {
                     ui.label("Prometheus endpoint:");
                     ui.monospace("http://localhost:9090/metrics");
-                    if self.themed_button(ui, "Copy", ButtonRole::Secondary, true).clicked() {
-                        ui.ctx().copy_text("http://localhost:9090/metrics".to_string());
+                    if self
+                        .themed_button(ui, "Copy", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
+                        ui.ctx()
+                            .copy_text("http://localhost:9090/metrics".to_string());
                     }
                 });
 
@@ -5391,12 +5755,18 @@ impl NovaApp {
 
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
-                    if self.themed_button(ui, "Generate Bundle", ButtonRole::Primary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Generate Bundle", ButtonRole::Primary, true)
+                        .clicked()
+                    {
                         self.log_console("Generating support bundle...");
                         self.log_console("Bundle saved to /tmp/nova-support-bundle.tar.gz");
                         self.show_support_dialog = false;
                     }
-                    if self.themed_button(ui, "Cancel", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Cancel", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.show_support_dialog = false;
                     }
                 });
@@ -5435,11 +5805,27 @@ impl NovaApp {
                 ui.add_space(4.0);
 
                 ui.horizontal(|ui| {
-                    if self.themed_button(ui, "Refresh Rules", ButtonRole::Primary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Refresh Rules", ButtonRole::Primary, true)
+                        .clicked()
+                    {
                         self.refresh_firewall_rules();
                     }
-                    if self.themed_button(ui, "Add Rule", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Add Rule", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.log_console("Rule creation dialog coming soon...");
+                    }
+                    if self
+                        .themed_button(ui, "Analyze", ButtonRole::Secondary, true)
+                        .on_hover_text(
+                            "Detect rule conflicts and surface optimization hints \
+                             via the firewall manager",
+                        )
+                        .clicked()
+                    {
+                        self.analyze_firewall();
                     }
                 });
 
@@ -5447,63 +5833,136 @@ impl NovaApp {
 
                 // Tabs for different tables/chains
                 ui.horizontal(|ui| {
-                    ui.selectable_label(true, "INPUT");
-                    ui.selectable_label(false, "OUTPUT");
-                    ui.selectable_label(false, "FORWARD");
-                    ui.selectable_label(false, "NAT");
+                    for chain in ["INPUT", "OUTPUT", "FORWARD", "NAT"] {
+                        let selected = self.firewall_chain_filter == chain;
+                        if ui.selectable_label(selected, chain).clicked() {
+                            self.firewall_chain_filter = chain.to_string();
+                        }
+                    }
                 });
 
                 ui.add_space(4.0);
 
-                egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
-                    if self.firewall_rules_cache.is_empty() {
-                        ui.label("No rules loaded. Click 'Refresh Rules' to scan.");
-                    } else {
-                        // Table header
-                        egui::Grid::new("firewall_rules_header")
-                            .num_columns(7)
-                            .spacing([8.0, 4.0])
-                            .striped(false)
-                            .show(ui, |ui| {
-                                ui.strong("Action");
-                                ui.strong("Protocol");
-                                ui.strong("Port");
-                                ui.strong("Source");
-                                ui.strong("Destination");
-                                ui.strong("Packets");
-                                ui.strong("Chain");
-                                ui.end_row();
-                            });
+                egui::ScrollArea::vertical()
+                    .max_height(400.0)
+                    .show(ui, |ui| {
+                        let filter = self.firewall_chain_filter.clone();
+                        let visible_rules: Vec<FirewallRuleInfo> = self
+                            .firewall_rules_cache
+                            .iter()
+                            .filter(|rule| Self::rule_matches_chain(rule, &filter))
+                            .cloned()
+                            .collect();
 
-                        ui.separator();
-
-                        // Rules
-                        egui::Grid::new("firewall_rules_grid")
-                            .num_columns(7)
-                            .spacing([8.0, 4.0])
-                            .striped(true)
-                            .show(ui, |ui| {
-                                for rule in &self.firewall_rules_cache.clone() {
-                                    // Action with color
-                                    let action_color = match rule.action.as_str() {
-                                        "ACCEPT" => theme::STATUS_RUNNING,
-                                        "DROP" => theme::STATUS_STOPPED,
-                                        "REJECT" => theme::STATUS_WARNING,
-                                        _ => theme::STATUS_UNKNOWN,
-                                    };
-                                    ui.colored_label(action_color, &rule.action);
-
-                                    ui.label(&rule.protocol);
-                                    ui.label(if rule.port.is_empty() { "any" } else { &rule.port });
-                                    ui.label(if rule.source.is_empty() { "any" } else { &rule.source });
-                                    ui.label(if rule.destination.is_empty() { "any" } else { &rule.destination });
-                                    ui.label(format!("{}", rule.packets));
-                                    ui.label(&rule.chain);
+                        if visible_rules.is_empty() {
+                            if self.firewall_rules_cache.is_empty() {
+                                ui.label("No rules loaded. Click 'Refresh Rules' to scan.");
+                            } else {
+                                ui.label(format!("No rules in the {} chain.", filter));
+                            }
+                        } else {
+                            // Table header
+                            egui::Grid::new("firewall_rules_header")
+                                .num_columns(10)
+                                .spacing([8.0, 4.0])
+                                .striped(false)
+                                .show(ui, |ui| {
+                                    ui.strong("Action");
+                                    ui.strong("Protocol");
+                                    ui.strong("Port");
+                                    ui.strong("Source");
+                                    ui.strong("Destination");
+                                    ui.strong("Packets");
+                                    ui.strong("Bytes");
+                                    ui.strong("Chain");
+                                    ui.strong("Table");
+                                    ui.strong("Comment");
                                     ui.end_row();
-                                }
-                            });
-                    }
-                });
+                                });
+
+                            ui.separator();
+
+                            // Rules
+                            egui::Grid::new("firewall_rules_grid")
+                                .num_columns(10)
+                                .spacing([8.0, 4.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for rule in &visible_rules {
+                                        // Action with color
+                                        let action_color = match rule.action.as_str() {
+                                            "ACCEPT" => theme::STATUS_RUNNING,
+                                            "DROP" => theme::STATUS_STOPPED,
+                                            "REJECT" => theme::STATUS_WARNING,
+                                            _ => theme::STATUS_UNKNOWN,
+                                        };
+                                        ui.colored_label(action_color, &rule.action);
+
+                                        ui.label(&rule.protocol);
+                                        ui.label(if rule.port.is_empty() {
+                                            "any"
+                                        } else {
+                                            &rule.port
+                                        });
+                                        ui.label(if rule.source.is_empty() {
+                                            "any"
+                                        } else {
+                                            &rule.source
+                                        });
+                                        ui.label(if rule.destination.is_empty() {
+                                            "any"
+                                        } else {
+                                            &rule.destination
+                                        });
+                                        ui.label(format!("{}", rule.packets));
+                                        ui.label(Self::format_bytes(rule.bytes));
+                                        ui.label(&rule.chain);
+                                        ui.label(if rule.table.is_empty() {
+                                            "-"
+                                        } else {
+                                            &rule.table
+                                        });
+                                        ui.label(if rule.comment.is_empty() {
+                                            "-"
+                                        } else {
+                                            &rule.comment
+                                        });
+                                        ui.end_row();
+                                    }
+                                });
+                        }
+                    });
+
+                // Analysis results from the firewall manager (conflicts + hints).
+                if self.firewall_analyzed {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    egui::CollapsingHeader::new(format!(
+                        "Analysis: {} conflict(s), {} hint(s)",
+                        self.firewall_conflicts.len(),
+                        self.firewall_optimizations.len()
+                    ))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        if self.firewall_conflicts.is_empty() {
+                            ui.colored_label(theme::STATUS_RUNNING, "No rule conflicts detected.");
+                        } else {
+                            ui.strong("Conflicts:");
+                            for conflict in &self.firewall_conflicts {
+                                ui.colored_label(theme::STATUS_WARNING, conflict);
+                            }
+                        }
+                        if self.firewall_optimizations.is_empty() {
+                            ui.label("No optimization hints.");
+                        } else {
+                            ui.add_space(4.0);
+                            ui.strong("Optimization hints:");
+                            for hint in &self.firewall_optimizations {
+                                ui.label(hint);
+                            }
+                        }
+                    });
+                }
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -5511,23 +5970,41 @@ impl NovaApp {
                 // Quick actions
                 ui.horizontal(|ui| {
                     ui.label("Quick Actions:");
-                    if self.themed_button(ui, "Allow SSH (22)", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Allow SSH (22)", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.add_firewall_rule("ACCEPT", "tcp", "22", "", "");
                     }
-                    if self.themed_button(ui, "Allow HTTP (80)", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Allow HTTP (80)", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.add_firewall_rule("ACCEPT", "tcp", "80", "", "");
                     }
-                    if self.themed_button(ui, "Allow HTTPS (443)", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Allow HTTPS (443)", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.add_firewall_rule("ACCEPT", "tcp", "443", "", "");
                     }
-                    if self.themed_button(ui, "Allow libvirt (16509)", ButtonRole::Secondary, true).clicked() {
+                    if self
+                        .themed_button(ui, "Allow libvirt (16509)", ButtonRole::Secondary, true)
+                        .clicked()
+                    {
                         self.add_firewall_rule("ACCEPT", "tcp", "16509", "", "");
                     }
                 });
 
                 ui.add_space(4.0);
-                ui.small(format!("Managing firewall via {}",
-                    if self.firewall_backend.is_empty() { "auto-detect" } else { &self.firewall_backend }));
+                ui.small(format!(
+                    "Managing firewall via {}",
+                    if self.firewall_backend.is_empty() {
+                        "auto-detect"
+                    } else {
+                        &self.firewall_backend
+                    }
+                ));
             });
     }
 
@@ -5537,7 +6014,10 @@ impl NovaApp {
 
         // Detect backend
         self.firewall_backend = self.detect_firewall_backend();
-        self.log_console(format!("Detected firewall backend: {}", self.firewall_backend));
+        self.log_console(format!(
+            "Detected firewall backend: {}",
+            self.firewall_backend
+        ));
 
         match self.firewall_backend.as_str() {
             "nftables" => self.load_nftables_rules(),
@@ -5548,7 +6028,56 @@ impl NovaApp {
             }
         }
 
-        self.log_console(format!("Loaded {} firewall rules", self.firewall_rules_cache.len()));
+        self.log_console(format!(
+            "Loaded {} firewall rules",
+            self.firewall_rules_cache.len()
+        ));
+    }
+
+    /// Run the firewall manager's conflict and optimization analysis. This
+    /// complements the inline rule display: the manager owns the conflict
+    /// detection and optimization heuristics, so the GUI surfaces those results
+    /// rather than duplicating the logic.
+    fn analyze_firewall(&mut self) {
+        self.log_console("Analyzing firewall rules for conflicts...");
+        let manager = Arc::clone(&self.firewall_manager);
+        // Lock held across the await: sound because `block_on` runs the future
+        // synchronously on the UI thread; the guard is released before it
+        // returns and no other thread contends for it.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.runtime.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.load_current_rules().await?;
+            mgr.analyze_rule_conflicts().await?;
+            let conflicts: Vec<String> = mgr
+                .get_rule_conflicts()
+                .iter()
+                .map(|c| {
+                    format!(
+                        "[{:?}/{:?}] {} ({} vs {})",
+                        c.severity, c.conflict_type, c.description, c.rule1_id, c.rule2_id
+                    )
+                })
+                .collect();
+            let optimizations = mgr.optimize_rules().await?;
+            Ok::<(Vec<String>, Vec<String>), nova::NovaError>((conflicts, optimizations))
+        });
+
+        match result {
+            Ok((conflicts, optimizations)) => {
+                self.log_console(format!(
+                    "Firewall analysis complete: {} conflict(s), {} hint(s)",
+                    conflicts.len(),
+                    optimizations.len()
+                ));
+                self.firewall_conflicts = conflicts;
+                self.firewall_optimizations = optimizations;
+                self.firewall_analyzed = true;
+            }
+            Err(err) => {
+                self.log_console(format!("Firewall analysis failed: {:?}", err));
+            }
+        }
     }
 
     fn detect_firewall_backend(&self) -> String {
@@ -5637,14 +6166,22 @@ impl NovaApp {
 
                 // Extract port if present
                 let port = if let Some(pos) = line.find("dport") {
-                    line[pos..].split_whitespace().nth(1).unwrap_or("").to_string()
+                    line[pos..]
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string()
                 } else {
                     String::new()
                 };
 
                 // Extract source if present
                 let source = if let Some(pos) = line.find("saddr") {
-                    line[pos..].split_whitespace().nth(1).unwrap_or("").to_string()
+                    line[pos..]
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .to_string()
                 } else {
                     String::new()
                 };
@@ -5652,11 +6189,15 @@ impl NovaApp {
                 // Extract packets/bytes counter if present
                 let (packets, bytes) = if let Some(pos) = line.find("counter") {
                     let counter_part = &line[pos..];
-                    let p = counter_part.split("packets").nth(1)
+                    let p = counter_part
+                        .split("packets")
+                        .nth(1)
                         .and_then(|s| s.split_whitespace().next())
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    let b = counter_part.split("bytes").nth(1)
+                    let b = counter_part
+                        .split("bytes")
+                        .nth(1)
                         .and_then(|s| s.split_whitespace().next())
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
@@ -5695,39 +6236,40 @@ impl NovaApp {
             .args(["-t", table, "-L", chain, "-n", "-v", "--line-numbers"])
             .output();
 
-        if let Ok(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines().skip(2) {
-                    // Skip header lines
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 8 {
-                        let packets = parts[1].parse().unwrap_or(0);
-                        let bytes = parts[2].parse().unwrap_or(0);
-                        let action = parts[3].to_string();
-                        let protocol = parts[4].to_string();
-                        let source = parts[8].to_string();
-                        let destination = parts[9].to_string();
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines().skip(2) {
+                // Skip header lines
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 8 {
+                    let packets = parts[1].parse().unwrap_or(0);
+                    let bytes = parts[2].parse().unwrap_or(0);
+                    let action = parts[3].to_string();
+                    let protocol = parts[4].to_string();
+                    let source = parts[8].to_string();
+                    let destination = parts[9].to_string();
 
-                        // Extract port from remaining parts
-                        let port = parts.iter()
-                            .find(|p| p.starts_with("dpt:"))
-                            .map(|p| p.trim_start_matches("dpt:").to_string())
-                            .unwrap_or_default();
+                    // Extract port from remaining parts
+                    let port = parts
+                        .iter()
+                        .find(|p| p.starts_with("dpt:"))
+                        .map(|p| p.trim_start_matches("dpt:").to_string())
+                        .unwrap_or_default();
 
-                        self.firewall_rules_cache.push(FirewallRuleInfo {
-                            chain: chain.to_string(),
-                            table: table.to_string(),
-                            action,
-                            protocol,
-                            port,
-                            source,
-                            destination,
-                            comment: String::new(),
-                            packets,
-                            bytes,
-                        });
-                    }
+                    self.firewall_rules_cache.push(FirewallRuleInfo {
+                        chain: chain.to_string(),
+                        table: table.to_string(),
+                        action,
+                        protocol,
+                        port,
+                        source,
+                        destination,
+                        comment: String::new(),
+                        packets,
+                        bytes,
+                    });
                 }
             }
         }
@@ -5739,78 +6281,102 @@ impl NovaApp {
             .arg("--get-active-zones")
             .output();
 
-        if let Ok(output) = zone_output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let zone = stdout.lines().next().unwrap_or("public");
+        if let Ok(output) = zone_output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let zone = stdout.lines().next().unwrap_or("public");
 
-                // Get services in zone
-                let services_output = std::process::Command::new("firewall-cmd")
-                    .args(["--zone", zone, "--list-services"])
-                    .output();
+            // Get services in zone
+            let services_output = std::process::Command::new("firewall-cmd")
+                .args(["--zone", zone, "--list-services"])
+                .output();
 
-                if let Ok(output) = services_output {
-                    if output.status.success() {
-                        let services = String::from_utf8_lossy(&output.stdout);
-                        for service in services.split_whitespace() {
-                            self.firewall_rules_cache.push(FirewallRuleInfo {
-                                chain: "INPUT".to_string(),
-                                table: zone.to_string(),
-                                action: "ACCEPT".to_string(),
-                                protocol: "tcp".to_string(),
-                                port: service.to_string(),
-                                source: String::new(),
-                                destination: String::new(),
-                                comment: format!("firewalld service: {}", service),
-                                packets: 0,
-                                bytes: 0,
-                            });
-                        }
-                    }
+            if let Ok(output) = services_output
+                && output.status.success()
+            {
+                let services = String::from_utf8_lossy(&output.stdout);
+                for service in services.split_whitespace() {
+                    self.firewall_rules_cache.push(FirewallRuleInfo {
+                        chain: "INPUT".to_string(),
+                        table: zone.to_string(),
+                        action: "ACCEPT".to_string(),
+                        protocol: "tcp".to_string(),
+                        port: service.to_string(),
+                        source: String::new(),
+                        destination: String::new(),
+                        comment: format!("firewalld service: {}", service),
+                        packets: 0,
+                        bytes: 0,
+                    });
                 }
+            }
 
-                // Get ports in zone
-                let ports_output = std::process::Command::new("firewall-cmd")
-                    .args(["--zone", zone, "--list-ports"])
-                    .output();
+            // Get ports in zone
+            let ports_output = std::process::Command::new("firewall-cmd")
+                .args(["--zone", zone, "--list-ports"])
+                .output();
 
-                if let Ok(output) = ports_output {
-                    if output.status.success() {
-                        let ports = String::from_utf8_lossy(&output.stdout);
-                        for port_proto in ports.split_whitespace() {
-                            let parts: Vec<&str> = port_proto.split('/').collect();
-                            if parts.len() == 2 {
-                                self.firewall_rules_cache.push(FirewallRuleInfo {
-                                    chain: "INPUT".to_string(),
-                                    table: zone.to_string(),
-                                    action: "ACCEPT".to_string(),
-                                    protocol: parts[1].to_string(),
-                                    port: parts[0].to_string(),
-                                    source: String::new(),
-                                    destination: String::new(),
-                                    comment: String::new(),
-                                    packets: 0,
-                                    bytes: 0,
-                                });
-                            }
-                        }
+            if let Ok(output) = ports_output
+                && output.status.success()
+            {
+                let ports = String::from_utf8_lossy(&output.stdout);
+                for port_proto in ports.split_whitespace() {
+                    let parts: Vec<&str> = port_proto.split('/').collect();
+                    if parts.len() == 2 {
+                        self.firewall_rules_cache.push(FirewallRuleInfo {
+                            chain: "INPUT".to_string(),
+                            table: zone.to_string(),
+                            action: "ACCEPT".to_string(),
+                            protocol: parts[1].to_string(),
+                            port: parts[0].to_string(),
+                            source: String::new(),
+                            destination: String::new(),
+                            comment: String::new(),
+                            packets: 0,
+                            bytes: 0,
+                        });
                     }
                 }
             }
         }
     }
 
-    fn add_firewall_rule(&mut self, action: &str, protocol: &str, port: &str, source: &str, dest: &str) {
-        self.log_console(format!("Adding rule: {} {} port {}", action, protocol, port));
+    /// Returns true when a rule belongs to the chain/table selected in the
+    /// firewall tab bar. The NAT tab matches on table name; the INPUT/OUTPUT/
+    /// FORWARD tabs match on the rule's chain.
+    fn rule_matches_chain(rule: &FirewallRuleInfo, filter: &str) -> bool {
+        if filter.eq_ignore_ascii_case("NAT") {
+            rule.table.to_ascii_lowercase().contains("nat")
+        } else {
+            rule.chain.eq_ignore_ascii_case(filter)
+        }
+    }
+
+    fn add_firewall_rule(
+        &mut self,
+        action: &str,
+        protocol: &str,
+        port: &str,
+        source: &str,
+        dest: &str,
+    ) {
+        self.log_console(format!(
+            "Adding rule: {} {} port {}",
+            action, protocol, port
+        ));
 
         let result = match self.firewall_backend.as_str() {
             "nftables" => {
                 let chain = "input";
-                let rule = if source.is_empty() {
-                    format!("{} dport {} accept", protocol, port)
-                } else {
-                    format!("ip saddr {} {} dport {} accept", source, protocol, port)
-                };
+                let mut rule = String::new();
+                if !source.is_empty() {
+                    rule.push_str(&format!("ip saddr {} ", source));
+                }
+                if !dest.is_empty() {
+                    rule.push_str(&format!("ip daddr {} ", dest));
+                }
+                rule.push_str(&format!("{} dport {} accept", protocol, port));
                 std::process::Command::new("nft")
                     .args(["add", "rule", "inet", "filter", chain, &rule])
                     .output()
@@ -5820,16 +6386,15 @@ impl NovaApp {
                 if !source.is_empty() {
                     args.extend(["-s", source]);
                 }
+                if !dest.is_empty() {
+                    args.extend(["-d", dest]);
+                }
                 args.extend(["-j", action]);
-                std::process::Command::new("iptables")
-                    .args(&args)
-                    .output()
+                std::process::Command::new("iptables").args(&args).output()
             }
-            "firewalld" => {
-                std::process::Command::new("firewall-cmd")
-                    .args(["--add-port", &format!("{}/{}", port, protocol)])
-                    .output()
-            }
+            "firewalld" => std::process::Command::new("firewall-cmd")
+                .args(["--add-port", &format!("{}/{}", port, protocol)])
+                .output(),
             _ => {
                 self.log_console("No firewall backend available");
                 return;
@@ -5839,7 +6404,7 @@ impl NovaApp {
         match result {
             Ok(output) => {
                 if output.status.success() {
-                    self.log_console(format!("Rule added successfully"));
+                    self.log_console("Rule added successfully".to_string());
                     self.refresh_firewall_rules();
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -5892,7 +6457,7 @@ impl NovaApp {
         }
 
         egui::ScrollArea::vertical()
-            .id_source("nova.instance_table")
+            .id_salt("nova.instance_table")
             .show(ui, |ui| {
                 egui::Grid::new("instance_grid")
                     .striped(true)
@@ -5959,10 +6524,11 @@ impl NovaApp {
 }
 
 impl eframe::App for NovaApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        theme::apply_theme(ctx, self.theme);
-        self.ensure_font_definitions(ctx);
-        self.apply_text_style_overrides(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        theme::apply_theme(&ctx, self.theme);
+        self.ensure_font_definitions(&ctx);
+        self.apply_text_style_overrides(&ctx);
 
         self.refresh_instances(false);
         self.refresh_network_summary(false);
@@ -5993,25 +6559,25 @@ impl eframe::App for NovaApp {
             self.open_preferences();
         }
 
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New VM...").clicked() {
                         self.show_new_vm_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("New Container...").clicked() {
                         self.show_new_container_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Import...").clicked() {
                         self.log_console("Import functionality coming soon");
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Export...").clicked() {
                         self.log_console("Export functionality coming soon");
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
@@ -6025,21 +6591,21 @@ impl eframe::App for NovaApp {
                         .clicked()
                     {
                         self.handle_action(InstanceAction::Start);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .add_enabled(can_stop, egui::Button::new("Stop"))
                         .clicked()
                     {
                         self.handle_action(InstanceAction::Stop);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .add_enabled(can_restart, egui::Button::new("Restart"))
                         .clicked()
                     {
                         self.handle_action(InstanceAction::Restart);
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -6059,27 +6625,27 @@ impl eframe::App for NovaApp {
                     ui.menu_button("Managers", |ui| {
                         if ui.button("GPU Passthrough").clicked() {
                             self.open_gpu_manager();
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Network").clicked() {
                             self.show_network_manager = !self.show_network_manager;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("USB Passthrough").clicked() {
                             self.show_usb_manager = !self.show_usb_manager;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Storage Pools").clicked() {
                             self.show_storage_manager = !self.show_storage_manager;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("SR-IOV").clicked() {
                             self.show_sriov_manager = !self.show_sriov_manager;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Firewall").clicked() {
                             self.show_firewall_manager = !self.show_firewall_manager;
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                     ui.separator();
@@ -6091,27 +6657,27 @@ impl eframe::App for NovaApp {
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Preflight Check").clicked() {
                         self.show_preflight_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Metrics Dashboard").clicked() {
                         self.show_metrics_panel = !self.show_metrics_panel;
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Support Bundle...").clicked() {
                         self.show_support_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Migrate VM...").clicked() {
                         self.show_migration_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
                 ui.menu_button("Help", |ui| {
                     if ui.button("About Nova").clicked() {
                         self.show_about_dialog = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
 
@@ -6128,25 +6694,25 @@ impl eframe::App for NovaApp {
             });
         });
 
-        self.draw_header(ctx);
-        self.draw_navigation_panel(ctx, &filter);
+        self.draw_header(ui);
+        self.draw_navigation_panel(ui, &filter);
 
         if self.show_insights {
-            egui::SidePanel::right("insights")
-                .default_width(320.0)
-                .min_width(260.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("insights")
+                .default_size(320.0)
+                .min_size(260.0)
+                .show_inside(ui, |ui| {
                     self.draw_insights_panel(ui);
                 });
         }
 
         if self.show_console {
-            self.draw_event_log_panel(ctx);
+            self.draw_event_log_panel(ui);
         }
 
         let selected_instance = self.selected_instance_owned();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.add_space(8.0);
             self.draw_action_toolbar(ui, can_start, can_stop, can_restart);
 
@@ -6181,26 +6747,26 @@ impl eframe::App for NovaApp {
             });
         });
 
-        self.draw_preferences_window(ctx);
-        self.draw_container_logs_window(ctx);
-        self.draw_action_confirmation(ctx);
-        self.draw_gpu_window(ctx);
-        self.draw_network_manager(ctx);
+        self.draw_preferences_window(&ctx);
+        self.draw_container_logs_window(&ctx);
+        self.draw_action_confirmation(&ctx);
+        self.draw_gpu_window(&ctx);
+        self.draw_network_manager(&ctx);
 
         // Dialogs
-        self.draw_new_vm_dialog(ctx);
-        self.draw_new_container_dialog(ctx);
-        self.draw_about_dialog(ctx);
-        self.draw_migration_dialog(ctx);
-        self.draw_preflight_dialog(ctx);
-        self.draw_support_dialog(ctx);
+        self.draw_new_vm_dialog(&ctx);
+        self.draw_new_container_dialog(&ctx);
+        self.draw_about_dialog(&ctx);
+        self.draw_migration_dialog(&ctx);
+        self.draw_preflight_dialog(&ctx);
+        self.draw_support_dialog(&ctx);
 
         // Manager panels
-        self.draw_usb_manager(ctx);
-        self.draw_storage_manager(ctx);
-        self.draw_sriov_manager(ctx);
-        self.draw_metrics_panel(ctx);
-        self.draw_firewall_manager(ctx);
+        self.draw_usb_manager(&ctx);
+        self.draw_storage_manager(&ctx);
+        self.draw_sriov_manager(&ctx);
+        self.draw_metrics_panel(&ctx);
+        self.draw_firewall_manager(&ctx);
 
         ctx.request_repaint_after(self.refresh_interval.min(self.network_refresh_interval));
     }

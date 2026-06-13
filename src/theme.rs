@@ -137,17 +137,12 @@ pub const DRACULA_RED: Color32 = Color32::from_rgb(255, 85, 85); // #ff5555
 
 // ===== THEME VARIANT ENUM =====
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TokyoNightVariant {
-    Night, // Default - Deep blue
+    Night, // Deep blue
+    #[default]
     Storm, // Lighter grey-blue
     Moon,  // Softest purple-blue
-}
-
-impl Default for TokyoNightVariant {
-    fn default() -> Self {
-        TokyoNightVariant::Storm
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,7 +258,7 @@ pub fn configure_tokyo_night_theme(ctx: &egui::Context, variant: TokyoNightVaria
 }
 
 fn configure_tokyo_night_night(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     // Backgrounds
@@ -304,7 +299,7 @@ fn configure_tokyo_night_night(ctx: &egui::Context) {
 }
 
 fn configure_tokyo_night_storm(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     // Backgrounds
@@ -799,7 +794,7 @@ pub fn themed_button_with_options(
     options: ButtonOptions,
 ) -> egui::Response {
     let palette = button_palette(theme, role);
-    let rounding = egui::Rounding::same(6.0);
+    let rounding = egui::CornerRadius::same(6);
 
     let (fill, hover, stroke, text) = if enabled {
         (palette.fill, palette.hover, palette.stroke, palette.text)
@@ -818,22 +813,22 @@ pub fn themed_button_with_options(
         visuals.widgets.inactive.bg_fill = fill;
         visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, stroke);
         visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
-        visuals.widgets.inactive.rounding = rounding;
+        visuals.widgets.inactive.corner_radius = rounding;
 
         visuals.widgets.hovered.bg_fill = hover;
         visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, stroke);
         visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text);
-        visuals.widgets.hovered.rounding = rounding;
+        visuals.widgets.hovered.corner_radius = rounding;
 
         visuals.widgets.active.bg_fill = hover;
         visuals.widgets.active.bg_stroke = egui::Stroke::new(1.5, stroke);
         visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, text);
-        visuals.widgets.active.rounding = rounding;
+        visuals.widgets.active.corner_radius = rounding;
 
         let button = egui::Button::new(egui::RichText::new(label).color(text))
             .min_size(egui::vec2(options.min_width, options.min_height))
             .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(rounding)
+            .corner_radius(rounding)
             .fill(fill);
 
         if enabled {
@@ -846,7 +841,7 @@ pub fn themed_button_with_options(
 }
 
 fn configure_tokyo_night_moon(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     // Backgrounds
@@ -887,7 +882,7 @@ fn configure_tokyo_night_moon(ctx: &egui::Context) {
 }
 
 pub fn configure_catppuccin_theme(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     visuals.window_fill = CAT_BG;
@@ -920,43 +915,8 @@ pub fn configure_catppuccin_theme(ctx: &egui::Context) {
     apply_modern_theme_style(&mut visuals, &mut style, ctx);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn intent_spec_generates_expected_labels() {
-        let create_spec = intent_spec(ButtonIntent::Create);
-        assert_eq!(
-            create_spec.label(Some("Virtual Switch")),
-            "➕ Create Virtual Switch"
-        );
-        assert_eq!(
-            create_spec.tooltip(Some("Virtual Switch")),
-            "Create new Virtual Switch"
-        );
-
-        let delete_spec = intent_spec(ButtonIntent::Delete);
-        assert_eq!(delete_spec.label(None), "🗑️ Delete");
-        assert_eq!(
-            delete_spec.tooltip(Some("Network")),
-            "Permanently remove Network"
-        );
-
-        let confirm_spec = intent_spec(ButtonIntent::ConfirmDelete);
-        assert_eq!(
-            confirm_spec.label(Some("Networks")),
-            "⚠ Confirm delete Networks"
-        );
-        assert_eq!(
-            confirm_spec.tooltip(Some("Networks")),
-            "Confirm deletion for Networks"
-        );
-    }
-}
-
 pub fn configure_dracula_theme(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     visuals.window_fill = DRACULA_BG;
@@ -996,18 +956,22 @@ fn apply_modern_theme_style(
 ) {
     // Shadows for depth
     visuals.popup_shadow = egui::epaint::Shadow {
-        extrusion: 12.0,
+        offset: [0, 6],
+        blur: 12,
+        spread: 0,
         color: Color32::from_black_alpha(200),
     };
 
     visuals.window_shadow = egui::epaint::Shadow {
-        extrusion: 16.0,
+        offset: [0, 8],
+        blur: 16,
+        spread: 0,
         color: Color32::from_black_alpha(160),
     };
 
     // Modern rounded corners
-    visuals.window_rounding = egui::Rounding::same(8.0);
-    visuals.menu_rounding = egui::Rounding::same(6.0);
+    visuals.window_corner_radius = egui::CornerRadius::same(8);
+    visuals.menu_corner_radius = egui::CornerRadius::same(6);
 
     // Resize and interaction
     visuals.resize_corner_size = 12.0;
@@ -1021,15 +985,15 @@ fn apply_modern_theme_style(
     // Spacing for modern, airy feel
     style.spacing.item_spacing = egui::vec2(10.0, 8.0);
     style.spacing.button_padding = egui::vec2(16.0, 8.0);
-    style.spacing.menu_margin = egui::Margin::same(10.0);
+    style.spacing.menu_margin = egui::Margin::same(10);
     style.spacing.indent = 24.0;
-    style.spacing.window_margin = egui::Margin::same(12.0);
+    style.spacing.window_margin = egui::Margin::same(12);
 
     // Interaction
     style.interaction.resize_grab_radius_side = 6.0;
     style.interaction.resize_grab_radius_corner = 12.0;
 
-    ctx.set_style(style.clone());
+    ctx.set_global_style(style.clone());
 }
 
 // ===== STATUS COLOR HELPERS =====
@@ -1169,7 +1133,7 @@ pub const GRAPH_DISK: Color32 = MO_GRAPH_DISK;
 pub const GRAPH_NETWORK: Color32 = MO_GRAPH_NETWORK;
 
 pub fn configure_ocean_theme(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut visuals = egui::Visuals::dark();
 
     visuals.window_fill = MO_BG_MAIN;
@@ -1200,12 +1164,16 @@ pub fn configure_ocean_theme(ctx: &egui::Context) {
     visuals.selection.stroke = egui::Stroke::new(1.0, MO_ACTION_PRIMARY);
 
     visuals.popup_shadow = egui::epaint::Shadow {
-        extrusion: 8.0,
+        offset: [0, 4],
+        blur: 8,
+        spread: 0,
         color: Color32::from_black_alpha(180),
     };
 
     visuals.window_shadow = egui::epaint::Shadow {
-        extrusion: 12.0,
+        offset: [0, 6],
+        blur: 12,
+        spread: 0,
         color: Color32::from_black_alpha(140),
     };
 
@@ -1216,13 +1184,13 @@ pub fn configure_ocean_theme(ctx: &egui::Context) {
 
     style.spacing.item_spacing = egui::vec2(8.0, 8.0);
     style.spacing.button_padding = egui::vec2(14.0, 8.0);
-    style.spacing.menu_margin = egui::Margin::same(8.0);
+    style.spacing.menu_margin = egui::Margin::same(8);
     style.spacing.indent = 20.0;
 
     style.interaction.resize_grab_radius_side = 5.0;
     style.interaction.resize_grab_radius_corner = 10.0;
 
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 pub fn get_status_color_ocean(status: &crate::instance::InstanceStatus) -> Color32 {
@@ -1233,5 +1201,40 @@ pub fn get_status_color_ocean(status: &crate::instance::InstanceStatus) -> Color
         InstanceStatus::Starting | InstanceStatus::Stopping => MO_STATUS_WARNING,
         InstanceStatus::Error => MO_STATUS_STOPPED,
         InstanceStatus::Suspended => MO_STATUS_SUSPENDED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intent_spec_generates_expected_labels() {
+        let create_spec = intent_spec(ButtonIntent::Create);
+        assert_eq!(
+            create_spec.label(Some("Virtual Switch")),
+            "➕ Create Virtual Switch"
+        );
+        assert_eq!(
+            create_spec.tooltip(Some("Virtual Switch")),
+            "Create new Virtual Switch"
+        );
+
+        let delete_spec = intent_spec(ButtonIntent::Delete);
+        assert_eq!(delete_spec.label(None), "🗑️ Delete");
+        assert_eq!(
+            delete_spec.tooltip(Some("Network")),
+            "Permanently remove Network"
+        );
+
+        let confirm_spec = intent_spec(ButtonIntent::ConfirmDelete);
+        assert_eq!(
+            confirm_spec.label(Some("Networks")),
+            "⚠ Confirm delete Networks"
+        );
+        assert_eq!(
+            confirm_spec.tooltip(Some("Networks")),
+            "Confirm deletion for Networks"
+        );
     }
 }

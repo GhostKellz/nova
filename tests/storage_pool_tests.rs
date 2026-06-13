@@ -179,7 +179,7 @@ async fn test_volume_creation() {
 #[test]
 fn test_pool_type_variants() {
     // Test all pool type variants
-    let types = vec![
+    let types = [
         PoolType::Directory,
         PoolType::Btrfs,
         PoolType::Zfs,
@@ -194,7 +194,7 @@ fn test_pool_type_variants() {
 
 #[test]
 fn test_pool_state_variants() {
-    let states = vec![
+    let states = [
         PoolState::Active,
         PoolState::Inactive,
         PoolState::Building,
@@ -211,7 +211,7 @@ fn test_pool_state_variants() {
 
 #[test]
 fn test_volume_format_variants() {
-    let formats = vec![
+    let formats = [
         VolumeFormat::Raw,
         VolumeFormat::Qcow2,
         VolumeFormat::Qed,
@@ -224,7 +224,7 @@ fn test_volume_format_variants() {
 
 #[test]
 fn test_btrfs_compression_options() {
-    let compressions = vec![
+    let compressions = [
         BtrfsCompression::None,
         BtrfsCompression::Zlib,
         BtrfsCompression::Lzo,

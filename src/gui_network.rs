@@ -1,6 +1,10 @@
 use crate::arch_integration::ArchNetworkManager;
-use crate::libvirt::{LibvirtManager, LibvirtNetwork};
-use crate::monitoring::{self, BandwidthUsage, NetworkMonitor, NetworkTopology};
+use crate::libvirt::{
+    BridgeConfig, DhcpRange, ForwardMode, IpConfig, LibvirtManager, LibvirtNetwork,
+};
+use crate::monitoring::{
+    self, BandwidthUsage, NetworkMonitor, NetworkTopology, PacketCaptureConfig,
+};
 use crate::network::{NetworkInterface, NetworkManager, SwitchType, VirtualSwitch};
 use crate::theme::{self, ButtonIntent, ButtonRole, GuiTheme};
 use crate::{log_info, log_warn};
@@ -13,7 +17,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::Read;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -77,6 +83,9 @@ pub struct NetworkingGui {
     network_monitor: Arc<Mutex<NetworkMonitor>>,
     arch_manager: Arc<Mutex<ArchNetworkManager>>,
 
+    // Tokio runtime handle for driving the managers' async APIs from the UI.
+    runtime: Option<tokio::runtime::Handle>,
+
     // GUI state
     selected_tab: NetworkTab,
     switch_creation_dialog: SwitchCreationDialog,
@@ -123,9 +132,10 @@ struct NetworkToast {
     expires_at: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 enum NetworkTab {
+    #[default]
     Overview,
     VirtualSwitches,
     LibvirtNetworks,
@@ -133,12 +143,6 @@ enum NetworkTab {
     Topology,
     PacketCapture,
     ArchConfig,
-}
-
-impl Default for NetworkTab {
-    fn default() -> Self {
-        NetworkTab::Overview
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +227,7 @@ impl NetworkingGui {
             libvirt_manager,
             network_monitor,
             arch_manager,
+            runtime: None,
 
             selected_tab: NetworkTab::Overview,
             switch_creation_dialog: SwitchCreationDialog {
@@ -294,6 +299,35 @@ impl NetworkingGui {
         }
     }
 
+    /// Inject the Tokio runtime handle used to drive the managers' async APIs.
+    pub fn set_runtime(&mut self, handle: tokio::runtime::Handle) {
+        self.runtime = Some(handle);
+    }
+
+    /// Drive a manager future to completion on the shared runtime.
+    ///
+    /// Returns `None` when no runtime has been injected yet (e.g. a standalone
+    /// `NetworkingGui::new()` used in tests), allowing callers to degrade
+    /// gracefully instead of panicking.
+    ///
+    /// # Locking invariant
+    ///
+    /// Callers typically lock a manager's `std::sync::Mutex` and hold the guard
+    /// across the `.await` inside the future they pass here. That is sound (and
+    /// the `clippy::await_holding_lock` allowance on those callers is justified)
+    /// because this drives the future synchronously on the calling UI thread:
+    /// the executor never yields to another task, the guard is released before
+    /// control returns, and no other thread contends for the lock.
+    fn block_on<F: std::future::Future>(&self, fut: F) -> Option<F::Output> {
+        self.runtime.as_ref().map(|handle| handle.block_on(fut))
+    }
+
+    /// Standalone-window entry point: renders the networking UI as the whole
+    /// viewport. The embedded path ([`Self::show_embedded`]) is canonical under
+    /// egui 0.34's `ui`-based model; this top-level variant intentionally wraps
+    /// the content in a `CentralPanel` from a bare `Context`, for which there is
+    /// no non-deprecated replacement (the new API requires a root `Ui`).
+    #[allow(deprecated)]
     pub fn show(&mut self, ctx: &egui::Context) {
         self.begin_frame(ctx);
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -813,7 +847,7 @@ impl NetworkingGui {
             return;
         }
 
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         for (index, toast) in self.toasts.iter().enumerate() {
             let pos = Pos2::new(
                 screen.right() - 320.0,
@@ -839,11 +873,11 @@ impl NetworkingGui {
                 .fixed_pos(pos)
                 .show(ctx, |ui| {
                     ui.set_width(280.0);
-                    egui::Frame::none()
+                    egui::Frame::new()
                         .fill(bg)
                         .stroke(Stroke::new(1.0, stroke))
-                        .rounding(egui::Rounding::same(8.0))
-                        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(16, 10))
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(&toast.message)
@@ -895,7 +929,7 @@ impl NetworkingGui {
                         {
                             self.execute_pending_network_deletions();
                             self.pending_delete_networks = None;
-                            ui.close_menu();
+                            ui.close();
                         }
                         if self
                             .preset_button(ui, ButtonIntent::Cancel, None, true)
@@ -921,11 +955,10 @@ impl NetworkingGui {
                 .iter()
                 .find(|n| n.name == name)
                 .map(|n| n.active)
+                && !is_active
             {
-                if !is_active {
-                    self.toggle_libvirt_network(&name, is_active);
-                    triggered = true;
-                }
+                self.toggle_libvirt_network(&name, is_active);
+                triggered = true;
             }
         }
         if triggered {
@@ -945,11 +978,10 @@ impl NetworkingGui {
                 .iter()
                 .find(|n| n.name == name)
                 .map(|n| n.active)
+                && is_active
             {
-                if is_active {
-                    self.toggle_libvirt_network(&name, is_active);
-                    triggered = true;
-                }
+                self.toggle_libvirt_network(&name, is_active);
+                triggered = true;
             }
         }
         if triggered {
@@ -988,11 +1020,11 @@ impl NetworkingGui {
     fn metric_chip(&self, ui: &mut egui::Ui, label: &str, value: usize, role: ButtonRole) {
         let colors = theme::button_palette(self.theme, role);
         let fill = colors.fill.linear_multiply(0.25);
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, colors.stroke))
-            .rounding(egui::Rounding::same(8.0))
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .corner_radius(egui::CornerRadius::same(8))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new(label).small());
@@ -1002,11 +1034,11 @@ impl NetworkingGui {
     }
 
     fn legend_chip(&self, ui: &mut egui::Ui, label: &str, color: Color32) {
-        egui::Frame::none()
+        egui::Frame::new()
             .fill(color.linear_multiply(0.18))
             .stroke(egui::Stroke::new(1.0, color))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::style::Margin::symmetric(8.0, 4.0))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(color, "⬤");
@@ -1036,9 +1068,9 @@ impl NetworkingGui {
 
         ui.horizontal(|ui| {
             // Quick stats
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(Color32::from_gray(40))
-                .rounding(5.0)
+                .corner_radius(5.0)
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
@@ -1047,9 +1079,9 @@ impl NetworkingGui {
                     });
                 });
 
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(Color32::from_gray(40))
-                .rounding(5.0)
+                .corner_radius(5.0)
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
@@ -1058,9 +1090,9 @@ impl NetworkingGui {
                     });
                 });
 
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(Color32::from_gray(40))
-                .rounding(5.0)
+                .corner_radius(5.0)
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
@@ -1202,9 +1234,9 @@ impl NetworkingGui {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for switch in &self.switches {
                 let switch_name = switch.name.clone();
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(Color32::from_gray(30))
-                    .rounding(5.0)
+                    .corner_radius(5.0)
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1359,9 +1391,9 @@ impl NetworkingGui {
                 let network_name = network.name.clone();
                 let is_active = network.active;
                 let mut selected = self.libvirt_selection.contains(&network_name);
-                egui::Frame::none()
+                egui::Frame::new()
                     .fill(Color32::from_gray(30))
-                    .rounding(5.0)
+                    .corner_radius(5.0)
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1583,13 +1615,13 @@ impl NetworkingGui {
                 .last()
                 .map(|sample| now_epoch.saturating_sub(sample.timestamp));
 
-            egui::Frame::none()
+            egui::Frame::new()
                 .fill(if is_offline {
                     Color32::from_rgb(50, 25, 25)
                 } else {
                     Color32::from_gray(30)
                 })
-                .rounding(5.0)
+                .corner_radius(5.0)
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1858,14 +1890,14 @@ impl NetworkingGui {
 
         let mut show_scan_feedback = scanning;
         let mut scan_progress: Option<f32> = if scanning { Some(0.05) } else { None };
-        if let Some(until) = self.capture_dialog.scan_feedback_until {
-            if let Some(remaining) = until.checked_duration_since(Instant::now()) {
-                let total = CAPTURE_SCAN_FEEDBACK_WINDOW.as_secs_f32().max(0.001);
-                let done: f32 = 1.0 - (remaining.as_secs_f32() / total).clamp(0.0, 1.0);
-                let current: f32 = scan_progress.unwrap_or(0.0);
-                scan_progress = Some(current.max(done));
-                show_scan_feedback = true;
-            }
+        if let Some(until) = self.capture_dialog.scan_feedback_until
+            && let Some(remaining) = until.checked_duration_since(Instant::now())
+        {
+            let total = CAPTURE_SCAN_FEEDBACK_WINDOW.as_secs_f32().max(0.001);
+            let done: f32 = 1.0 - (remaining.as_secs_f32() / total).clamp(0.0, 1.0);
+            let current: f32 = scan_progress.unwrap_or(0.0);
+            scan_progress = Some(current.max(done));
+            show_scan_feedback = true;
         }
 
         if show_scan_feedback {
@@ -1930,10 +1962,9 @@ impl NetworkingGui {
                         if self
                             .preset_button(ui, ButtonIntent::Open, Some("in Wireshark"), true)
                             .clicked()
+                            && let Some(as_str) = path.to_str()
                         {
-                            if let Some(as_str) = path.to_str() {
-                                self.open_in_wireshark(as_str);
-                            }
+                            self.open_in_wireshark(as_str);
                         }
                         if self
                             .preset_button(ui, ButtonIntent::Delete, Some("Capture"), true)
@@ -2017,10 +2048,10 @@ impl NetworkingGui {
             }
         }
 
-        if self.arch_task_until.is_none() {
-            if let Some(message) = &self.arch_task_message {
-                ui.label(message);
-            }
+        if self.arch_task_until.is_none()
+            && let Some(message) = &self.arch_task_message
+        {
+            ui.label(message);
         }
 
         ui.label("This will:");
@@ -2294,83 +2325,307 @@ impl NetworkingGui {
         }
     }
 
-    // Action implementations (these would contain actual async calls in a real implementation)
+    // Action implementations backed by the underlying managers. Each routes
+    // through the shared Tokio runtime so the GUI stays a thin view over real
+    // manager state rather than maintaining its own duplicate shell-outs.
     fn refresh_all_data(&mut self) {
         log_info!("Refreshing all network data");
-        // Would call actual refresh methods
+        self.refresh_switches();
+        self.refresh_libvirt_networks();
+        self.refresh_topology();
+        self.last_refresh_all = Some(Instant::now());
         self.touch_refresh_feedback();
     }
 
     fn refresh_interfaces(&mut self) {
-        // Populate interfaces for switch creation dialog
-        self.switch_creation_dialog.interfaces =
-            vec!["eth0".to_string(), "eth1".to_string(), "wlan0".to_string()];
-        self.switch_creation_dialog.selected_interfaces.clear();
+        let manager = Arc::clone(&self.network_manager);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.discover_interfaces().await
+        });
+        if let Some(Err(err)) = &result {
+            log_warn!("Failed to discover interfaces: {:?}", err);
+        }
+        if result.is_some()
+            && let Ok(mgr) = self.network_manager.lock()
+        {
+            self.interfaces = mgr.list_interfaces().into_iter().cloned().collect();
+        }
+
+        // Mirror the live interface names into the switch-creation dialog so the
+        // user picks real uplinks instead of hard-coded placeholders.
+        let names: Vec<String> = self.interfaces.iter().map(|i| i.name.clone()).collect();
+        self.switch_creation_dialog.selected_interfaces = vec![false; names.len()];
+        self.switch_creation_dialog.interfaces = names;
     }
 
     fn refresh_switches(&mut self) {
         log_info!("Refreshing virtual switches");
-        // Would call network_manager.list_switches()
+        let manager = Arc::clone(&self.network_manager);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.refresh_state().await
+        });
+        match result {
+            Some(Ok(())) => {
+                if let Ok(mgr) = self.network_manager.lock() {
+                    self.switches = mgr.list_switches().into_iter().cloned().collect();
+                    self.interfaces = mgr.list_interfaces().into_iter().cloned().collect();
+                }
+            }
+            Some(Err(err)) => self.record_error(format!("Failed to refresh switches: {:?}", err)),
+            None => {}
+        }
         self.touch_refresh_feedback();
     }
 
     fn refresh_libvirt_networks(&mut self) {
         log_info!("Refreshing libvirt networks");
-        // Would call libvirt_manager.discover_networks()
+        let manager = Arc::clone(&self.libvirt_manager);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.discover_networks().await
+        });
+        match result {
+            Some(Ok(())) => {
+                if let Ok(mgr) = self.libvirt_manager.lock() {
+                    self.libvirt_networks = mgr.list_networks().clone();
+                }
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to refresh libvirt networks: {:?}", err))
+            }
+            None => {}
+        }
         self.touch_refresh_feedback();
     }
 
     fn refresh_topology(&mut self) {
         log_info!("Refreshing network topology");
-        // Would call network_monitor.discover_topology()
+        let manager = Arc::clone(&self.network_monitor);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            mgr.discover_topology().await
+        });
+        match result {
+            Some(Ok(topology)) => self.topology = Some(topology),
+            Some(Err(err)) => self.record_error(format!("Failed to refresh topology: {:?}", err)),
+            None => {}
+        }
         self.touch_refresh_feedback();
     }
 
     fn create_switch(&mut self) {
-        log_info!(
-            "Creating virtual switch: {}",
-            self.switch_creation_dialog.name
-        );
-        // Would call network_manager.create_virtual_switch()
-        self.record_success(format!(
-            "Requested creation of virtual switch '{}'.",
-            self.switch_creation_dialog.name
-        ));
+        let name = self.switch_creation_dialog.name.trim().to_string();
+        if name.is_empty() {
+            self.record_error("Switch name cannot be empty");
+            return;
+        }
+        let switch_type = self.switch_creation_dialog.switch_type.clone();
+        let selected: Vec<String> = self
+            .switch_creation_dialog
+            .interfaces
+            .iter()
+            .zip(self.switch_creation_dialog.selected_interfaces.iter())
+            .filter(|&(_, &sel)| sel)
+            .map(|(iface, _)| iface.clone())
+            .collect();
+
+        log_info!("Creating virtual switch: {}", name);
+        let manager = Arc::clone(&self.network_manager);
+        let create_name = name.clone();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_virtual_switch(&create_name, switch_type, None)
+                .await?;
+            for iface in &selected {
+                mgr.add_interface_to_switch(&create_name, iface).await?;
+            }
+            Ok::<(), crate::NovaError>(())
+        });
+        match result {
+            Some(Ok(())) => {
+                self.record_success(format!("Created virtual switch '{}'.", name));
+                self.refresh_switches();
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to create switch '{}': {:?}", name, err))
+            }
+            None => self.record_error("Runtime unavailable; cannot create switch"),
+        }
     }
 
     fn delete_switch(&mut self, name: &str) {
         log_info!("Deleting virtual switch: {}", name);
-        // Would call network_manager.delete_virtual_switch()
-        self.record_success(format!("Requested deletion of switch '{}'.", name));
+        let manager = Arc::clone(&self.network_manager);
+        let target = name.to_string();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.delete_virtual_switch(&target).await
+        });
+        match result {
+            Some(Ok(())) => {
+                self.record_success(format!("Deleted switch '{}'.", name));
+                self.refresh_switches();
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to delete switch '{}': {:?}", name, err))
+            }
+            None => self.record_error("Runtime unavailable; cannot delete switch"),
+        }
     }
 
     fn create_libvirt_network(&mut self) {
-        log_info!(
-            "Creating libvirt network: {}",
-            self.network_creation_dialog.name
-        );
-        // Would call libvirt_manager.create_network()
-        self.record_success(format!(
-            "Requested creation of libvirt network '{}'.",
-            self.network_creation_dialog.name
-        ));
+        let network = match self.build_libvirt_network_from_dialog() {
+            Ok(network) => network,
+            Err(err) => {
+                self.record_error(err);
+                return;
+            }
+        };
+        let name = network.name.clone();
+        log_info!("Creating libvirt network: {}", name);
+        let manager = Arc::clone(&self.libvirt_manager);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.create_network(&network).await
+        });
+        match result {
+            Some(Ok(())) => {
+                self.record_success(format!("Created libvirt network '{}'.", name));
+                self.refresh_libvirt_networks();
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to create network '{}': {:?}", name, err))
+            }
+            None => self.record_error("Runtime unavailable; cannot create network"),
+        }
+    }
+
+    /// Translate the network-creation dialog fields into a `LibvirtNetwork`,
+    /// validating the user-supplied addresses up front.
+    fn build_libvirt_network_from_dialog(&self) -> std::result::Result<LibvirtNetwork, String> {
+        let dialog = &self.network_creation_dialog;
+        let name = dialog.name.trim();
+        if name.is_empty() {
+            return Err("Network name cannot be empty".to_string());
+        }
+
+        let gateway = Ipv4Addr::from_str(dialog.gateway.trim())
+            .map_err(|_| format!("Invalid gateway address '{}'", dialog.gateway))?;
+
+        let dhcp = if dialog.dhcp_enabled {
+            let start = Ipv4Addr::from_str(dialog.dhcp_start.trim())
+                .map_err(|_| format!("Invalid DHCP start address '{}'", dialog.dhcp_start))?;
+            let end = Ipv4Addr::from_str(dialog.dhcp_end.trim())
+                .map_err(|_| format!("Invalid DHCP end address '{}'", dialog.dhcp_end))?;
+            Some(DhcpRange {
+                start,
+                end,
+                hosts: Vec::new(),
+            })
+        } else {
+            None
+        };
+
+        let forward = match dialog.network_type.as_str() {
+            "NAT" => Some(ForwardMode {
+                mode: "nat".to_string(),
+                dev: None,
+                interfaces: Vec::new(),
+            }),
+            "Bridge" => Some(ForwardMode {
+                mode: "bridge".to_string(),
+                dev: None,
+                interfaces: Vec::new(),
+            }),
+            // "Isolated" (or anything else) -> no forwarding.
+            _ => None,
+        };
+
+        Ok(LibvirtNetwork {
+            name: name.to_string(),
+            uuid: None,
+            forward,
+            bridge: Some(BridgeConfig {
+                name: format!("virbr-{}", name),
+                stp: Some(true),
+                delay: Some(0),
+            }),
+            ip: Some(IpConfig {
+                address: gateway,
+                netmask: Ipv4Addr::new(255, 255, 255, 0),
+                dhcp,
+            }),
+            dns: None,
+            autostart: dialog.autostart,
+            active: false,
+        })
     }
 
     fn delete_libvirt_network(&mut self, name: &str) {
         log_info!("Deleting libvirt network: {}", name);
-        // Would call libvirt_manager.delete_network()
-        self.record_success(format!("Requested deletion of libvirt network '{}'.", name));
+        let manager = Arc::clone(&self.libvirt_manager);
+        let target = name.to_string();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mut mgr = manager.lock().unwrap();
+            mgr.delete_network(&target).await
+        });
+        match result {
+            Some(Ok(())) => {
+                self.record_success(format!("Deleted libvirt network '{}'.", name));
+                self.refresh_libvirt_networks();
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to delete network '{}': {:?}", name, err))
+            }
+            None => self.record_error("Runtime unavailable; cannot delete network"),
+        }
     }
 
     fn toggle_libvirt_network(&mut self, name: &str, currently_active: bool) {
-        if currently_active {
-            log_info!("Stopping libvirt network: {}", name);
-            // Would call libvirt_manager.stop_network()
-            self.record_success(format!("Requested stop for libvirt network '{}'.", name));
-        } else {
-            log_info!("Starting libvirt network: {}", name);
-            // Would call libvirt_manager.start_network()
-            self.record_success(format!("Requested start for libvirt network '{}'.", name));
+        let manager = Arc::clone(&self.libvirt_manager);
+        let target = name.to_string();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            if currently_active {
+                mgr.stop_network(&target).await
+            } else {
+                mgr.start_network(&target).await
+            }
+        });
+        match result {
+            Some(Ok(())) => {
+                let verb = if currently_active {
+                    "Stopped"
+                } else {
+                    "Started"
+                };
+                self.record_success(format!("{} libvirt network '{}'.", verb, name));
+                self.refresh_libvirt_networks();
+            }
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to toggle network '{}': {:?}", name, err))
+            }
+            None => self.record_error("Runtime unavailable; cannot toggle network"),
         }
     }
 
@@ -2378,13 +2633,29 @@ impl NetworkingGui {
         self.monitoring_enabled = !self.monitoring_enabled;
         if self.monitoring_enabled {
             log_info!("Starting network monitoring");
-            // Would call network_monitor.start_monitoring()
-            self.record_success("Network monitoring enabled");
+            let interfaces: Vec<String> = self.interfaces.iter().map(|i| i.name.clone()).collect();
+            let interval = self.monitoring_poll_secs;
+            let manager = Arc::clone(&self.network_monitor);
+            // Lock held across the await: sound here, see `block_on` docs.
+            #[allow(clippy::await_holding_lock)]
+            let result = self.block_on(async move {
+                let mut mgr = manager.lock().unwrap();
+                mgr.start_monitoring(interfaces, interval).await
+            });
+            match result {
+                Some(Ok(())) => self.record_success("Network monitoring enabled"),
+                Some(Err(err)) => {
+                    self.record_error(format!("Failed to start monitoring: {:?}", err))
+                }
+                None => self.record_error("Runtime unavailable; cannot start monitoring"),
+            }
             self.last_monitoring_poll = None;
             self.offline_interfaces.clear();
         } else {
             log_info!("Stopping network monitoring");
-            // Would call network_monitor.stop_monitoring()
+            if let Ok(mut mgr) = self.network_monitor.lock() {
+                mgr.stop_monitoring();
+            }
             self.record_success("Network monitoring disabled");
             self.offline_interfaces.clear();
         }
@@ -2392,39 +2663,110 @@ impl NetworkingGui {
     }
 
     fn start_capture(&mut self) {
-        log_info!(
-            "Starting packet capture on {}",
-            self.capture_dialog.interface
-        );
-        // Would call network_monitor.start_packet_capture()
-        // Add to active captures list
-        self.capture_dialog
-            .active_captures
-            .push(format!("capture-{}", self.capture_dialog.interface));
-        self.capture_dialog.last_file_scan = None;
-        self.record_success("Packet capture started");
+        let interface = self.capture_dialog.interface.trim().to_string();
+        if interface.is_empty() {
+            self.record_error("Select an interface for packet capture");
+            return;
+        }
+        let output_file = if self.capture_dialog.output_file.trim().is_empty() {
+            format!("/tmp/nova-capture-{}.pcap", interface)
+        } else {
+            self.capture_dialog.output_file.trim().to_string()
+        };
+        let filter = {
+            let f = self.capture_dialog.filter.trim();
+            if f.is_empty() {
+                None
+            } else {
+                Some(f.to_string())
+            }
+        };
+        let duration = self.capture_dialog.duration.trim().parse::<u64>().ok();
+        let packet_count = self.capture_dialog.packet_count.trim().parse::<u64>().ok();
+
+        let config = PacketCaptureConfig {
+            interface: interface.clone(),
+            filter,
+            duration,
+            packet_count,
+            output_file,
+        };
+
+        log_info!("Starting packet capture on {}", interface);
+        let manager = Arc::clone(&self.network_monitor);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            mgr.start_packet_capture(&config).await
+        });
+        match result {
+            Some(Ok(capture_id)) => {
+                self.capture_dialog.active_captures.push(capture_id);
+                self.capture_dialog.last_file_scan = None;
+                self.record_success("Packet capture started");
+            }
+            Some(Err(err)) => self.record_error(format!("Failed to start capture: {:?}", err)),
+            None => self.record_error("Runtime unavailable; cannot start capture"),
+        }
     }
 
     fn stop_capture(&mut self, capture_id: &str) {
         log_info!("Stopping packet capture: {}", capture_id);
-        // Would call network_monitor.stop_packet_capture()
-        self.capture_dialog
-            .active_captures
-            .retain(|id| id != capture_id);
-        self.capture_dialog.last_file_scan = None;
-        self.record_success(format!("Packet capture '{}' stopped", capture_id));
+        let manager = Arc::clone(&self.network_monitor);
+        let id = capture_id.to_string();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            mgr.stop_packet_capture(&id).await
+        });
+        match result {
+            Some(Ok(())) => {
+                self.capture_dialog
+                    .active_captures
+                    .retain(|c| c != capture_id);
+                self.capture_dialog.last_file_scan = None;
+                self.record_success(format!("Packet capture '{}' stopped", capture_id));
+            }
+            Some(Err(err)) => self.record_error(format!("Failed to stop capture: {:?}", err)),
+            None => self.record_error("Runtime unavailable; cannot stop capture"),
+        }
     }
 
     fn open_in_wireshark(&mut self, file_path: &str) {
         log_info!("Opening {} in Wireshark", file_path);
-        // Would call network_monitor.launch_wireshark()
-        self.record_success(format!("Launching Wireshark with {}", file_path));
+        let manager = Arc::clone(&self.network_monitor);
+        let path = file_path.to_string();
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            mgr.launch_wireshark(&path).await
+        });
+        match result {
+            Some(Ok(())) => self.record_success(format!("Launching Wireshark with {}", file_path)),
+            Some(Err(err)) => self.record_error(format!("Failed to launch Wireshark: {:?}", err)),
+            None => self.record_error("Runtime unavailable; cannot launch Wireshark"),
+        }
     }
 
     fn apply_arch_optimizations(&mut self) {
         log_info!("Applying Arch Linux optimizations");
-        // Would call arch_manager.optimize_for_virtualization()
-        self.record_success("Arch Linux virtualization optimizations queued");
+        let manager = Arc::clone(&self.arch_manager);
+        // Lock held across the await: sound here, see `block_on` docs.
+        #[allow(clippy::await_holding_lock)]
+        let result = self.block_on(async move {
+            let mgr = manager.lock().unwrap();
+            mgr.optimize_for_virtualization().await
+        });
+        match result {
+            Some(Ok(())) => self.record_success("Arch Linux virtualization optimizations applied"),
+            Some(Err(err)) => {
+                self.record_error(format!("Failed to apply optimizations: {:?}", err))
+            }
+            None => self.record_error("Runtime unavailable; cannot apply optimizations"),
+        }
     }
 }
 

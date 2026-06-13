@@ -176,7 +176,7 @@ impl StoragePoolManager {
 
         // Get pools from virsh
         let output = Command::new("virsh")
-            .args(&["pool-list", "--all", "--name"])
+            .args(["pool-list", "--all", "--name"])
             .output()
             .map_err(|e| {
                 log_error!("Failed to list pools: {}", e);
@@ -191,10 +191,10 @@ impl StoragePoolManager {
 
         for line in pool_names.lines() {
             let name = line.trim();
-            if !name.is_empty() {
-                if let Ok(pool) = self.get_pool_info(name).await {
-                    self.pools.insert(name.to_string(), pool);
-                }
+            if !name.is_empty()
+                && let Ok(pool) = self.get_pool_info(name).await
+            {
+                self.pools.insert(name.to_string(), pool);
             }
         }
 
@@ -205,7 +205,7 @@ impl StoragePoolManager {
     /// Get detailed information about a pool
     async fn get_pool_info(&self, name: &str) -> Result<StoragePool> {
         let output = Command::new("virsh")
-            .args(&["pool-dumpxml", name])
+            .args(["pool-dumpxml", name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -279,7 +279,7 @@ impl StoragePoolManager {
     /// Check if a pool is active
     fn is_pool_active(&self, name: &str) -> bool {
         Command::new("virsh")
-            .args(&["pool-info", name])
+            .args(["pool-info", name])
             .output()
             .map(|output| {
                 if output.status.success() {
@@ -295,27 +295,27 @@ impl StoragePoolManager {
     /// Get pool capacity using df
     fn get_pool_capacity(&self, path: &Path) -> PoolCapacity {
         let output = Command::new("df")
-            .args(&["-B1", path.to_str().unwrap_or("/")])
+            .args(["-B1", path.to_str().unwrap_or("/")])
             .output()
             .ok();
 
-        if let Some(output) = output {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(line) = stdout.lines().nth(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 4 {
-                        let total = parts[1].parse::<u64>().unwrap_or(0);
-                        let used = parts[2].parse::<u64>().unwrap_or(0);
-                        let available = parts[3].parse::<u64>().unwrap_or(0);
+        if let Some(output) = output
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(line) = stdout.lines().nth(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let total = parts[1].parse::<u64>().unwrap_or(0);
+                    let used = parts[2].parse::<u64>().unwrap_or(0);
+                    let available = parts[3].parse::<u64>().unwrap_or(0);
 
-                        return PoolCapacity {
-                            total_bytes: total,
-                            used_bytes: used,
-                            available_bytes: available,
-                            allocation_bytes: used,
-                        };
-                    }
+                    return PoolCapacity {
+                        total_bytes: total,
+                        used_bytes: used,
+                        available_bytes: available,
+                        allocation_bytes: used,
+                    };
                 }
             }
         }
@@ -333,7 +333,7 @@ impl StoragePoolManager {
     fn detect_btrfs_config(&self, path: &Path) -> PoolConfig {
         // Check if path is on btrfs
         let output = Command::new("stat")
-            .args(&["-f", "-c", "%T", path.to_str().unwrap_or("/")])
+            .args(["-f", "-c", "%T", path.to_str().unwrap_or("/")])
             .output()
             .ok();
 
@@ -413,7 +413,7 @@ impl StoragePoolManager {
 
         // Define pool in libvirt
         let output = Command::new("virsh")
-            .args(&["pool-define", &temp_file])
+            .args(["pool-define", &temp_file])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -424,13 +424,13 @@ impl StoragePoolManager {
 
         // Start the pool
         let _ = Command::new("virsh")
-            .args(&["pool-start", &pool.name])
+            .args(["pool-start", &pool.name])
             .output();
 
         // Autostart if requested
         if pool.autostart {
             let _ = Command::new("virsh")
-                .args(&["pool-autostart", &pool.name])
+                .args(["pool-autostart", &pool.name])
                 .output();
         }
 
@@ -455,7 +455,7 @@ impl StoragePoolManager {
                 let subvol_path = mount_point.join(subvol);
 
                 let output = Command::new("btrfs")
-                    .args(&["subvolume", "create", subvol_path.to_str().unwrap()])
+                    .args(["subvolume", "create", subvol_path.to_str().unwrap()])
                     .output()
                     .map_err(|e| {
                         log_error!("Failed to create btrfs subvolume: {}", e);
@@ -472,7 +472,7 @@ impl StoragePoolManager {
                 match compression {
                     BtrfsCompression::Zstd { level } => {
                         let _ = Command::new("btrfs")
-                            .args(&[
+                            .args([
                                 "property",
                                 "set",
                                 subvol_path.to_str().unwrap(),
@@ -483,7 +483,7 @@ impl StoragePoolManager {
                     }
                     BtrfsCompression::Lzo => {
                         let _ = Command::new("btrfs")
-                            .args(&[
+                            .args([
                                 "property",
                                 "set",
                                 subvol_path.to_str().unwrap(),
@@ -494,7 +494,7 @@ impl StoragePoolManager {
                     }
                     BtrfsCompression::Zlib => {
                         let _ = Command::new("btrfs")
-                            .args(&[
+                            .args([
                                 "property",
                                 "set",
                                 subvol_path.to_str().unwrap(),
@@ -538,7 +538,7 @@ impl StoragePoolManager {
             fs::write(&temp_file, xml).map_err(|_| NovaError::SystemCommandFailed)?;
 
             let output = Command::new("virsh")
-                .args(&["pool-define", &temp_file])
+                .args(["pool-define", &temp_file])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -549,7 +549,7 @@ impl StoragePoolManager {
 
             // Start the pool
             let output = Command::new("virsh")
-                .args(&["pool-start", &pool.name])
+                .args(["pool-start", &pool.name])
                 .output()
                 .map_err(|_| NovaError::SystemCommandFailed)?;
 
@@ -615,17 +615,17 @@ impl StoragePoolManager {
         log_info!("Deleting storage pool: {}", name);
 
         // Stop the pool
-        let _ = Command::new("virsh").args(&["pool-destroy", name]).output();
+        let _ = Command::new("virsh").args(["pool-destroy", name]).output();
 
         // Undefine the pool
         let args = vec!["pool-undefine", name];
         if delete_volumes {
             // Note: virsh doesn't have --delete-volumes, we handle it manually
-            if let Some(pool) = self.pools.get(name) {
-                if pool.path.exists() {
-                    log_warn!("Deleting pool directory: {}", pool.path.display());
-                    fs::remove_dir_all(&pool.path).ok();
-                }
+            if let Some(pool) = self.pools.get(name)
+                && pool.path.exists()
+            {
+                log_warn!("Deleting pool directory: {}", pool.path.display());
+                fs::remove_dir_all(&pool.path).ok();
             }
         }
 
@@ -664,7 +664,7 @@ impl StoragePoolManager {
         };
 
         let output = Command::new("virsh")
-            .args(&[
+            .args([
                 "vol-create-as",
                 pool_name,
                 volume_name,
@@ -697,7 +697,7 @@ impl StoragePoolManager {
 
         self.volumes
             .entry(pool_name.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(volume.clone());
 
         log_info!("Volume {} created successfully", volume_name);
@@ -707,7 +707,7 @@ impl StoragePoolManager {
     /// Get volume path
     fn get_volume_path(&self, pool_name: &str, volume_name: &str) -> Result<PathBuf> {
         let output = Command::new("virsh")
-            .args(&["vol-path", volume_name, "--pool", pool_name])
+            .args(["vol-path", volume_name, "--pool", pool_name])
             .output()
             .map_err(|_| NovaError::SystemCommandFailed)?;
 

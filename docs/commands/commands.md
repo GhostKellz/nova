@@ -504,7 +504,7 @@ nova gpu quick-fix unbind --device 0000:01:00.0
 nova gpu quick-fix reattach --device 0000:01:00.0
 ```
 
-When a Blackwell/RTX 50-series GPU is detected, the CLI surfaces the minimum NVIDIA driver (`560+`), recommended kernel (`6.9+`), and encourages enabling TCC for low-latency Looking Glass workflows. See `docs/rtx50-series.md` for the full playbook.
+When a Blackwell/RTX 50-series GPU is detected, the CLI surfaces the minimum NVIDIA driver (`560+`), recommended kernel (`7.0+`), and encourages enabling TCC for low-latency Looking Glass workflows. See [../vfio/rtx-50-series.md](../vfio/rtx-50-series.md) for the full playbook.
 
 `nova gpu list` now includes a `STATUS` column (host/vfio/reserved) sourced from live probing, while `nova gpu status` prints remediation hints tailored to each device. The `quick-fix` verbs wrap common recovery actions—loading VFIO modules, force-unbinding a stuck host driver, or putting a device back on the desktop stack—without touching VM reservations.
 

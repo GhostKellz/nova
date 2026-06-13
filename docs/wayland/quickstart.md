@@ -170,9 +170,9 @@ glxinfo | grep "OpenGL renderer"
 
 For detailed information, see:
 
-- [Wayland Integration Guide](./WAYLAND_INTEGRATION.md) - Complete technical documentation
+- [Wayland Integration Guide](integration.md) - complete technical documentation
 - [Main README](../README.md) - General Nova documentation
-- [Tokyo Night Themes](./TOKYO_NIGHT_THEMES.md) - Theme customization
+- [GUI Theme Notes](../gui/overview.md) - theme customization
 
 ## 🐛 Report Issues
 
@@ -197,4 +197,4 @@ Nova on Wayland provides the smoothest, most modern virtualization management ex
 **Next Steps:**
 - Create your first VM: `nova vm create my-vm --os ubuntu --cpu 4 --ram 8192`
 - Explore the GUI: `nova gui`
-- Read the full docs: `docs/WAYLAND_INTEGRATION.md`
+- Read the full docs: `docs/wayland/integration.md`

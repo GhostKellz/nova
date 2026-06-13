@@ -162,6 +162,16 @@ enum Commands {
         #[command(subcommand)]
         support_command: SupportCommands,
     },
+    /// Performance optimization for VMs
+    Optimize {
+        #[command(subcommand)]
+        optimize_command: OptimizeCommands,
+    },
+    /// Looking Glass integration for GPU passthrough display
+    LookingGlass {
+        #[command(subcommand)]
+        lg_command: LookingGlassCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -796,7 +806,116 @@ enum SupportCommands {
         json: bool,
     },
     /// Run Arch-focused kernel/userland preflight checks
-    Preflight,
+    Preflight {
+        /// Automatically fix detected issues where possible
+        #[arg(long)]
+        fix: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OptimizeCommands {
+    /// Apply a performance profile for a VM
+    Apply {
+        /// Performance profile to apply
+        #[arg(value_enum)]
+        profile: PerformanceProfileArg,
+        /// VM name (used to determine resource requirements)
+        #[arg(long)]
+        vm: Option<String>,
+        /// Number of CPU cores for the VM (default: 4)
+        #[arg(long, default_value = "4")]
+        cores: u32,
+        /// Memory in MB for the VM (default: 8192)
+        #[arg(long, default_value = "8192")]
+        memory: u64,
+    },
+    /// Show current system performance state
+    Status,
+    /// Show CPU topology and recommended isolation
+    Topology {
+        /// Number of cores to allocate for VM
+        #[arg(long, default_value = "4")]
+        cores: u32,
+    },
+    /// Generate CPU pinning XML for libvirt
+    Pinning {
+        /// Number of vCPUs for the VM
+        cores: u32,
+    },
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum PerformanceProfileArg {
+    /// Optimized for gaming: low latency, CPU isolation, no power saving
+    Gaming,
+    /// Balanced settings for productivity workloads
+    Productivity,
+    /// Maximum performance for compute-heavy tasks
+    Compute,
+    /// Reset to system defaults
+    Default,
+}
+
+impl From<PerformanceProfileArg> for nova::performance::PerformanceProfile {
+    fn from(arg: PerformanceProfileArg) -> Self {
+        match arg {
+            PerformanceProfileArg::Gaming => nova::performance::PerformanceProfile::Gaming,
+            PerformanceProfileArg::Productivity => {
+                nova::performance::PerformanceProfile::Productivity
+            }
+            PerformanceProfileArg::Compute => nova::performance::PerformanceProfile::Compute,
+            PerformanceProfileArg::Default => nova::performance::PerformanceProfile::Default,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum LookingGlassCommands {
+    /// Check system requirements for Looking Glass
+    Check,
+    /// Setup Looking Glass for a VM
+    Setup {
+        /// VM name
+        vm: String,
+        /// GPU PCI address (e.g., 0000:01:00.0)
+        #[arg(long)]
+        gpu: Option<String>,
+        /// Looking Glass profile
+        #[arg(long, value_enum, default_value = "gaming")]
+        profile: LookingGlassProfileArg,
+        /// Framebuffer size in MB (auto-calculated if not specified)
+        #[arg(long)]
+        framebuffer: Option<u64>,
+    },
+    /// Launch Looking Glass client for a VM
+    Client {
+        /// VM name
+        vm: String,
+        /// Auto-connect when VM starts
+        #[arg(long)]
+        auto: bool,
+    },
+    /// Setup hugepages for Looking Glass
+    SetupHugepages {
+        /// Number of hugepages (2MB each)
+        #[arg(long, default_value = "4096")]
+        count: u32,
+    },
+    /// Show Windows guest driver installation instructions
+    WindowsSetup,
+    /// Show Arch Linux installation instructions
+    ArchSetup,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum LookingGlassProfileArg {
+    /// Low latency, relative mouse, vsync off
+    Gaming,
+    /// Absolute mouse, vsync on, higher resolution
+    Productivity,
+    /// Balanced settings for capture
+    Streaming,
 }
 
 fn parse_cli_dhcp_range(range: &str) -> Result<(Ipv4Addr, Ipv4Addr)> {
@@ -1020,8 +1139,8 @@ Container Templates:"
                 );
 
                 println!(
-                    "{:<20} {:<15} {:<15} {:<10} {}",
-                    "NAME", "CATEGORY", "DIFFICULTY", "GPU", "DESCRIPTION"
+                    "{:<20} {:<15} {:<15} {:<10} DESCRIPTION",
+                    "NAME", "CATEGORY", "DIFFICULTY", "GPU"
                 );
                 println!("{}", "=".repeat(100));
 
@@ -1106,8 +1225,8 @@ Volumes:"
                 network_manager.refresh_state().await?;
 
                 println!(
-                    "{:<16} {:<10} {:<10} {:<10} {}",
-                    "BRIDGE", "TYPE", "STATE", "ORIGIN", "MEMBERS"
+                    "{:<16} {:<10} {:<10} {:<10} MEMBERS",
+                    "BRIDGE", "TYPE", "STATE", "ORIGIN"
                 );
                 println!("{}", "-".repeat(70));
 
@@ -1148,8 +1267,8 @@ Volumes:"
                 }
 
                 println!(
-                    "\n{:<16} {:<8} {:<12} {:<18} {}",
-                    "INTERFACE", "STATE", "BRIDGE", "IP", "MAC"
+                    "\n{:<16} {:<8} {:<12} {:<18} MAC",
+                    "INTERFACE", "STATE", "BRIDGE", "IP"
                 );
                 println!("{}", "-".repeat(80));
 
@@ -1166,7 +1285,7 @@ Volumes:"
                             InterfaceState::Unknown => "?",
                         };
 
-                        let bridge = iface.bridge.as_ref().map(|b| b.as_str()).unwrap_or("-");
+                        let bridge = iface.bridge.as_deref().unwrap_or("-");
 
                         let ip = iface
                             .ip_address
@@ -1475,7 +1594,7 @@ Volumes:"
                 }
                 if gpu_manager.any_blackwell_gpus() {
                     println!(
-                        "\nRTX 50-series GPU detected — install NVIDIA driver 560+, kernel 6.9+, and enable TCC for Looking Glass workflows (see docs/rtx50-series.md)."
+                        "\nRTX 50-series GPU detected — install NVIDIA driver 560+, kernel 7.0+, and enable TCC for Looking Glass workflows (see docs/vfio/rtx-50-series.md)."
                     );
                 }
             }
@@ -1857,7 +1976,7 @@ Volumes:"
                 UsbCommands::List => {
                     let devices = usb_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if devices.is_empty() {
                         println!("No USB devices detected");
@@ -1888,13 +2007,13 @@ Volumes:"
                 } => {
                     usb_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if let Some(device) = usb_manager.find_device(&vendor, &product).cloned() {
                         usb_manager
                             .attach_device(&vm, &device)
                             .await
-                            .map_err(|e| NovaError::LibvirtError(e))?;
+                            .map_err(NovaError::LibvirtError)?;
                         println!("✅ USB device attached to VM '{}'", vm);
                     } else {
                         println!("❌ USB device {}:{} not found", vendor, product);
@@ -1907,13 +2026,13 @@ Volumes:"
                 } => {
                     usb_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if let Some(device) = usb_manager.find_device(&vendor, &product).cloned() {
                         usb_manager
                             .detach_device(&vm, &device)
                             .await
-                            .map_err(|e| NovaError::LibvirtError(e))?;
+                            .map_err(NovaError::LibvirtError)?;
                         println!("✅ USB device detached from VM '{}'", vm);
                     } else {
                         println!("❌ USB device {}:{} not found", vendor, product);
@@ -1928,7 +2047,7 @@ Volumes:"
                 PciCommands::List { class: _ } => {
                     let devices = pci_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if devices.is_empty() {
                         println!("No PCI devices detected");
@@ -1956,7 +2075,7 @@ Volumes:"
                 PciCommands::Info { device } => {
                     pci_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if let Some(dev) = pci_manager.get_device(&device) {
                         nova::pci_passthrough::PciPassthroughManager::print_device_info(dev);
@@ -1967,28 +2086,28 @@ Volumes:"
                 PciCommands::Attach { vm, device } => {
                     pci_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     pci_manager
                         .assign_to_vm(&device, &vm)
-                        .map_err(|e| NovaError::LibvirtError(e))?;
+                        .map_err(NovaError::LibvirtError)?;
                     println!("✅ PCI device {} assigned to VM '{}'", device, vm);
                 }
                 PciCommands::Detach { device } => {
                     pci_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     pci_manager
                         .release_from_vm(&device)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     println!("✅ PCI device {} released", device);
                 }
                 PciCommands::Check { device } => {
                     pci_manager
                         .discover_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     let viability = pci_manager
                         .check_passthrough_viability(&device)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     viability.print();
                 }
             }
@@ -2000,7 +2119,7 @@ Volumes:"
                 SriovCommands::List => {
                     let devices = sriov_manager
                         .discover_sriov_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
 
                     if devices.is_empty() {
                         println!("No SR-IOV capable devices found");
@@ -2026,31 +2145,31 @@ Volumes:"
                 SriovCommands::Enable { pf, num_vfs } => {
                     sriov_manager
                         .discover_sriov_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     sriov_manager
                         .enable_sriov(&pf, num_vfs)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     println!("✅ SR-IOV enabled on {} with {} VFs", pf, num_vfs);
                 }
                 SriovCommands::Disable { pf } => {
                     sriov_manager
                         .disable_sriov(&pf)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     println!("✅ SR-IOV disabled on {}", pf);
                 }
                 SriovCommands::Assign { pf, vf, vm } => {
                     sriov_manager
                         .discover_sriov_devices()
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     let vf_address = sriov_manager
                         .assign_vf_to_vm(&pf, vf, &vm)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     println!("✅ VF {} assigned to VM '{}'", vf_address, vm);
                 }
                 SriovCommands::Release { vf_address } => {
                     sriov_manager
                         .release_vf(&vf_address)
-                        .map_err(|e| NovaError::ConfigError(e))?;
+                        .map_err(NovaError::ConfigError)?;
                     println!("✅ VF {} released", vf_address);
                 }
             }
@@ -2063,18 +2182,18 @@ Volumes:"
                     let _info = spice_manager
                         .get_connection_info(&vm)
                         .await
-                        .map_err(|e| NovaError::LibvirtError(e))?;
+                        .map_err(NovaError::LibvirtError)?;
                     spice_manager
                         .launch_client(&vm)
                         .await
-                        .map_err(|e| NovaError::LibvirtError(e))?;
+                        .map_err(NovaError::LibvirtError)?;
                     println!("✅ SPICE client launched for VM '{}'", vm);
                 }
                 SpiceCommands::Info { vm } => {
                     let info = spice_manager
                         .get_connection_info(&vm)
                         .await
-                        .map_err(|e| NovaError::LibvirtError(e))?;
+                        .map_err(NovaError::LibvirtError)?;
 
                     println!("SPICE Connection Info for VM '{}':", vm);
                     println!("  URI: {}", info.uri);
@@ -2097,7 +2216,7 @@ Volumes:"
                     let mut config = spice_manager
                         .get_config(&vm)
                         .cloned()
-                        .unwrap_or_else(|| SpiceConfig::default());
+                        .unwrap_or_else(SpiceConfig::default);
 
                     if let Some(enabled) = audio {
                         config.audio = enabled;
@@ -2116,7 +2235,7 @@ Volumes:"
                     spice_manager
                         .apply_config(&vm)
                         .await
-                        .map_err(|e| NovaError::LibvirtError(e))?;
+                        .map_err(NovaError::LibvirtError)?;
                     println!("✅ SPICE configuration updated for VM '{}'", vm);
                 }
             }
@@ -2162,14 +2281,15 @@ Volumes:"
                 redact,
                 no_diagnostics,
             } => {
-                let mut options = SupportBundleOptions::default();
-                options.output_dir = output;
-                options.config_path = Some(config_path.clone());
-                options.include_logs = !no_logs;
-                options.include_system = !no_system;
-                options.include_metrics = !no_metrics;
-                options.include_diagnostics = !no_diagnostics;
-                options.redact = redact;
+                let options = SupportBundleOptions {
+                    output_dir: output,
+                    config_path: Some(config_path.clone()),
+                    include_logs: !no_logs,
+                    include_system: !no_system,
+                    include_metrics: !no_metrics,
+                    include_diagnostics: !no_diagnostics,
+                    redact,
+                };
 
                 let bundle_path = support::generate_support_bundle(options).await?;
                 println!("Support bundle archived at {}", bundle_path.display());
@@ -2188,16 +2308,170 @@ Volumes:"
                     }
                 }
             }
-            SupportCommands::Preflight => {
+            SupportCommands::Preflight { fix } => {
                 let summary = preflight::run_preflight()?;
                 println!("{}", summary);
                 if !summary.is_ready() {
-                    println!(
-                        "Missing prerequisites detected. Consult COMMANDS.md → Diagnostics for remediation steps."
-                    );
+                    if fix {
+                        println!("\nAttempting to fix detected issues...\n");
+                        let fix_result = preflight::run_preflight_fix(&summary)?;
+                        println!("{}", fix_result);
+                    } else {
+                        println!(
+                            "Missing prerequisites detected. Run with --fix to attempt automatic remediation."
+                        );
+                    }
                 }
             }
         },
+        Commands::Optimize { optimize_command } => {
+            use nova::performance::{PerformanceOptimizer, PerformanceProfile};
+
+            match optimize_command {
+                OptimizeCommands::Apply {
+                    profile,
+                    vm: _,
+                    cores,
+                    memory,
+                } => {
+                    let mut optimizer = PerformanceOptimizer::new();
+                    let profile: PerformanceProfile = profile.into();
+                    let result = optimizer.apply_profile(profile, cores, memory)?;
+                    println!("{}", result);
+                }
+                OptimizeCommands::Status => {
+                    let optimizer = PerformanceOptimizer::new();
+                    let state = optimizer.check_current_state();
+                    println!("{}", state);
+                }
+                OptimizeCommands::Topology { cores } => {
+                    let mut optimizer = PerformanceOptimizer::new();
+                    let topology = optimizer.detect_topology()?;
+                    println!("=== CPU Topology ===");
+                    println!("Model: {}", topology.cpu_model);
+                    println!("Vendor: {:?}", topology.vendor);
+                    println!("Total CPUs: {}", topology.total_cpus);
+                    println!("Physical Cores: {}", topology.physical_cores);
+                    println!("Threads per Core: {}", topology.threads_per_core);
+                    println!("NUMA Nodes: {}", topology.numa_nodes);
+                    println!("\nCore Map (physical core -> logical CPUs):");
+                    let mut core_ids: Vec<_> = topology.core_map.keys().collect();
+                    core_ids.sort();
+                    for core_id in core_ids {
+                        if let Some(cpus) = topology.core_map.get(core_id) {
+                            println!("  Core {}: CPUs {:?}", core_id, cpus);
+                        }
+                    }
+                    let isolated = optimizer
+                        .apply_profile(PerformanceProfile::Gaming, cores, 8192)?
+                        .cpu_isolation_recommended;
+                    if !isolated.is_empty() {
+                        println!("\nRecommended CPUs for {} VM cores: {:?}", cores, isolated);
+                    }
+                }
+                OptimizeCommands::Pinning { cores } => {
+                    let mut optimizer = PerformanceOptimizer::new();
+                    let xml = optimizer.generate_cpu_pinning_xml(cores)?;
+                    println!("<!-- Add to VM XML (virsh edit <vm-name>) -->");
+                    println!("{}", xml);
+                }
+            }
+        }
+        Commands::LookingGlass { lg_command } => {
+            use nova::looking_glass::{
+                LookingGlassConfig, LookingGlassManager, LookingGlassProfile,
+            };
+
+            let manager = LookingGlassManager::new();
+
+            match lg_command {
+                LookingGlassCommands::Check => {
+                    let reqs = manager.check_system_requirements();
+                    reqs.print_status();
+                }
+                LookingGlassCommands::Setup {
+                    vm,
+                    gpu,
+                    profile,
+                    framebuffer,
+                } => {
+                    println!("Setting up Looking Glass for VM: {}", vm);
+
+                    let lg_profile = match profile {
+                        LookingGlassProfileArg::Gaming => LookingGlassProfile::Gaming,
+                        LookingGlassProfileArg::Productivity => LookingGlassProfile::Productivity,
+                        LookingGlassProfileArg::Streaming => LookingGlassProfile::Streaming,
+                    };
+
+                    let mut config = lg_profile.to_config();
+                    if let Some(fb_size) = framebuffer {
+                        config.framebuffer_size = fb_size;
+                    }
+
+                    // Generate IVSHMEM XML
+                    let ivshmem_xml = manager.generate_ivshmem_xml(&config);
+                    println!("\n=== IVSHMEM Device XML ===");
+                    println!("Add this to your VM's libvirt XML:");
+                    println!("{}", ivshmem_xml);
+
+                    // Generate complete VM config if GPU specified
+                    if let Some(gpu_addr) = gpu {
+                        match manager.generate_complete_vm_config(&config, &vm, &gpu_addr) {
+                            Ok(xml) => {
+                                println!("\n=== Complete VM Configuration ===");
+                                println!("{}", xml);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to generate VM config: {}", e);
+                            }
+                        }
+                    }
+
+                    // Generate client config
+                    let client_config = manager.generate_client_config(&config, &vm);
+                    println!("\n=== Looking Glass Client Config ===");
+                    println!("Save to ~/.config/looking-glass/client.ini:");
+                    println!("{}", client_config);
+                }
+                LookingGlassCommands::Client { vm, auto } => {
+                    if auto {
+                        println!("Auto-connect mode enabled for VM: {}", vm);
+                        println!("Looking Glass will automatically launch when the VM starts.");
+                        // Store auto-connect preference
+                        let config_dir = dirs::config_dir()
+                            .unwrap_or_else(|| PathBuf::from("~/.config"))
+                            .join("nova");
+                        let _ = std::fs::create_dir_all(&config_dir);
+                        let auto_file = config_dir.join(format!("lg-auto-{}.enabled", vm));
+                        let _ = std::fs::write(&auto_file, "1");
+                        println!("Auto-connect saved to: {}", auto_file.display());
+                    } else {
+                        let config = LookingGlassConfig::default();
+                        println!("Launching Looking Glass client for VM: {}", vm);
+                        tokio::runtime::Handle::current().block_on(async {
+                            if let Err(e) = manager.launch_client(&config).await {
+                                eprintln!("Failed to launch client: {}", e);
+                            }
+                        });
+                    }
+                }
+                LookingGlassCommands::SetupHugepages { count } => {
+                    println!("Setting up {} hugepages ({}MB total)...", count, count * 2);
+                    tokio::runtime::Handle::current().block_on(async {
+                        match manager.setup_hugepages(count).await {
+                            Ok(()) => println!("Hugepages configured successfully."),
+                            Err(e) => eprintln!("Failed to setup hugepages: {}", e),
+                        }
+                    });
+                }
+                LookingGlassCommands::WindowsSetup => {
+                    println!("{}", manager.generate_windows_driver_instructions());
+                }
+                LookingGlassCommands::ArchSetup => {
+                    println!("{}", manager.generate_arch_install_instructions());
+                }
+            }
+        }
     }
 
     Ok(())
@@ -2297,7 +2571,7 @@ fn gpu_status_snapshot(device_filter: Option<&str>) -> Result<String> {
     gpu_manager.discover()?;
     gpu_manager.refresh_device_status();
 
-    let mut gpus: Vec<PciDevice> = gpu_manager.list_gpus().iter().cloned().collect();
+    let mut gpus: Vec<PciDevice> = gpu_manager.list_gpus().to_vec();
     if let Some(filter) = device_filter {
         gpus.retain(|gpu| gpu.address == filter);
     }
@@ -2353,78 +2627,6 @@ fn build_gpu_status_output(gpus: &[PciDevice], reservations: &HashMap<String, St
     }
 
     buffer
-}
-
-#[cfg(test)]
-mod gpu_cli_tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn binding(driver: Option<&str>, in_use: bool, reservation: Option<&str>) -> DeviceBindingInfo {
-        DeviceBindingInfo {
-            driver: driver.map(|d| d.to_string()),
-            in_use,
-            reserved_for: reservation.map(|r| r.to_string()),
-        }
-    }
-
-    fn sample_gpu(address: &str, driver: Option<&str>, in_use: bool) -> PciDevice {
-        PciDevice {
-            address: address.to_string(),
-            vendor_id: "10de".to_string(),
-            device_id: "2684".to_string(),
-            vendor_name: "NVIDIA Corporation".to_string(),
-            device_name: "GeForce RTX".to_string(),
-            iommu_group: Some(1),
-            driver: driver.map(|d| d.to_string()),
-            in_use,
-        }
-    }
-
-    #[test]
-    fn transition_reports_binding_change() {
-        let before = binding(Some("nvidia"), true, None);
-        let after = binding(Some("vfio-pci"), false, Some("vm-dev"));
-        let message =
-            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
-
-        assert!(message.contains("Bound 0000:01:00.0"));
-        assert!(message.contains("nvidia (host active)"));
-        assert!(message.contains("vfio-pci (guest-ready)"));
-        assert!(message.contains("reserved for vm-dev"));
-    }
-
-    #[test]
-    fn transition_detects_no_change() {
-        let before = binding(Some("vfio-pci"), false, None);
-        let after = binding(Some("vfio-pci"), false, None);
-        let message =
-            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
-
-        assert_eq!(
-            message,
-            "Bound 0000:01:00.0: state unchanged (vfio-pci (guest-ready))"
-        );
-    }
-
-    #[test]
-    fn status_output_handles_no_matches() {
-        let output = build_gpu_status_output(&[], &HashMap::new());
-        assert_eq!(output, "No GPUs matched the provided filter\n");
-    }
-
-    #[test]
-    fn status_output_includes_quick_fix_guidance() {
-        let gpu = sample_gpu("0000:01:00.0", Some("nvidia"), true);
-        let mut reservations = HashMap::new();
-        reservations.insert("0000:02:00.0".to_string(), "vm-other".to_string());
-
-        let output = build_gpu_status_output(&[gpu], &reservations);
-
-        assert!(output.contains("0000:01:00.0 — GeForce RTX"));
-        assert!(output.contains("driver: nvidia"));
-        assert!(output.contains("quick-fix unbind"));
-    }
 }
 
 fn parse_size(size_str: &str) -> Result<u64> {
@@ -2530,10 +2732,11 @@ fn handle_vm_wizard(
         return Ok(());
     }
 
-    if let Some(parent) = target_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = target_path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     let mut new_content = existing_content.unwrap_or_default();
@@ -2599,7 +2802,7 @@ fn resolve_wizard_network(
     }
 
     let mut networks: Vec<String> = config.network.keys().cloned().collect();
-    networks.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    networks.sort_by_key(|a| a.to_lowercase());
 
     if networks.is_empty() {
         println!(
@@ -2642,12 +2845,12 @@ fn resolve_wizard_network(
             return Ok(choice);
         }
 
-        if let Ok(index) = trimmed.parse::<usize>() {
-            if (1..=networks.len()).contains(&index) {
-                let choice = networks[index - 1].clone();
-                println!("➡️  Using network '{}'.", choice);
-                return Ok(choice);
-            }
+        if let Ok(index) = trimmed.parse::<usize>()
+            && (1..=networks.len()).contains(&index)
+        {
+            let choice = networks[index - 1].clone();
+            println!("➡️  Using network '{}'.", choice);
+            return Ok(choice);
         }
 
         if let Some(choice) = networks
@@ -2718,4 +2921,76 @@ fn check_qemu_available() -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod gpu_cli_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn binding(driver: Option<&str>, in_use: bool, reservation: Option<&str>) -> DeviceBindingInfo {
+        DeviceBindingInfo {
+            driver: driver.map(|d| d.to_string()),
+            in_use,
+            reserved_for: reservation.map(|r| r.to_string()),
+        }
+    }
+
+    fn sample_gpu(address: &str, driver: Option<&str>, in_use: bool) -> PciDevice {
+        PciDevice {
+            address: address.to_string(),
+            vendor_id: "10de".to_string(),
+            device_id: "2684".to_string(),
+            vendor_name: "NVIDIA Corporation".to_string(),
+            device_name: "GeForce RTX".to_string(),
+            iommu_group: Some(1),
+            driver: driver.map(|d| d.to_string()),
+            in_use,
+        }
+    }
+
+    #[test]
+    fn transition_reports_binding_change() {
+        let before = binding(Some("nvidia"), true, None);
+        let after = binding(Some("vfio-pci"), false, Some("vm-dev"));
+        let message =
+            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
+
+        assert!(message.contains("Bound 0000:01:00.0"));
+        assert!(message.contains("nvidia (host active)"));
+        assert!(message.contains("vfio-pci (guest-ready)"));
+        assert!(message.contains("reserved for vm-dev"));
+    }
+
+    #[test]
+    fn transition_detects_no_change() {
+        let before = binding(Some("vfio-pci"), false, None);
+        let after = binding(Some("vfio-pci"), false, None);
+        let message =
+            compose_binding_transition_cli("Bound", "0000:01:00.0", Some(before), Some(after));
+
+        assert_eq!(
+            message,
+            "Bound 0000:01:00.0: state unchanged (vfio-pci (guest-ready))"
+        );
+    }
+
+    #[test]
+    fn status_output_handles_no_matches() {
+        let output = build_gpu_status_output(&[], &HashMap::new());
+        assert_eq!(output, "No GPUs matched the provided filter\n");
+    }
+
+    #[test]
+    fn status_output_includes_quick_fix_guidance() {
+        let gpu = sample_gpu("0000:01:00.0", Some("nvidia"), true);
+        let mut reservations = HashMap::new();
+        reservations.insert("0000:02:00.0".to_string(), "vm-other".to_string());
+
+        let output = build_gpu_status_output(&[gpu], &reservations);
+
+        assert!(output.contains("0000:01:00.0 — GeForce RTX"));
+        assert!(output.contains("driver: nvidia"));
+        assert!(output.contains("quick-fix unbind"));
+    }
 }

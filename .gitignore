@@ -1,16 +1,13 @@
 archive/
-
+tasks/
 CLAUDE.md
-TODO.md
-PRIORITY.md
-PRIORITY_GP.md
 
 
 # Rust
 target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+
 
 # Build artifacts
 debug/
