@@ -39,7 +39,7 @@ nix = { version = "0.31", features = ["fs", "hostname"] }
 tokio = { version = "1.0", features = ["full"] }
 
 # GUI framework
-egui = "0.34"
+egui = "0.35"
 eframe = { version = "0.34", default-features = false, features = [
     "accesskit",
     "default_fonts",
